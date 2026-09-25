@@ -626,3 +626,4 @@ if st.button("✨ Generate Recap Video", type="primary"):
 
     with open(final_path, "rb") as f:
     st.download_button("📥 Recap Video Download", f, file_name="final_recap.mp4")
+# ← ✅ st.download — ၄ space — ပိုရမယ်
