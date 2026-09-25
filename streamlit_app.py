@@ -24,41 +24,8 @@ VOXCPM_SPACES = [
 ]
 
 PASSWORD = "voxcpm2026"
-MYANMAR_FONT = "Pyidaungsu"
-FONT_URL = "https://github.com/AungMyoKyaw/Myanmar-Unicode-Fonts/raw/master/Pyidaungsu/pyidaungsu.ttf"
-
-# ============================================================
-# Font Install (Streamlit Cloud — Linux)
-# ============================================================
-def install_myanmar_font():
-    """Pyidaungsu Font — Download + Install"""
-    font_dir = "/usr/share/fonts/truetype/myanmar"
-    font_path = os.path.join(font_dir, "pyidaungsu.ttf")
-    
-    try:
-        os.makedirs(font_dir, exist_ok=True)
-        
-        if not os.path.exists(font_path):
-            result = subprocess.run(
-                ["wget", "-q", FONT_URL, "-O", font_path],
-                capture_output=True, text=True
-            )
-            if result.returncode != 0:
-                st.warning(f"⚠️ Font download fail: {result.stderr[:200]}")
-                return None
-            
-            # Font cache update
-            subprocess.run(["fc-cache", "-f"], capture_output=True)
-        
-        if os.path.exists(font_path):
-            return font_path
-    except Exception as e:
-        st.warning(f"⚠️ Font install error: {e}")
-    
-    return None
-
-# Install Font — App Start
-FONT_PATH = install_myanmar_font()
+FONT_FILE = "akkayar.ttf"
+MYANMAR_FONT = "Akkhayar21"   # ⭐ — Font Internal Name
 
 # ============================================================
 # Password
@@ -92,13 +59,12 @@ def srt_time(sec):
 
 
 def script_to_srt(script, audio_duration, srt_path, max_chars=30):
-    """Script + Audio Duration → SRT (millisecond)"""
+    """Script → SRT"""
     sentences = script.replace("။", "။|").split("|")
     sentences = [s.strip() + "။" for s in sentences if s.strip()]
     if not sentences:
         return None
-    
-    # ရှည်တဲ့ စာကြောင်း — ခွဲ
+
     split_sentences = []
     for sent in sentences:
         sent = sent.replace("။။", "။")
@@ -116,19 +82,19 @@ def script_to_srt(script, audio_duration, srt_path, max_chars=30):
                     cur = w
             if cur:
                 split_sentences.append(cur.strip())
-    
+
     if not split_sentences:
         return None
-    
+
     total_chars = sum(len(s) for s in split_sentences)
     current = 0.0
-    
+
     with open(srt_path, "w", encoding="utf-8") as f:
         for i, sent in enumerate(split_sentences, 1):
             dur = (len(sent) / total_chars) * audio_duration
             f.write(f"{i}\n{srt_time(current)} --> {srt_time(current + dur)}\n{sent}\n\n")
             current += dur
-    
+
     return srt_path
 
 
@@ -158,7 +124,7 @@ def split_script(text, max_chars=400):
 
 
 # ============================================================
-# TTS — Demo
+# TTS — Demo / Burmese
 # ============================================================
 def tts_demo(chunks, ref_audio_path, space, progress_callback=None):
     client = Client(space)
@@ -185,9 +151,6 @@ def tts_demo(chunks, ref_audio_path, space, progress_callback=None):
     return audio_files
 
 
-# ============================================================
-# TTS — Burmese
-# ============================================================
 def tts_burmese(chunks, ref_audio_path, space, progress_callback=None):
     client = Client(space)
     audio_files = []
@@ -212,9 +175,6 @@ def tts_burmese(chunks, ref_audio_path, space, progress_callback=None):
     return audio_files
 
 
-# ============================================================
-# TTS — Multi-Fallback
-# ============================================================
 def run_tts_chunked(text, output_path, ref_audio_path=None, progress_callback=None):
     chunks = split_script(text, max_chars=400)
     audio_files = None
@@ -258,45 +218,38 @@ def run_tts_chunked(text, output_path, ref_audio_path=None, progress_callback=No
 # ============================================================
 def burn_subtitle(video_path, srt_path, output_path,
                    font_name=MYANMAR_FONT, font_size=24, position="bottom"):
-    """FFmpeg — Myanmar Subtitle Burn-in"""
-    
-    # Position
     alignment = {"bottom": 2, "center": 5, "top": 8}.get(position, 2)
     margin_v = {"bottom": 30, "center": 0, "top": 30}.get(position, 30)
-    
-    # Style
+
     style = (
         f"FontName={font_name},"
         f"FontSize={font_size},"
         f"PrimaryColour=&H00FFFFFF,"
         f"OutlineColour=&H00000000,"
-        f"BorderStyle=1,"
-        f"Outline=2,"
-        f"Shadow=1,"
-        f"Alignment={alignment},"
-        f"MarginV={margin_v}"
+        f"BorderStyle=1,Outline=2,Shadow=1,"
+        f"Alignment={alignment},MarginV={margin_v}"
     )
-    
-    # Escape SRT Path
+
+    # Font Dir — Repo Folder
+    font_dir = os.getcwd()
     srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
-    
-    # FFmpeg Command
+    font_dir_escaped = font_dir.replace("\\", "/").replace(":", "\\:")
+
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
-        "-vf", f"subtitles='{srt_escaped}':force_style='{style}'",
+        "-vf", f"subtitles='{srt_escaped}':force_style='{style}':fontsdir='{font_dir_escaped}'",
         "-c:v", "libx264",
         "-crf", "18",
         "-preset", "medium",
         "-c:a", "copy",
         output_path
     ]
-    
+
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    
     if result.returncode != 0:
         raise Exception(f"FFmpeg error:\n{(result.stderr or '')[-1000:]}")
-    
+
     return output_path
 
 
@@ -308,20 +261,15 @@ st.title("🎬 VoxCPM2 Movie Recap")
 st.write("Gemini Web မှ Script ရယူပြီး VoxCPM2 အသံနဲ့ Recap ဖန်တီးပါ")
 
 # Font Status
-if FONT_PATH:
-    st.sidebar.success(f"✅ Font: {os.path.basename(FONT_PATH)}")
+if os.path.exists(FONT_FILE):
+    st.sidebar.success(f"✅ Font: {FONT_FILE}")
+    st.sidebar.caption(f"FontName: {MYANMAR_FONT}")
 else:
-    st.sidebar.warning("⚠️ Pyidaungsu Font — Install Fail")
+    st.sidebar.warning(f"⚠️ {FONT_FILE} — မရှိ")
 
-# ============================================================
-# Step 1: Gemini Web — Script
-# ============================================================
+# Step 1: Gemini Web
 st.header("📝 Step 1: Gemini Web → Script")
-
-st.info(
-    "**အဆင့် ၁:** [gemini.google.com](https://gemini.google.com) ဖွင့် → "
-    "Video Upload → Prompt ပေး → Script ရ → Copy"
-)
+st.info("**Gemini Web:** [gemini.google.com](https://gemini.google.com) → Video Upload → Prompt → Script Copy")
 
 with st.expander("📋 Prompt (Copy → Gemini Web)", expanded=True):
     st.code(
@@ -331,83 +279,52 @@ with st.expander("📋 Prompt (Copy → Gemini Web)", expanded=True):
         language="text"
     )
 
-st.markdown("**Gemini Web လင့်:** [gemini.google.com](https://gemini.google.com)")
-
-# ============================================================
 # Step 2: Script Paste
-# ============================================================
 st.header("📝 Step 2: Script Paste")
+script = st.text_area("Script", height=250, placeholder="မြန်မာ Script paste...")
 
-script = st.text_area(
-    "Script (Gemini Web မှ Copy → Paste ဒီမှာ)",
-    height=250,
-    placeholder="မြန်မာ Script ဒီမှာ paste ပါ..."
-)
-
-# ============================================================
-# Step 3: Reference Audio + Video
-# ============================================================
+# Step 3: Reference + Video
 st.header("🎙️ Step 3: Reference Audio + Video")
-
 if "ref_audio_path" not in st.session_state:
     st.session_state.ref_audio_path = None
 
-ref_audio = st.file_uploader(
-    "Reference Audio (၅-၁၅ စက္ကန့်) — VoxCPM2 Voice Clone",
-    type=["wav", "mp3", "m4a"]
-)
-
+ref_audio = st.file_uploader("Reference Audio", type=["wav", "mp3", "m4a"])
 if ref_audio is not None:
     ref_path = "reference_voice.wav"
     with open(ref_path, "wb") as f:
         f.write(ref_audio.read())
     st.session_state.ref_audio_path = ref_path
-    st.success("✅ Reference Audio — သိမ်းပြီး")
+    st.success("✅ Reference Audio")
 
-video_file = st.file_uploader(
-    "📹 Video Upload (Recap Render အတွက်)",
-    type=["mp4", "mov", "avi", "mkv"]
-)
+video_file = st.file_uploader("📹 Video Upload", type=["mp4", "mov", "avi", "mkv"])
 
-# ============================================================
-# 🆕 Subtitle Settings
-# ============================================================
+# Subtitle Settings
 st.header("📝 Subtitle Settings")
-
 use_subtitle = st.toggle("📝 စာတန်းထိုး (Burn-in)", value=True)
-
 if use_subtitle:
-    sub_position = st.selectbox(
-        "Subtitle နေရာ",
-        ["bottom", "center", "top"],
-        format_func=lambda x: {"bottom": "အောက်ခြေ", "center": "အလယ်", "top": "အပေါ်"}[x]
-    )
+    sub_position = st.selectbox("Subtitle နေရာ", ["bottom", "center", "top"],
+                                 format_func=lambda x: {"bottom": "အောက်ခြေ", "center": "အလယ်", "top": "အပေါ်"}[x])
     sub_font_size = st.slider("Font Size", 16, 72, 24)
 else:
     sub_position = "bottom"
     sub_font_size = 24
 
-# ============================================================
-# Sidebar — Spaces Info
-# ============================================================
+# Sidebar
 st.sidebar.header("🎙️ TTS Spaces")
 for i, s in enumerate(VOXCPM_SPACES, 1):
     st.sidebar.write(f"**{i}.** `{s['space']}`")
 
-# ============================================================
 # Step 4: Generate
-# ============================================================
 st.header("🚀 Step 4: Generate Recap")
 
 if st.button("✨ Generate Recap Video", type="primary"):
     if not script.strip():
-        st.error("❌ Script paste ပါ — Step 2")
+        st.error("❌ Script paste — Step 2")
         st.stop()
     if video_file is None:
         st.error("❌ Video Upload — Step 3")
         st.stop()
 
-    # ===== Video Save =====
     with st.spinner("📹 ဗီဒီယို စစ်ဆေးနေသည်..."):
         video_filename = "input_video.mp4"
         with open(video_filename, "wb") as f:
@@ -416,7 +333,6 @@ if st.button("✨ Generate Recap Video", type="primary"):
         video_duration = float(probe['format']['duration'])
         st.write(f"📹 Video အရှည်: {video_duration:.2f} စက္ကန့်")
 
-    # ===== TTS =====
     st.write("🎙️ VoxCPM2 → အသံ...")
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -428,11 +344,9 @@ if st.button("✨ Generate Recap Video", type="primary"):
     audio_path = "recap_voice.mp3"
 
     try:
-        run_tts_chunked(
-            script, audio_path,
-            ref_audio_path=st.session_state.ref_audio_path,
-            progress_callback=update_progress
-        )
+        run_tts_chunked(script, audio_path,
+                        ref_audio_path=st.session_state.ref_audio_path,
+                        progress_callback=update_progress)
         st.write("✅ အသံ ထုတ်ပြီး")
         audio_dur = float(ffmpeg.probe(audio_path)['format']['duration'])
         st.write(f"🎙️ Audio အရှည်: {audio_dur:.1f} စက္ကန့်")
@@ -440,31 +354,21 @@ if st.button("✨ Generate Recap Video", type="primary"):
         st.error(f"❌ VoxCPM2 error: {e}")
         st.stop()
 
-    # ============================================================
-    # Audio Speed — Video အရှည် ကိုက်
-    # ============================================================
+    # Audio Speed
     tempo = audio_dur / video_duration
     tempo = max(0.5, min(2.0, tempo))
-    st.write(f"⚡ Audio Speed: {tempo:.2f}x (Video {video_duration:.1f}s / Audio {audio_dur:.1f}s)")
+    st.write(f"⚡ Audio Speed: {tempo:.2f}x")
 
-    # ============================================================
-    # 🆕 SRT — Script → SRT
-    # ============================================================
+    # SRT
     srt_path = None
     if use_subtitle:
         with st.spinner("📝 Script → SRT..."):
             srt_path = script_to_srt(script, video_duration, "recap.srt")
             if srt_path and os.path.exists(srt_path):
                 st.success("✅ SRT — ဖန်တီးပြီး")
-                with st.expander("📝 SRT Preview"):
-                    with open(srt_path, "r", encoding="utf-8") as f:
-                        st.text(f.read())
 
-    # ============================================================
-    # Render — Video + Audio
-    # ============================================================
+    # Render
     with st.spinner("🎬 Recap Video Render..."):
-        # Step 1: Video + Audio (No Subtitle)
         temp_video = "temp_recap.mp4"
         input_video = ffmpeg.input(video_filename)
         input_audio = ffmpeg.input(audio_path).audio.filter('atempo', tempo)
@@ -477,18 +381,15 @@ if st.button("✨ Generate Recap Video", type="primary"):
         )
         ffmpeg.run(stream, overwrite_output=True)
 
-        # Step 2: Subtitle Burn-in
         final_path = "final_recap.mp4"
-        
-        if use_subtitle and srt_path and FONT_PATH:
+
+        if use_subtitle and srt_path:
             with st.spinner("📝 Subtitle မြှုပ်ထည့်နေသည်..."):
                 try:
-                    burn_subtitle(
-                        temp_video, srt_path, final_path,
-                        font_name=MYANMAR_FONT,
-                        font_size=sub_font_size,
-                        position=sub_position
-                    )
+                    burn_subtitle(temp_video, srt_path, final_path,
+                                  font_name=MYANMAR_FONT,
+                                  font_size=sub_font_size,
+                                  position=sub_position)
                     st.success("✅ Subtitle — မြှုပ်ပြီး")
                 except Exception as e:
                     st.error(f"❌ Subtitle error: {e}")
@@ -496,7 +397,6 @@ if st.button("✨ Generate Recap Video", type="primary"):
         else:
             shutil.copy(temp_video, final_path)
 
-    # ===== Output =====
     st.success("✅ ပြီးပါပြီ!")
     st.video(final_path)
 
