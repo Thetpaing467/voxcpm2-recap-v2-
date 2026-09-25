@@ -21,6 +21,12 @@ VOXCPM_SPACES = [
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
+# 🆕 Default Settings — ပုံသေ
+DEFAULT_SUB_POSITION = "center"
+DEFAULT_FONT_SIZE = 35
+DEFAULT_BLUR_HEIGHT = 120
+DEFAULT_BLUR_ALPHA = 160
+
 # ============================================================
 # Password
 # ============================================================
@@ -76,9 +82,9 @@ def ts_to_sec(ts):
 # PIL — Text + Blur Box → PNG
 # ============================================================
 def render_subtitle_png(text, output_path, font_path,
-                         width, height, font_size=44,
-                         position="bottom", blur_height=268,
-                         blur_alpha=180):
+                         width, height, font_size=35,
+                         position="center", blur_height=120,
+                         blur_alpha=160):
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
@@ -87,6 +93,7 @@ def render_subtitle_png(text, output_path, font_path,
     except Exception:
         font = ImageFont.load_default()
 
+    # Box Y Position
     if position == "bottom":
         box_y = height - blur_height
     elif position == "center":
@@ -94,11 +101,13 @@ def render_subtitle_png(text, output_path, font_path,
     else:
         box_y = 0
 
+    # Blur Box
     draw.rectangle(
         [0, box_y, width, box_y + blur_height],
         fill=(0, 0, 0, blur_alpha)
     )
 
+    # Text Wrap
     max_chars_per_line = max(15, int(width / (font_size * 0.9)))
     words = text.split()
     lines = []
@@ -122,10 +131,12 @@ def render_subtitle_png(text, output_path, font_path,
         line_w = bbox[2] - bbox[0]
         line_x = (width - line_w) // 2
 
-        for dx in [-3, -2, -1, 0, 1, 2, 3]:
-            for dy in [-3, -2, -1, 0, 1, 2, 3]:
+        # Outline
+        for dx in [-2, -1, 0, 1, 2]:
+            for dy in [-2, -1, 0, 1, 2]:
                 draw.text((line_x + dx, text_y + dy), line,
                           font=font, fill=(0, 0, 0, 255))
+        # Fill
         draw.text((line_x, text_y), line, font=font, fill=(255, 255, 255, 255))
 
         text_y += line_h
@@ -212,9 +223,9 @@ def parse_srt(srt_path):
 # Overlay — Subtitle PNG on Video
 # ============================================================
 def overlay_subtitle_on_video(video_path, srt_path, output_path,
-                                font_path, font_size=44,
-                                position="bottom", blur_height=268,
-                                blur_alpha=180):
+                                font_path, font_size=35,
+                                position="center", blur_height=120,
+                                blur_alpha=160):
     W, H, duration = get_video_info(video_path)
 
     segments = parse_srt(srt_path)
@@ -423,9 +434,33 @@ with st.expander("📋 Prompt (Copy → Gemini Web)", expanded=True):
         language="text"
     )
 
-# Step 2
+# ============================================================
+# Step 2: Script Paste + Delete Button
+# ============================================================
 st.header("📝 Step 2: Script Paste")
-script = st.text_area("Script", height=250, placeholder="မြန်မာ Script paste...")
+
+if "script_text" not in st.session_state:
+    st.session_state.script_text = ""
+
+script = st.text_area(
+    "Script",
+    value=st.session_state.script_text,
+    height=250,
+    placeholder="မြန်မာ Script paste...",
+    key="script_input"
+)
+
+st.session_state.script_text = script
+
+# 🆕 Delete Button
+col1, col2 = st.columns([1, 5])
+with col1:
+    if st.button("🗑️ Script ဖျက်", type="secondary"):
+        st.session_state.script_text = ""
+        st.rerun()
+
+with col2:
+    st.caption(f"📝 စာလုံး: {len(script)}")
 
 # Step 3
 st.header("🎙️ Step 3: Reference Audio + Video")
@@ -442,24 +477,24 @@ if ref_audio is not None:
 
 video_file = st.file_uploader("📹 Video Upload", type=["mp4", "mov", "avi", "mkv"])
 
-# Subtitle + Blur Settings
-st.header("📝 Subtitle + Blur Settings")
+# ============================================================
+# Subtitle Settings — Fixed
+# ============================================================
+st.header("📝 Subtitle Settings")
+
 use_subtitle = st.toggle("📝 စာတန်းထိုး (Burn-in)", value=True)
 
-if use_subtitle:
-    sub_position = st.selectbox(
-        "Subtitle နေရာ",
-        ["bottom", "center", "top"],
-        format_func=lambda x: {"bottom": "⬇️ အောက်ခြေ", "center": "⬅️ အလယ်", "top": "⬆️ အပေါ်"}[x]
-    )
-    sub_font_size = st.slider("Font Size", 16, 80, 44)
-    blur_height = st.slider("Blur Box အမြင့်", 80, 400, 268)
-    blur_alpha = st.slider("Blur Opacity", 50, 255, 180)
-else:
-    sub_position = "bottom"
-    sub_font_size = 44
-    blur_height = 268
-    blur_alpha = 180
+sub_position = DEFAULT_SUB_POSITION
+sub_font_size = DEFAULT_FONT_SIZE
+blur_height = DEFAULT_BLUR_HEIGHT
+blur_alpha = DEFAULT_BLUR_ALPHA
+
+st.info(
+    f"📍 နေရာ: **အလယ်** | "
+    f"🔤 Font Size: **{sub_font_size}** | "
+    f"⬛ Blur Box: **{blur_height}px** | "
+    f"🎨 Opacity: **{blur_alpha}**"
+)
 
 # Preview
 if video_file is not None and use_subtitle:
@@ -590,11 +625,4 @@ if st.button("✨ Generate Recap Video", type="primary"):
     st.video(final_path)
 
     with open(final_path, "rb") as f:
-        st.download_button("📥 Recap Video Download", f, file_name="final_recap.mp4")
-
-    if srt_path and os.path.exists(srt_path):
-        with open(srt_path, "rb") as f:
-            st.download_button("📥 SRT Download", f, file_name="recap.srt")
-
-    with st.expander("📝 Script"):
-        st.text(script)
+    st.download_button("📥 Recap Video Download", f, file_name="final_recap.mp4")
