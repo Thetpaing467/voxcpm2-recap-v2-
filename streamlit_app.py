@@ -21,7 +21,7 @@ VOXCPM_SPACES = [
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-# 🆕 Default Settings — ပုံသေ
+# Default Settings
 DEFAULT_SUB_POSITION = "center"
 DEFAULT_FONT_SIZE = 35
 DEFAULT_BLUR_HEIGHT = 120
@@ -45,7 +45,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ============================================================
-# Helper — Video Info
+# Helper Functions
 # ============================================================
 def get_video_info(video_path):
     probe = ffmpeg.probe(video_path)
@@ -78,9 +78,6 @@ def ts_to_sec(ts):
     return None
 
 
-# ============================================================
-# PIL — Text + Blur Box → PNG
-# ============================================================
 def render_subtitle_png(text, output_path, font_path,
                          width, height, font_size=35,
                          position="center", blur_height=120,
@@ -93,7 +90,6 @@ def render_subtitle_png(text, output_path, font_path,
     except Exception:
         font = ImageFont.load_default()
 
-    # Box Y Position
     if position == "bottom":
         box_y = height - blur_height
     elif position == "center":
@@ -101,13 +97,11 @@ def render_subtitle_png(text, output_path, font_path,
     else:
         box_y = 0
 
-    # Blur Box
     draw.rectangle(
         [0, box_y, width, box_y + blur_height],
         fill=(0, 0, 0, blur_alpha)
     )
 
-    # Text Wrap
     max_chars_per_line = max(15, int(width / (font_size * 0.9)))
     words = text.split()
     lines = []
@@ -131,12 +125,10 @@ def render_subtitle_png(text, output_path, font_path,
         line_w = bbox[2] - bbox[0]
         line_x = (width - line_w) // 2
 
-        # Outline
         for dx in [-2, -1, 0, 1, 2]:
             for dy in [-2, -1, 0, 1, 2]:
                 draw.text((line_x + dx, text_y + dy), line,
                           font=font, fill=(0, 0, 0, 255))
-        # Fill
         draw.text((line_x, text_y), line, font=font, fill=(255, 255, 255, 255))
 
         text_y += line_h
@@ -145,9 +137,6 @@ def render_subtitle_png(text, output_path, font_path,
     return output_path
 
 
-# ============================================================
-# Script → SRT
-# ============================================================
 def script_to_srt(script, audio_duration, srt_path, max_chars=30):
     sentences = script.replace("။", "။|").split("|")
     sentences = [s.strip() + "။" for s in sentences if s.strip()]
@@ -219,9 +208,6 @@ def parse_srt(srt_path):
     return segments
 
 
-# ============================================================
-# Overlay — Subtitle PNG on Video
-# ============================================================
 def overlay_subtitle_on_video(video_path, srt_path, output_path,
                                 font_path, font_size=35,
                                 position="center", blur_height=120,
@@ -298,9 +284,6 @@ def overlay_subtitle_on_video(video_path, srt_path, output_path,
     return output_path
 
 
-# ============================================================
-# TTS — Split Script
-# ============================================================
 def split_script(text, max_chars=400):
     sentences = text.replace("။", "။|").split("|")
     sentences = [s.strip() + "။" for s in sentences if s.strip()]
@@ -408,8 +391,6 @@ def run_tts_chunked(text, output_path, ref_audio_path=None, progress_callback=No
     ).run(overwrite_output=True)
 
     return output_path
-
-
 # ============================================================
 # UI
 # ============================================================
@@ -434,9 +415,7 @@ with st.expander("📋 Prompt (Copy → Gemini Web)", expanded=True):
         language="text"
     )
 
-# ============================================================
-# Step 2: Script Paste + Delete Button
-# ============================================================
+# Step 2 — Script Paste + Delete Button
 st.header("📝 Step 2: Script Paste")
 
 if "script_text" not in st.session_state:
@@ -452,7 +431,7 @@ script = st.text_area(
 
 st.session_state.script_text = script
 
-# 🆕 Delete Button
+# Delete Button
 col1, col2 = st.columns([1, 5])
 with col1:
     if st.button("🗑️ Script ဖျက်", type="secondary"):
@@ -477,11 +456,8 @@ if ref_audio is not None:
 
 video_file = st.file_uploader("📹 Video Upload", type=["mp4", "mov", "avi", "mkv"])
 
-# ============================================================
-# Subtitle Settings — Fixed
-# ============================================================
+# Subtitle Settings
 st.header("📝 Subtitle Settings")
-
 use_subtitle = st.toggle("📝 စာတန်းထိုး (Burn-in)", value=True)
 
 sub_position = DEFAULT_SUB_POSITION
@@ -625,4 +601,5 @@ if st.button("✨ Generate Recap Video", type="primary"):
     st.video(final_path)
 
     f = open(final_path, "rb")
-st.download_button("📥 Recap Video Download", f, file_name="final_recap.mp4")
+    st.download_button("📥 Recap Video Download", f, file_name="final_recap.mp4")
+    f.close()
