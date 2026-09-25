@@ -23,7 +23,7 @@ FONT_FILE = "MyanmarPadaung.ttf"
 
 # Default Settings
 DEFAULT_SUB_POSITION = "center"
-DEFAULT_FONT_SIZE = 35
+DEFAULT_FONT_SIZE = 30
 DEFAULT_BLUR_HEIGHT = 120
 DEFAULT_BLUR_ALPHA = 160
 
@@ -79,7 +79,7 @@ def ts_to_sec(ts):
 
 
 def render_subtitle_png(text, output_path, font_path,
-                         width, height, font_size=35,
+                         width, height, font_size=30,
                          position="center", blur_height=120,
                          blur_alpha=160):
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -209,7 +209,7 @@ def parse_srt(srt_path):
 
 
 def overlay_subtitle_on_video(video_path, srt_path, output_path,
-                                font_path, font_size=35,
+                                font_path, font_size=30,
                                 position="center", blur_height=120,
                                 blur_alpha=160):
     W, H, duration = get_video_info(video_path)
@@ -391,7 +391,7 @@ def run_tts_chunked(text, output_path, ref_audio_path=None, progress_callback=No
     ).run(overwrite_output=True)
 
     return output_path
-# ============================================================
+    # ============================================================
 # UI
 # ============================================================
 st.set_page_config(page_title="🎬 VoxCPM2 Movie Recap", page_icon="🎬")
@@ -415,31 +415,33 @@ with st.expander("📋 Prompt (Copy → Gemini Web)", expanded=True):
         language="text"
     )
 
-# Step 2 — Script Paste + Delete Button
+# ============================================================
+# Step 2: Script Paste + Delete Button
+# ============================================================
 st.header("📝 Step 2: Script Paste")
 
 if "script_text" not in st.session_state:
     st.session_state.script_text = ""
 
+# ⚠️ — Text Area — Key မပါ
 script = st.text_area(
     "Script",
     value=st.session_state.script_text,
     height=250,
-    placeholder="မြန်မာ Script paste...",
-    key="script_input"
+    placeholder="မြန်မာ Script paste..."
 )
 
 st.session_state.script_text = script
 
-# Delete Button
-col1, col2 = st.columns([1, 5])
-with col1:
-    if st.button("🗑️ Script ဖျက်", type="secondary"):
-        st.session_state.script_text = ""
-        st.rerun()
+# 🆕 Counter
+st.caption(f"📝 စာလုံး: {len(script)}")
 
-with col2:
-    st.caption(f"📝 စာလုံး: {len(script)}")
+# 🆕 Delete Button — ကြီး + သီးသန့်
+st.markdown("---")
+if st.button("🗑️  Script အားလုံး ဖျက်မယ်  🗑️", type="primary", use_container_width=True):
+    st.session_state.script_text = ""
+    st.rerun()
+st.markdown("---")
 
 # Step 3
 st.header("🎙️ Step 3: Reference Audio + Video")
