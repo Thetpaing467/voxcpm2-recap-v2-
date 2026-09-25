@@ -613,4 +613,6 @@ if st.button("✨ Generate Recap Video", type="primary"):
                         blur_alpha=blur_alpha
                     )
                     st.success("✅ Subtitle — Overlay ပြီး")
-                except Exception: 
+                except Exception as e:
+    st.error(f"❌ Subtitle error: {e}")
+    shutil.copy(temp_video, final_path)
