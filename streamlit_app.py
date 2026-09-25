@@ -2,10 +2,11 @@ import streamlit as st
 import os
 import re
 import time
+import json
 import ffmpeg
 import shutil
 import subprocess
-import cv2
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from gradio_client import Client, handle_file
 
@@ -19,7 +20,6 @@ VOXCPM_SPACES = [
 
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
-MYANMAR_FONT = "Myanmar Padaung"
 
 # ============================================================
 # Password
@@ -42,7 +42,6 @@ if not st.session_state.authenticated:
 # Helper — Video Info
 # ============================================================
 def get_video_info(video_path):
-    """Video — Width + Height + Duration"""
     probe = ffmpeg.probe(video_path)
     vs = next(s for s in probe['streams'] if s['codec_type'] == 'video')
     duration = float(probe['format']['duration'])
@@ -60,70 +59,90 @@ def srt_time(sec):
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def ts_to_sec(ts):
+    ts = ts.strip()
+    m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$', ts)
+    if m:
+        h, mi, se, ms = m.groups()
+        return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3, '0')) / 1000.0
+    m = re.match(r'^(\d{1,2}):(\d{2})[,.](\d{1,3})$', ts)
+    if m:
+        mi, se, ms = m.groups()
+        return int(mi)*60 + int(se) + int(ms.ljust(3, '0')) / 1000.0
+    return None
+
+
 # ============================================================
-# 🆕 Preview — Video Frame + Blur Box + Text
+# 🆕 PIL — Text → PNG (Transparent Full Frame)
 # ============================================================
-def generate_preview(video_path, font_path, position="bottom",
-                      blur_height=268, font_size=44,
-                      preview_text="စာတန်းထိုး Preview"):
-    """Preview — First Frame + Blur Box + Text"""
-    W, H, _ = get_video_info(video_path)
+def render_subtitle_png(text, output_path, font_path,
+                         width, height, font_size=44,
+                         position="bottom", blur_height=268,
+                         blur_alpha=180):
+    """Text + Blur Box → PNG (Transparent)"""
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
 
-    cap = cv2.VideoCapture(video_path)
-    ret, frame = cap.read()
-    cap.release()
-
-    if not ret:
-        return None
-
-    # Frame → PIL
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    img = Image.fromarray(frame_rgb).convert("RGBA")
-
-    # Box Y Position
-    if position == "bottom":
-        box_y = H - blur_height
-    elif position == "center":
-        box_y = (H - blur_height) // 2
-    else:  # top
-        box_y = 0
-
-    # Black Overlay — Blur Box
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    draw.rectangle([0, box_y, W, box_y + blur_height], fill=(0, 0, 0, 150))
-    img = Image.alpha_composite(img, overlay)
-
-    # Font
+    # Font — PIL
     try:
         font = ImageFont.truetype(font_path, font_size)
     except Exception:
         font = ImageFont.load_default()
 
-    draw = ImageDraw.Draw(img)
+    # Box Y Position
+    if position == "bottom":
+        box_y = height - blur_height
+    elif position == "center":
+        box_y = (height - blur_height) // 2
+    else:
+        box_y = 0
 
-    # Text — Blur Box Center
-    bbox = draw.textbbox((0, 0), preview_text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
+    # Blur Box — Black Overlay (RGBA)
+    draw.rectangle(
+        [0, box_y, width, box_y + blur_height],
+        fill=(0, 0, 0, blur_alpha)
+    )
 
-    text_x = (W - text_w) // 2
-    text_y = box_y + (blur_height - text_h) // 2
+    # Text Wrap — Manual (Simple)
+    max_chars_per_line = max(15, int(width / (font_size * 0.9)))
+    words = text.split()
+    lines = []
+    cur = ""
+    for w in words:
+        if len(cur) + len(w) + 1 <= max_chars_per_line:
+            cur = cur + " " + w if cur else w
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
 
-    # Outline — Thick
-    for dx in [-3, -2, -1, 0, 1, 2, 3]:
-        for dy in [-3, -2, -1, 0, 1, 2, 3]:
-            draw.text((text_x + dx, text_y + dy), preview_text,
-                      font=font, fill=(0, 0, 0, 255))
-    draw.text((text_x, text_y), preview_text, font=font, fill=(255, 255, 255, 255))
+    # Line Height
+    line_h = int(font_size * 1.3)
+    total_h = len(lines) * line_h
 
-    # Save — Resize
-    preview_path = "preview.png"
-    preview_w = 720
-    preview_h = int(H * (preview_w / W))
-    img_resized = img.resize((preview_w, preview_h), Image.LANCZOS)
-    img_resized.convert("RGB").save(preview_path)
-    return preview_path
+    # Text Y — Box Center
+    text_y = box_y + (blur_height - total_h) // 2
+
+    # Draw Each Line
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_w = bbox[2] - bbox[0]
+        line_x = (width - line_w) // 2
+
+        # Outline
+        for dx in [-3, -2, -1, 0, 1, 2, 3]:
+            for dy in [-3, -2, -1, 0, 1, 2, 3]:
+                draw.text((line_x + dx, text_y + dy), line,
+                          font=font, fill=(0, 0, 0, 255))
+        # Fill
+        draw.text((line_x, text_y), line, font=font, fill=(255, 255, 255, 255))
+
+        text_y += line_h
+
+    img.save(output_path, "PNG")
+    return output_path
 
 
 # ============================================================
@@ -166,6 +185,125 @@ def script_to_srt(script, audio_duration, srt_path, max_chars=30):
             current += dur
 
     return srt_path
+
+
+def parse_srt(srt_path):
+    """SRT → Segments"""
+    with open(srt_path, "r", encoding="utf-8") as f:
+        raw = f.read().replace("\r\n", "\n").replace("\r", "\n")
+
+    chunks = re.split(r"\n\s*\n", raw.strip())
+    segments = []
+
+    for chunk in chunks:
+        lines = [ln for ln in chunk.split("\n") if ln.strip()]
+        if len(lines) < 3:
+            continue
+        ts_line = next((ln for ln in lines if "-->" in ln), None)
+        if not ts_line:
+            continue
+
+        parts = re.split(r"\s*-->\s*", ts_line)
+        if len(parts) != 2:
+            continue
+
+        start = ts_to_sec(parts[0])
+        end = ts_to_sec(parts[1])
+        if start is None or end is None:
+            continue
+
+        ts_idx = lines.index(ts_line)
+        text = " ".join(lines[ts_idx + 1:]).strip()
+        if text:
+            segments.append({"start": start, "end": end, "text": text})
+
+    return segments
+
+
+# ============================================================
+# 🆕 Overlay — Subtitle + Blur Box on Video
+# ============================================================
+def overlay_subtitle_on_video(video_path, srt_path, output_path,
+                                font_path, font_size=44,
+                                position="bottom", blur_height=268,
+                                blur_alpha=180):
+    """Subtitle + Blur → PNG → Video Overlay"""
+    W, H, duration = get_video_info(video_path)
+
+    # SRT → Segments
+    segments = parse_srt(srt_path)
+    if not segments:
+        raise Exception("SRT — segments မရှိ")
+
+    # Job Folder — PNG
+    png_dir = "subtitle_pngs"
+    os.makedirs(png_dir, exist_ok=True)
+
+    png_files = []
+
+    # ⚠️ — Every Segment → PNG
+    for i, seg in enumerate(segments):
+        png_path = os.path.join(png_dir, f"sub_{i:04d}.png")
+        render_subtitle_png(
+            text=seg["text"],
+            output_path=png_path,
+            font_path=font_path,
+            width=W,
+            height=H,
+            font_size=font_size,
+            position=position,
+            blur_height=blur_height,
+            blur_alpha=blur_alpha
+        )
+        png_files.append({
+            "path": png_path,
+            "start": seg["start"],
+            "end": seg["end"]
+        })
+
+    # ⚠️ — FFmpeg — Overlay PNG on Video
+    cmd = ["ffmpeg", "-y", "-i", video_path]
+    for p in png_files:
+        cmd += ["-i", p["path"]]
+
+    # Filter — Overlay with enable
+    filters = []
+    current = "[0:v]"
+
+    for i, p in enumerate(png_files):
+        out_label = f"[v{i}]"
+        filters.append(
+            f"{current}[{i+1}:v]overlay=0:0:"
+            f"enable='between(t,{p['start']:.3f},{p['end']:.3f})'"
+            f"{out_label}"
+        )
+        current = out_label
+
+    filter_complex = ";".join(filters)
+
+    cmd += [
+        "-filter_complex", filter_complex,
+        "-map", current,
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-crf", "18",
+        "-preset", "medium",
+        "-c:a", "copy",
+        output_path
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if result.returncode != 0:
+        raise Exception(f"FFmpeg error:\n{(result.stderr or '')[-1000:]}")
+
+    # Cleanup — PNG
+    for p in png_files:
+        try:
+            os.remove(p["path"])
+        except Exception:
+            pass
+
+    return output_path
 
 
 # ============================================================
@@ -284,72 +422,6 @@ def run_tts_chunked(text, output_path, ref_audio_path=None, progress_callback=No
 
 
 # ============================================================
-# 🆕 FFmpeg — Burn Subtitle + Blur Box
-# ============================================================
-def burn_subtitle_with_blur(video_path, srt_path, output_path,
-                              font_name=MYANMAR_FONT, font_size=44,
-                              position="bottom", blur_height=268):
-    """Subtitle + Blur Box — FFmpeg"""
-    W, H, _ = get_video_info(video_path)
-
-    # Box Y Position
-    if position == "bottom":
-        box_y = H - blur_height
-    elif position == "center":
-        box_y = (H - blur_height) // 2
-    else:
-        box_y = 0
-
-    # Subtitle Alignment (SSA)
-    alignment = {"bottom": 2, "center": 5, "top": 8}[position]
-
-    # Margin — Blur Box Center
-    if position in ["bottom", "top"]:
-        margin_v = max(20, int(blur_height / 2))
-    else:
-        margin_v = 0
-
-    style = (
-        f"FontName={font_name},"
-        f"FontSize={font_size},"
-        f"PrimaryColour=&H00FFFFFF,"
-        f"OutlineColour=&H00000000,"
-        f"BorderStyle=1,Outline=3,Shadow=1,"
-        f"Alignment={alignment},MarginV={margin_v}"
-    )
-
-    font_dir = os.getcwd()
-    srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
-    font_dir_escaped = font_dir.replace("\\", "/").replace(":", "\\:")
-
-    # Filter Complex — Blur Box + Subtitle
-    filter_complex = (
-        f"color=c=black@0.6:s={W}x{blur_height}:d=999999[box];"
-        f"[0:v][box]overlay=0:{box_y}:shortest=1[blurred];"
-        f"[blurred]subtitles='{srt_escaped}':force_style='{style}':fontsdir='{font_dir_escaped}'[outv]"
-    )
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-filter_complex", filter_complex,
-        "-map", "[outv]",
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-crf", "18",
-        "-preset", "medium",
-        "-c:a", "copy",
-        output_path
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if result.returncode != 0:
-        raise Exception(f"FFmpeg error:\n{(result.stderr or '')[-1000:]}")
-
-    return output_path
-
-
-# ============================================================
 # UI
 # ============================================================
 st.set_page_config(page_title="🎬 VoxCPM2 Movie Recap", page_icon="🎬")
@@ -359,7 +431,6 @@ st.write("Gemini Web မှ Script ရယူပြီး VoxCPM2 အသံနဲ
 # Font Status
 if os.path.exists(FONT_FILE):
     st.sidebar.success(f"✅ Font: {FONT_FILE}")
-    st.sidebar.caption(f"FontName: {MYANMAR_FONT}")
 else:
     st.sidebar.warning(f"⚠️ {FONT_FILE} — မရှိ")
 
@@ -394,11 +465,8 @@ if ref_audio is not None:
 
 video_file = st.file_uploader("📹 Video Upload", type=["mp4", "mov", "avi", "mkv"])
 
-# ============================================================
 # Subtitle + Blur Settings
-# ============================================================
 st.header("📝 Subtitle + Blur Settings")
-
 use_subtitle = st.toggle("📝 စာတန်းထိုး (Burn-in)", value=True)
 
 if use_subtitle:
@@ -409,34 +477,53 @@ if use_subtitle:
     )
     sub_font_size = st.slider("Font Size", 16, 80, 44)
     blur_height = st.slider("Blur Box အမြင့်", 80, 400, 268)
+    blur_alpha = st.slider("Blur Opacity", 50, 255, 180)
 else:
     sub_position = "bottom"
     sub_font_size = 44
     blur_height = 268
+    blur_alpha = 180
 
-# ============================================================
-# Preview
-# ============================================================
+# Preview — PNG Render
 if video_file is not None and use_subtitle:
-    st.subheader("🖼️ Preview — Blur Box + Subtitle")
-    with st.spinner("🖼️ Preview — ဖန်တီးနေသည်..."):
+    st.subheader("🖼️ Preview")
+    with st.spinner("🖼️ Preview..."):
         temp_video_preview = "preview_video.mp4"
         video_file.seek(0)
         with open(temp_video_preview, "wb") as f:
             f.write(video_file.read())
 
-        preview_path = generate_preview(
-            temp_video_preview,
+        W, H, _ = get_video_info(temp_video_preview)
+        preview_png = "preview_sub.png"
+        render_subtitle_png(
+            text="စာတန်းထိုး Preview",
+            output_path=preview_png,
             font_path=FONT_FILE,
+            width=W,
+            height=H,
+            font_size=sub_font_size,
             position=sub_position,
             blur_height=blur_height,
-            font_size=sub_font_size,
-            preview_text="စာတန်းထိုး Preview"
+            blur_alpha=blur_alpha
         )
 
-        if preview_path:
-            st.image(preview_path, caption="🖼️ Preview", use_container_width=True)
-            st.caption(f"📍 {sub_position} | Font: {sub_font_size} | Blur: {blur_height}px")
+        # Composite — First Frame + PNG
+        import cv2
+        cap = cv2.VideoCapture(temp_video_preview)
+        ret, frame = cap.read()
+        cap.release()
+
+        if ret:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            bg = Image.fromarray(frame_rgb).convert("RGBA")
+            fg = Image.open(preview_png).convert("RGBA")
+            composite = Image.alpha_composite(bg, fg)
+
+            # Resize
+            pw = 720
+            ph = int(H * (pw / W))
+            composite.resize((pw, ph), Image.LANCZOS).convert("RGB").save("preview_result.png")
+            st.image("preview_result.png", caption="🖼️ Preview", use_container_width=True)
 
 # Sidebar
 st.sidebar.header("🎙️ TTS Spaces")
@@ -454,7 +541,7 @@ if st.button("✨ Generate Recap Video", type="primary"):
         st.error("❌ Video Upload — Step 3")
         st.stop()
 
-    with st.spinner("📹 ဗီဒီယို စစ်ဆေးနေသည်..."):
+    with st.spinner("📹 Video — စစ်ဆေးနေသည်..."):
         video_filename = "input_video.mp4"
         video_file.seek(0)
         with open(video_filename, "wb") as f:
@@ -483,10 +570,12 @@ if st.button("✨ Generate Recap Video", type="primary"):
         st.error(f"❌ VoxCPM2 error: {e}")
         st.stop()
 
+    # Audio Speed
     tempo = audio_dur / video_duration
     tempo = max(0.5, min(2.0, tempo))
     st.write(f"⚡ Audio Speed: {tempo:.2f}x")
 
+    # SRT
     srt_path = None
     if use_subtitle:
         with st.spinner("📝 Script → SRT..."):
@@ -494,6 +583,7 @@ if st.button("✨ Generate Recap Video", type="primary"):
             if srt_path and os.path.exists(srt_path):
                 st.success("✅ SRT — ဖန်တီးပြီး")
 
+    # Render
     with st.spinner("🎬 Recap Video Render..."):
         temp_video = "temp_recap.mp4"
         input_video = ffmpeg.input(video_filename)
@@ -510,29 +600,17 @@ if st.button("✨ Generate Recap Video", type="primary"):
         final_path = "final_recap.mp4"
 
         if use_subtitle and srt_path:
-            with st.spinner("📝 Blur + Subtitle မြှုပ်ထည့်နေသည်..."):
+            with st.spinner("📝 Subtitle Overlay — လုပ်နေသည်..."):
                 try:
-                    burn_subtitle_with_blur(temp_video, srt_path, final_path,
-                                              font_name=MYANMAR_FONT,
-                                              font_size=sub_font_size,
-                                              position=sub_position,
-                                              blur_height=blur_height)
-                    st.success("✅ Blur + Subtitle — မြှုပ်ပြီး")
-                except Exception as e:
-                    st.error(f"❌ Subtitle error: {e}")
-                    shutil.copy(temp_video, final_path)
-        else:
-            shutil.copy(temp_video, final_path)
-
-    st.success("✅ ပြီးပါပြီ!")
-    st.video(final_path)
-
-    with open(final_path, "rb") as f:
-        st.download_button("📥 Recap Video Download", f, file_name="final_recap.mp4")
-
-    if srt_path and os.path.exists(srt_path):
-        with open(srt_path, "rb") as f:
-            st.download_button("📥 SRT Download", f, file_name="recap.srt")
-
-    with st.expander("📝 Script"):
-        st.text(script)
+                    overlay_subtitle_on_video(
+                        video_path=temp_video,
+                        srt_path=srt_path,
+                        output_path=final_path,
+                        font_path=FONT_FILE,
+                        font_size=sub_font_size,
+                        position=sub_position,
+                        blur_height=blur_height,
+                        blur_alpha=blur_alpha
+                    )
+                    st.success("✅ Subtitle — Overlay ပြီး")
+                except Exc
