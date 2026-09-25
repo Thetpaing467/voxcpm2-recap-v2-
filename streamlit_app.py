@@ -18,8 +18,8 @@ VOXCPM_SPACES = [
 ]
 
 PASSWORD = "voxcpm2026"
-FONT_FILE = "pyidaungsu.ttf"
-MYANMAR_FONT = "Pyidaungsu"
+FONT_FILE = "MyanmarPadaung.ttf"
+MYANMAR_FONT = "Myanmar Padaung"
 
 # ============================================================
 # Password
@@ -64,7 +64,7 @@ def srt_time(sec):
 # 🆕 Preview — Video Frame + Blur Box + Text
 # ============================================================
 def generate_preview(video_path, font_path, position="bottom",
-                      blur_height=150, font_size=40,
+                      blur_height=268, font_size=44,
                       preview_text="စာတန်းထိုး Preview"):
     """Preview — First Frame + Blur Box + Text"""
     W, H, _ = get_video_info(video_path)
@@ -80,7 +80,7 @@ def generate_preview(video_path, font_path, position="bottom",
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     img = Image.fromarray(frame_rgb).convert("RGBA")
 
-    # Blur Box Y Position
+    # Box Y Position
     if position == "bottom":
         box_y = H - blur_height
     elif position == "center":
@@ -88,12 +88,10 @@ def generate_preview(video_path, font_path, position="bottom",
     else:  # top
         box_y = 0
 
-    # Overlay — Black 50%
+    # Black Overlay — Blur Box
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rectangle([0, box_y, W, box_y + blur_height], fill=(0, 0, 0, 128))
-
-    # Composite
+    draw.rectangle([0, box_y, W, box_y + blur_height], fill=(0, 0, 0, 150))
     img = Image.alpha_composite(img, overlay)
 
     # Font
@@ -104,7 +102,7 @@ def generate_preview(video_path, font_path, position="bottom",
 
     draw = ImageDraw.Draw(img)
 
-    # Text — Center of Blur Box
+    # Text — Blur Box Center
     bbox = draw.textbbox((0, 0), preview_text, font=font)
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
@@ -112,14 +110,14 @@ def generate_preview(video_path, font_path, position="bottom",
     text_x = (W - text_w) // 2
     text_y = box_y + (blur_height - text_h) // 2
 
-    # Outline
-    for dx in [-2, -1, 0, 1, 2]:
-        for dy in [-2, -1, 0, 1, 2]:
+    # Outline — Thick
+    for dx in [-3, -2, -1, 0, 1, 2, 3]:
+        for dy in [-3, -2, -1, 0, 1, 2, 3]:
             draw.text((text_x + dx, text_y + dy), preview_text,
                       font=font, fill=(0, 0, 0, 255))
     draw.text((text_x, text_y), preview_text, font=font, fill=(255, 255, 255, 255))
 
-    # Save — Resize for Streamlit
+    # Save — Resize
     preview_path = "preview.png"
     preview_w = 720
     preview_h = int(H * (preview_w / W))
@@ -289,28 +287,34 @@ def run_tts_chunked(text, output_path, ref_audio_path=None, progress_callback=No
 # 🆕 FFmpeg — Burn Subtitle + Blur Box
 # ============================================================
 def burn_subtitle_with_blur(video_path, srt_path, output_path,
-                              font_name=MYANMAR_FONT, font_size=24,
-                              position="bottom", blur_height=150):
+                              font_name=MYANMAR_FONT, font_size=44,
+                              position="bottom", blur_height=268):
     """Subtitle + Blur Box — FFmpeg"""
     W, H, _ = get_video_info(video_path)
 
     # Box Y Position
-    box_y = {
-        "bottom": H - blur_height,
-        "center": (H - blur_height) // 2,
-        "top": 0
-    }[position]
+    if position == "bottom":
+        box_y = H - blur_height
+    elif position == "center":
+        box_y = (H - blur_height) // 2
+    else:
+        box_y = 0
 
-    # Subtitle Alignment
+    # Subtitle Alignment (SSA)
     alignment = {"bottom": 2, "center": 5, "top": 8}[position]
-    margin_v = {"bottom": 30, "center": 0, "top": 30}[position]
+
+    # Margin — Blur Box Center
+    if position in ["bottom", "top"]:
+        margin_v = max(20, int(blur_height / 2))
+    else:
+        margin_v = 0
 
     style = (
         f"FontName={font_name},"
         f"FontSize={font_size},"
         f"PrimaryColour=&H00FFFFFF,"
         f"OutlineColour=&H00000000,"
-        f"BorderStyle=1,Outline=2,Shadow=1,"
+        f"BorderStyle=1,Outline=3,Shadow=1,"
         f"Alignment={alignment},MarginV={margin_v}"
     )
 
@@ -320,7 +324,7 @@ def burn_subtitle_with_blur(video_path, srt_path, output_path,
 
     # Filter Complex — Blur Box + Subtitle
     filter_complex = (
-        f"color=c=black@0.5:s={W}x{blur_height}:d=999999[box];"
+        f"color=c=black@0.6:s={W}x{blur_height}:d=999999[box];"
         f"[0:v][box]overlay=0:{box_y}:shortest=1[blurred];"
         f"[blurred]subtitles='{srt_escaped}':force_style='{style}':fontsdir='{font_dir_escaped}'[outv]"
     )
@@ -391,7 +395,7 @@ if ref_audio is not None:
 video_file = st.file_uploader("📹 Video Upload", type=["mp4", "mov", "avi", "mkv"])
 
 # ============================================================
-# 🆕 Subtitle + Blur Settings
+# Subtitle + Blur Settings
 # ============================================================
 st.header("📝 Subtitle + Blur Settings")
 
@@ -403,22 +407,22 @@ if use_subtitle:
         ["bottom", "center", "top"],
         format_func=lambda x: {"bottom": "⬇️ အောက်ခြေ", "center": "⬅️ အလယ်", "top": "⬆️ အပေါ်"}[x]
     )
-    sub_font_size = st.slider("Font Size", 16, 72, 24)
-    blur_height = st.slider("Blur Box အမြင့်", 80, 300, 150)
+    sub_font_size = st.slider("Font Size", 16, 80, 44)
+    blur_height = st.slider("Blur Box အမြင့်", 80, 400, 268)
 else:
     sub_position = "bottom"
-    sub_font_size = 24
-    blur_height = 150
+    sub_font_size = 44
+    blur_height = 268
 
 # ============================================================
-# 🆕 Preview — Blur Box + Text
+# Preview
 # ============================================================
 if video_file is not None and use_subtitle:
+    st.subheader("🖼️ Preview — Blur Box + Subtitle")
     with st.spinner("🖼️ Preview — ဖန်တီးနေသည်..."):
-        # Save Video — Preview
         temp_video_preview = "preview_video.mp4"
+        video_file.seek(0)
         with open(temp_video_preview, "wb") as f:
-            video_file.seek(0)
             f.write(video_file.read())
 
         preview_path = generate_preview(
@@ -431,8 +435,8 @@ if video_file is not None and use_subtitle:
         )
 
         if preview_path:
-            st.image(preview_path, caption="🖼️ Preview — Blur Box + Subtitle", use_container_width=True)
-            st.caption(f"📍 Position: {sub_position} | Font: {sub_font_size} | Blur: {blur_height}px")
+            st.image(preview_path, caption="🖼️ Preview", use_container_width=True)
+            st.caption(f"📍 {sub_position} | Font: {sub_font_size} | Blur: {blur_height}px")
 
 # Sidebar
 st.sidebar.header("🎙️ TTS Spaces")
@@ -479,12 +483,10 @@ if st.button("✨ Generate Recap Video", type="primary"):
         st.error(f"❌ VoxCPM2 error: {e}")
         st.stop()
 
-    # Audio Speed
     tempo = audio_dur / video_duration
     tempo = max(0.5, min(2.0, tempo))
     st.write(f"⚡ Audio Speed: {tempo:.2f}x")
 
-    # SRT
     srt_path = None
     if use_subtitle:
         with st.spinner("📝 Script → SRT..."):
@@ -492,7 +494,6 @@ if st.button("✨ Generate Recap Video", type="primary"):
             if srt_path and os.path.exists(srt_path):
                 st.success("✅ SRT — ဖန်တီးပြီး")
 
-    # Render
     with st.spinner("🎬 Recap Video Render..."):
         temp_video = "temp_recap.mp4"
         input_video = ffmpeg.input(video_filename)
