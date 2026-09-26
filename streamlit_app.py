@@ -24,7 +24,7 @@ FONT_FILE = "MyanmarPadaung.ttf"
 # Default Settings
 DEFAULT_SUB_POSITION = "center"
 DEFAULT_FONT_SIZE = 30
-DEFAULT_BLUR_HEIGHT = 120
+DEFAULT_BLUR_HEIGHT = 100
 DEFAULT_BLUR_ALPHA = 160
 
 # ============================================================
