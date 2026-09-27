@@ -1,607 +1,351 @@
 import streamlit as st
-import os
-import re
-import time
-import ffmpeg
-import shutil
-import subprocess
-import numpy as np
+import os, re, ffmpeg, shutil, subprocess
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 from gradio_client import Client, handle_file
 
-# ============================================================
-# Config
-# ============================================================
-VOXCPM_SPACES = [
-    {"name": "Primary — VoxCPM Demo", "space": "openbmb/VoxCPM-Demo", "type": "demo"},
-    {"name": "Fallback — Burmese TTS", "space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
+# ===== Config =====
+SPACES = [
+    {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
+    {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
 ]
-
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-# Default Settings
-DEFAULT_SUB_POSITION = "center"
-DEFAULT_FONT_SIZE = 30
-DEFAULT_BLUR_HEIGHT = 100
-DEFAULT_BLUR_ALPHA = 160
+# ⚡ အမြန်ဆုံး Settings
+FS, BH, BA = 30, 100, 100
+ENC_PRESET = "ultrafast"   # ⚡ အမြန်ဆုံး (ရှေ့ medium)
+ENC_CRF = 23               # ⚡ မြန် (ရှေ့ 18)
+AUDIO_BITRATE = "128k"     # ⚡ မြန် (ရှေ့ 192k)
+TTS_CHUNK = 600            # ⚡ API Call နည်း (ရှေ့ 400)
 
-# ============================================================
-# Password
-# ============================================================
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
+st.set_page_config(page_title="VoxCPM2 Recap", page_icon="🎬", layout="centered")
 
-if not st.session_state.authenticated:
-    st.title("🔐 Private App")
-    pwd = st.text_input("Password", type="password")
-    if st.button("Login"):
-        if pwd == PASSWORD:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("❌ Password မှား")
+# ===== CSS =====
+st.markdown("""
+<style>
+.stApp{background:linear-gradient(160deg,#0f0f23,#1a1a35,#0f0f23);color:#e8e8f0}
+#MainMenu,footer,header{visibility:hidden}
+.main-title{text-align:center;font-size:2.2rem;font-weight:900;
+ background:linear-gradient(90deg,#ff6b9d,#c66bff,#6ba8ff);
+ -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+ background-clip:text;margin-bottom:4px}
+.main-sub{text-align:center;color:#8888aa;font-size:.9rem;margin-bottom:20px}
+.stButton>button{background:linear-gradient(135deg,#667eea,#764ba2)!important;
+ color:#fff!important;border:none!important;border-radius:10px!important;
+ padding:12px 20px!important;font-weight:600!important;
+ box-shadow:0 4px 15px rgba(102,126,234,.3)!important}
+.stButton>button:hover{transform:translateY(-1px)!important;
+ box-shadow:0 6px 20px rgba(102,126,234,.5)!important}
+.stTextArea textarea{background:rgba(255,255,255,.04)!important;
+ border:1px solid rgba(255,255,255,.1)!important;color:#fff!important;
+ border-radius:10px!important}
+.stTextArea textarea:focus{border-color:#667eea!important;
+ box-shadow:0 0 0 2px rgba(102,126,234,.2)!important}
+.stFileUploader{background:rgba(255,255,255,.02);border-radius:10px;padding:8px}
+.stAlert{border-radius:10px!important;border:none!important}
+hr{border-color:rgba(255,255,255,.08);margin:24px 0}
+</style>
+""", unsafe_allow_html=True)
+
+# ===== Password =====
+if "auth" not in st.session_state:
+    st.session_state.auth = False
+
+if not st.session_state.auth:
+    st.markdown("<div class='main-title'>🔐 Private App</div>", unsafe_allow_html=True)
+    st.markdown("<div class='main-sub'>Password ထည့်ပြီး ဝင်ပါ</div>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        pwd = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Password")
+        if st.button("Login", use_container_width=True):
+            if pwd == PASSWORD:
+                st.session_state.auth = True
+                st.rerun()
+            else:
+                st.error("Password မှား")
     st.stop()
 
-# ============================================================
-# Helper Functions
-# ============================================================
-def get_video_info(video_path):
-    probe = ffmpeg.probe(video_path)
-    vs = next(s for s in probe['streams'] if s['codec_type'] == 'video')
-    duration = float(probe['format']['duration'])
-    return int(vs['width']), int(vs['height']), duration
+
+# ===== Helpers =====
+def vid_info(p):
+    pr = ffmpeg.probe(p)
+    v = next(s for s in pr['streams'] if s['codec_type'] == 'video')
+    return int(v['width']), int(v['height']), float(pr['format']['duration'])
 
 
-def srt_time(sec):
-    ms = int(round((sec - int(sec)) * 1000))
-    total = int(sec)
-    if ms >= 1000:
-        total += 1
-        ms = 0
-    h, rem = divmod(total, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+def t2s(s):
+    ms = int(round((s - int(s)) * 1000)); tot = int(s)
+    if ms >= 1000: tot += 1; ms = 0
+    h, r = divmod(tot, 3600); m, sec = divmod(r, 60)
+    return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
 
 
-def ts_to_sec(ts):
+def s2t(ts):
     ts = ts.strip()
     m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$', ts)
     if m:
         h, mi, se, ms = m.groups()
-        return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3, '0')) / 1000.0
+        return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3,'0'))/1000
     m = re.match(r'^(\d{1,2}):(\d{2})[,.](\d{1,3})$', ts)
     if m:
         mi, se, ms = m.groups()
-        return int(mi)*60 + int(se) + int(ms.ljust(3, '0')) / 1000.0
+        return int(mi)*60 + int(se) + int(ms.ljust(3,'0'))/1000
     return None
 
 
-def render_subtitle_png(text, output_path, font_path,
-                         width, height, font_size=30,
-                         position="center", blur_height=120,
-                         blur_alpha=160):
-    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    try:
-        font = ImageFont.truetype(font_path, font_size)
-    except Exception:
-        font = ImageFont.load_default()
-
-    if position == "bottom":
-        box_y = height - blur_height
-    elif position == "center":
-        box_y = (height - blur_height) // 2
-    else:
-        box_y = 0
-
-    draw.rectangle(
-        [0, box_y, width, box_y + blur_height],
-        fill=(0, 0, 0, blur_alpha)
-    )
-
-    max_chars_per_line = max(15, int(width / (font_size * 0.9)))
-    words = text.split()
-    lines = []
-    cur = ""
-    for w in words:
-        if len(cur) + len(w) + 1 <= max_chars_per_line:
-            cur = cur + " " + w if cur else w
+def render_png(text, out, fp, W, H, fs=30, pos="center", bh=100, ba=100):
+    """SRT PNG Overlay — မူရင်း နည်းလမ်း — Pixel Perfect"""
+    img = Image.new("RGBA", (W, H), (0,0,0,0)); d = ImageDraw.Draw(img)
+    try: f = ImageFont.truetype(fp, fs)
+    except: f = ImageFont.load_default()
+    by = (H-bh)//2 if pos=="center" else (H-bh if pos=="bottom" else 0)
+    d.rectangle([0, by, W, by+bh], fill=(0,0,0,ba))
+    mc = max(15, int(W/(fs*0.9))); lines, cur = [], ""
+    for w in text.split():
+        if len(cur)+len(w)+1 <= mc: cur = cur+" "+w if cur else w
         else:
-            if cur:
-                lines.append(cur)
+            if cur: lines.append(cur)
             cur = w
-    if cur:
-        lines.append(cur)
-
-    line_h = int(font_size * 1.3)
-    total_h = len(lines) * line_h
-    text_y = box_y + (blur_height - total_h) // 2
-
-    for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        line_w = bbox[2] - bbox[0]
-        line_x = (width - line_w) // 2
-
-        for dx in [-2, -1, 0, 1, 2]:
-            for dy in [-2, -1, 0, 1, 2]:
-                draw.text((line_x + dx, text_y + dy), line,
-                          font=font, fill=(0, 0, 0, 255))
-        draw.text((line_x, text_y), line, font=font, fill=(255, 255, 255, 255))
-
-        text_y += line_h
-
-    img.save(output_path, "PNG")
-    return output_path
+    if cur: lines.append(cur)
+    lh = int(fs*1.3); ty = by + (bh - len(lines)*lh)//2
+    for ln in lines:
+        bb = d.textbbox((0,0), ln, font=f); lw = bb[2]-bb[0]; lx = (W-lw)//2
+        for dx in [-2,-1,0,1,2]:
+            for dy in [-2,-1,0,1,2]: d.text((lx+dx, ty+dy), ln, font=f, fill=(0,0,0,255))
+        d.text((lx, ty), ln, font=f, fill=(255,255,255,255)); ty += lh
+    img.save(out, "PNG"); return out
 
 
-def script_to_srt(script, audio_duration, srt_path, max_chars=30):
-    sentences = script.replace("။", "။|").split("|")
-    sentences = [s.strip() + "။" for s in sentences if s.strip()]
-    if not sentences:
-        return None
-
-    split_sentences = []
-    for sent in sentences:
-        sent = sent.replace("။။", "။")
-        if len(sent) <= max_chars:
-            split_sentences.append(sent)
+def scr_to_srt(scr, dur, path, mc=30):
+    sents = [s.strip()+"။" for s in scr.replace("။","။|").split("|") if s.strip()]
+    if not sents: return None
+    parts = []
+    for s in sents:
+        s = s.replace("။။","။")
+        if len(s) <= mc: parts.append(s)
         else:
-            words = sent.split()
             cur = ""
-            for w in words:
-                if len(cur) + len(w) + 1 <= max_chars:
-                    cur = cur + " " + w if cur else w
+            for w in s.split():
+                if len(cur)+len(w)+1 <= mc: cur = cur+" "+w if cur else w
                 else:
-                    if cur:
-                        split_sentences.append(cur.strip())
+                    if cur: parts.append(cur.strip())
                     cur = w
-            if cur:
-                split_sentences.append(cur.strip())
-
-    if not split_sentences:
-        return None
-
-    total_chars = sum(len(s) for s in split_sentences)
-    current = 0.0
-
-    with open(srt_path, "w", encoding="utf-8") as f:
-        for i, sent in enumerate(split_sentences, 1):
-            dur = (len(sent) / total_chars) * audio_duration
-            f.write(f"{i}\n{srt_time(current)} --> {srt_time(current + dur)}\n{sent}\n\n")
-            current += dur
-
-    return srt_path
+            if cur: parts.append(cur.strip())
+    if not parts: return None
+    tot = sum(len(p) for p in parts); cur = 0.0
+    with open(path, "w", encoding="utf-8") as f:
+        for i, p in enumerate(parts, 1):
+            d = (len(p)/tot)*dur
+            f.write(f"{i}\n{t2s(cur)} --> {t2s(cur+d)}\n{p}\n\n"); cur += d
+    return path
 
 
-def parse_srt(srt_path):
-    with open(srt_path, "r", encoding="utf-8") as f:
-        raw = f.read().replace("\r\n", "\n").replace("\r", "\n")
-
-    chunks = re.split(r"\n\s*\n", raw.strip())
-    segments = []
-
-    for chunk in chunks:
-        lines = [ln for ln in chunk.split("\n") if ln.strip()]
-        if len(lines) < 3:
-            continue
-        ts_line = next((ln for ln in lines if "-->" in ln), None)
-        if not ts_line:
-            continue
-
-        parts = re.split(r"\s*-->\s*", ts_line)
-        if len(parts) != 2:
-            continue
-
-        start = ts_to_sec(parts[0])
-        end = ts_to_sec(parts[1])
-        if start is None or end is None:
-            continue
-
-        ts_idx = lines.index(ts_line)
-        text = " ".join(lines[ts_idx + 1:]).strip()
-        if text:
-            segments.append({"start": start, "end": end, "text": text})
-
-    return segments
+def parse_srt(path):
+    with open(path, "r", encoding="utf-8") as f:
+        raw = f.read().replace("\r\n","\n").replace("\r","\n")
+    segs = []
+    for ck in re.split(r"\n\s*\n", raw.strip()):
+        ls = [l for l in ck.split("\n") if l.strip()]
+        if len(ls) < 3: continue
+        ts = next((l for l in ls if "-->" in l), None)
+        if not ts: continue
+        p = re.split(r"\s*-->\s*", ts)
+        if len(p) != 2: continue
+        a, b = s2t(p[0]), s2t(p[1])
+        if a is None or b is None: continue
+        idx = ls.index(ts); txt = " ".join(ls[idx+1:]).strip()
+        if txt: segs.append({"start": a, "end": b, "text": txt})
+    return segs
 
 
-def overlay_subtitle_on_video(video_path, srt_path, output_path,
-                                font_path, font_size=30,
-                                position="center", blur_height=120,
-                                blur_alpha=160):
-    W, H, duration = get_video_info(video_path)
-
-    segments = parse_srt(srt_path)
-    if not segments:
-        raise Exception("SRT — segments မရှိ")
-
-    png_dir = "subtitle_pngs"
-    os.makedirs(png_dir, exist_ok=True)
-
-    png_files = []
-    for i, seg in enumerate(segments):
-        png_path = os.path.join(png_dir, f"sub_{i:04d}.png")
-        render_subtitle_png(
-            text=seg["text"],
-            output_path=png_path,
-            font_path=font_path,
-            width=W,
-            height=H,
-            font_size=font_size,
-            position=position,
-            blur_height=blur_height,
-            blur_alpha=blur_alpha
-        )
-        png_files.append({
-            "path": png_path,
-            "start": seg["start"],
-            "end": seg["end"]
-        })
-
-    cmd = ["ffmpeg", "-y", "-i", video_path]
-    for p in png_files:
-        cmd += ["-i", p["path"]]
-
-    filters = []
-    current = "[0:v]"
-
-    for i, p in enumerate(png_files):
-        out_label = f"[v{i}]"
-        filters.append(
-            f"{current}[{i+1}:v]overlay=0:0:"
-            f"enable='between(t,{p['start']:.3f},{p['end']:.3f})'"
-            f"{out_label}"
-        )
-        current = out_label
-
-    filter_complex = ";".join(filters)
-
-    cmd += [
-        "-filter_complex", filter_complex,
-        "-map", current,
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-crf", "18",
-        "-preset", "medium",
-        "-c:a", "copy",
-        output_path
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True,
-                            encoding="utf-8", errors="ignore")
-    if result.returncode != 0:
-        raise Exception(f"FFmpeg error:\n{(result.stderr or '')[-1000:]}")
-
-    for p in png_files:
-        try:
-            os.remove(p["path"])
-        except Exception:
-            pass
-
-    return output_path
+def overlay(vp, sp, op, fp, fs=30, pos="center", bh=100, ba=100):
+    """SRT → PNG Overlay — မူရင်း နည်းလမ်း — Pixel Perfect Subtitle"""
+    W, H, _ = vid_info(vp); segs = parse_srt(sp)
+    if not segs: raise Exception("SRT empty")
+    os.makedirs("subtitle_pngs", exist_ok=True); pngs = []
+    for i, s in enumerate(segs):
+        p = f"subtitle_pngs/s_{i:04d}.png"
+        render_png(s["text"], p, fp, W, H, fs, pos, bh, ba)
+        pngs.append({"p": p, "a": s["start"], "b": s["end"]})
+    cmd = ["ffmpeg","-y","-i",vp] + sum([["-i",x["p"]] for x in pngs], [])
+    flt, cur = [], "[0:v]"
+    for i, x in enumerate(pngs):
+        lbl = f"[v{i}]"
+        flt.append(f"{cur}[{i+1}:v]overlay=0:0:enable='between(t,{x['a']:.3f},{x['b']:.3f})'{lbl}")
+        cur = lbl
+    cmd += ["-filter_complex",";".join(flt),"-map",cur,"-map","0:a?",
+            "-c:v","libx264","-crf",str(ENC_CRF),"-preset",ENC_PRESET,
+            "-c:a","copy",op]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-500:]}")
+    for x in pngs:
+        try: os.remove(x["p"])
+        except: pass
+    return op
 
 
-def split_script(text, max_chars=400):
-    sentences = text.replace("။", "။|").split("|")
-    sentences = [s.strip() + "။" for s in sentences if s.strip()]
-    chunks = []
-    current = ""
-    for s in sentences:
-        if len(current) + len(s) <= max_chars:
-            current += s
+def split_scr(t, mc=TTS_CHUNK):
+    sents = [s.strip()+"။" for s in t.replace("။","။|").split("|") if s.strip()]
+    out, cur = [], ""
+    for s in sents:
+        if len(cur)+len(s) <= mc: cur += s
         else:
-            if current:
-                chunks.append(current)
-            if len(s) > max_chars:
-                for i in range(0, len(s), max_chars):
-                    chunks.append(s[i:i + max_chars])
-                current = ""
-            else:
-                current = s
-    if current:
-        chunks.append(current)
-    return chunks
+            if cur: out.append(cur)
+            if len(s) > mc:
+                for i in range(0, len(s), mc): out.append(s[i:i+mc])
+                cur = ""
+            else: cur = s
+    if cur: out.append(cur)
+    return out
 
 
-def tts_demo(chunks, ref_audio_path, space, progress_callback=None):
-    client = Client(space)
-    audio_files = []
-    ref_file = handle_file(ref_audio_path) if ref_audio_path else None
-    for i, chunk in enumerate(chunks):
-        if progress_callback:
-            progress_callback(i, len(chunks), chunk)
-        result = client.predict(
-            text_input=chunk,
+def tts_run(chunks, ref, space, cb=None):
+    cl = Client(space); files = []; rf = handle_file(ref) if ref else None
+    for i, c in enumerate(chunks):
+        if cb: cb(i, len(chunks), c)
+        res = cl.predict(text_input=c,
             control_instruction="A warm young woman, calm and expressive",
-            reference_wav_path_input=ref_file,
-            use_prompt_text=False,
-            prompt_text_input="",
-            cfg_value_input=2.0,
-            do_normalize=True,
-            denoise=False,
-            api_name="/generate",
-        )
-        audio_path = result[0] if isinstance(result, (tuple, list)) else result
-        chunk_path = f"chunk_demo_{i}.wav"
-        shutil.copy(audio_path, chunk_path)
-        audio_files.append(chunk_path)
-    return audio_files
+            reference_wav_path_input=rf, use_prompt_text=False,
+            prompt_text_input="", cfg_value_input=2.0,
+            do_normalize=True, denoise=False, api_name="/generate")
+        p = res[0] if isinstance(res, (tuple, list)) else res
+        dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
+    return files
 
 
-def tts_burmese(chunks, ref_audio_path, space, progress_callback=None):
-    client = Client(space)
-    audio_files = []
-    if not ref_audio_path:
-        raise Exception(f"{space} — Reference Audio လိုတယ်")
-    ref_file = handle_file(ref_audio_path)
-    for i, chunk in enumerate(chunks):
-        if progress_callback:
-            progress_callback(i, len(chunks), chunk)
-        result = client.predict(
-            target_text=chunk,
-            ref_audio=ref_file,
-            ref_text="မြန်မာ အသံနမူနာ",
-            cfg_value=2.0,
-            inference_timesteps=10,
-            api_name="/tts"
-        )
-        audio_path = result[0] if isinstance(result, (tuple, list)) else result
-        chunk_path = f"chunk_burmese_{i}.wav"
-        shutil.copy(audio_path, chunk_path)
-        audio_files.append(chunk_path)
-    return audio_files
+def tts_burmese(chunks, ref, space, cb=None):
+    cl = Client(space); files = []
+    if not ref: raise Exception("Reference Audio needed")
+    rf = handle_file(ref)
+    for i, c in enumerate(chunks):
+        if cb: cb(i, len(chunks), c)
+        res = cl.predict(target_text=c, ref_audio=rf,
+            ref_text="မြန်မာ အသံနမူနာ", cfg_value=2.0,
+            inference_timesteps=10, api_name="/tts")
+        p = res[0] if isinstance(res, (tuple, list)) else res
+        dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
+    return files
 
 
-def run_tts_chunked(text, output_path, ref_audio_path=None, progress_callback=None):
-    chunks = split_script(text, max_chars=400)
-    audio_files = None
-    last_error = None
-
-    for space_info in VOXCPM_SPACES:
-        space = space_info["space"]
-        name = space_info["name"]
-        space_type = space_info["type"]
-
+def tts_all(text, out, ref=None, cb=None):
+    chunks = split_scr(text, TTS_CHUNK); files = None
+    for s in SPACES:
         try:
-            st.info(f"🎙️ {name}...")
-            if space_type == "demo":
-                audio_files = tts_demo(chunks, ref_audio_path, space, progress_callback)
-            else:
-                audio_files = tts_burmese(chunks, ref_audio_path, space, progress_callback)
-            st.success(f"✅ {name} — အောင်မြင်")
+            if s["type"] == "demo": files = tts_run(chunks, ref, s["space"], cb)
+            else: files = tts_burmese(chunks, ref, s["space"], cb)
             break
-        except Exception as e:
-            last_error = str(e)
-            st.warning(f"⚠️ {name} — Fail: {last_error[:120]}")
-            audio_files = None
-            continue
-
-    if audio_files is None:
-        raise Exception(f"❌ Space အားလုံး — Fail\nLast error: {last_error}")
-
-    with open("concat_list.txt", "w", encoding="utf-8") as f:
-        for audio in audio_files:
-            f.write(f"file '{audio}'\n")
-
-    ffmpeg.input("concat_list.txt", format="concat", safe=0).output(
-        output_path, acodec="libmp3lame", audio_bitrate="192k", ar=48000
+        except Exception:
+            files = None; continue
+    if files is None: raise Exception("TTS Failed")
+    with open("concat.txt", "w", encoding="utf-8") as f:
+        for a in files: f.write(f"file '{a}'\n")
+    ffmpeg.input("concat.txt", format="concat", safe=0).output(
+        out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
     ).run(overwrite_output=True)
+    return out
 
-    return output_path
-    # ============================================================
-# UI
-# ============================================================
-st.set_page_config(page_title="🎬 VoxCPM2 Movie Recap", page_icon="🎬")
-st.title("🎬 VoxCPM2 Movie Recap")
-st.write("Gemini Web မှ Script ရယူပြီး VoxCPM2 အသံနဲ့ Recap ဖန်တီးပါ")
 
-if os.path.exists(FONT_FILE):
-    st.sidebar.success(f"✅ Font: {FONT_FILE}")
-else:
-    st.sidebar.warning(f"⚠️ {FONT_FILE} — မရှိ")
+# ===== UI =====
+st.markdown("<div class='main-title'>🎬 VoxCPM2 Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Recap Video</div>", unsafe_allow_html=True)
+st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}")
+st.divider()
 
 # Step 1
-st.header("📝 Step 1: Gemini Web → Script")
-st.info("**Gemini Web:** [gemini.google.com](https://gemini.google.com) → Video Upload → Prompt → Script Copy")
+st.subheader("📝 Step 1 — Gemini Web မှ Script")
+st.link_button("🌐 Open Gemini Web", "https://gemini.google.com", use_container_width=True)
+with st.expander("📋 Prompt — Copy"):
+    st.code("Watch this video carefully and write a clear, continuous movie recap script in Myanmar language for audio narration that matches the length of the video. Return plain speech text only without markdown titles.", language="text")
+st.divider()
 
-with st.expander("📋 Prompt (Copy → Gemini Web)", expanded=True):
-    st.code(
-        "Watch this video carefully and write a clear, continuous movie recap script "
-        "in Myanmar language for audio narration that matches the length of the video. "
-        "Return plain speech text only without markdown titles.",
-        language="text"
-    )
-
-# ============================================================
-# Step 2: Script Paste + Delete Button
-# ============================================================
-st.header("📝 Step 2: Script Paste")
-
-if "script_text" not in st.session_state:
-    st.session_state.script_text = ""
-
-# ⚠️ — Text Area — Key မပါ
-script = st.text_area(
-    "Script",
-    value=st.session_state.script_text,
-    height=250,
-    placeholder="မြန်မာ Script paste..."
-)
-
-st.session_state.script_text = script
-
-# 🆕 Counter
-st.caption(f"📝 စာလုံး: {len(script)}")
-
-# 🆕 Delete Button — ကြီး + သီးသန့်
-st.markdown("---")
-if st.button("🗑️  Script အားလုံး ဖျက်မယ်  🗑️", type="primary", use_container_width=True):
-    st.session_state.script_text = ""
-    st.rerun()
-st.markdown("---")
+# Step 2
+st.subheader("📝 Step 2 — Script Paste")
+if "script" not in st.session_state: st.session_state.script = ""
+script = st.text_area("Script", value=st.session_state.script, height=220, label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
+st.session_state.script = script
+c1, c2 = st.columns([3, 1])
+with c1: st.caption(f"📝 စာလုံး — {len(script):,}")
+with c2:
+    if st.button("🗑️ Clear", use_container_width=True):
+        st.session_state.script = ""; st.rerun()
+st.divider()
 
 # Step 3
-st.header("🎙️ Step 3: Reference Audio + Video")
-if "ref_audio_path" not in st.session_state:
-    st.session_state.ref_audio_path = None
-
-ref_audio = st.file_uploader("Reference Audio", type=["wav", "mp3", "m4a"])
-if ref_audio is not None:
-    ref_path = "reference_voice.wav"
-    with open(ref_path, "wb") as f:
-        f.write(ref_audio.read())
-    st.session_state.ref_audio_path = ref_path
-    st.success("✅ Reference Audio")
-
-video_file = st.file_uploader("📹 Video Upload", type=["mp4", "mov", "avi", "mkv"])
-
-# Subtitle Settings
-st.header("📝 Subtitle Settings")
-use_subtitle = st.toggle("📝 စာတန်းထိုး (Burn-in)", value=True)
-
-sub_position = DEFAULT_SUB_POSITION
-sub_font_size = DEFAULT_FONT_SIZE
-blur_height = DEFAULT_BLUR_HEIGHT
-blur_alpha = DEFAULT_BLUR_ALPHA
-
-st.info(
-    f"📍 နေရာ: **အလယ်** | "
-    f"🔤 Font Size: **{sub_font_size}** | "
-    f"⬛ Blur Box: **{blur_height}px** | "
-    f"🎨 Opacity: **{blur_alpha}**"
-)
-
-# Preview
-if video_file is not None and use_subtitle:
-    st.subheader("🖼️ Preview")
-    with st.spinner("🖼️ Preview..."):
-        temp_video_preview = "preview_video.mp4"
-        video_file.seek(0)
-        with open(temp_video_preview, "wb") as f:
-            f.write(video_file.read())
-
-        W, H, _ = get_video_info(temp_video_preview)
-        preview_png = "preview_sub.png"
-        render_subtitle_png(
-            text="စာတန်းထိုး Preview",
-            output_path=preview_png,
-            font_path=FONT_FILE,
-            width=W,
-            height=H,
-            font_size=sub_font_size,
-            position=sub_position,
-            blur_height=blur_height,
-            blur_alpha=blur_alpha
-        )
-
-        cap = cv2.VideoCapture(temp_video_preview)
-        ret, frame = cap.read()
-        cap.release()
-
-        if ret:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            bg = Image.fromarray(frame_rgb).convert("RGBA")
-            fg = Image.open(preview_png).convert("RGBA")
-            composite = Image.alpha_composite(bg, fg)
-
-            pw = 720
-            ph = int(H * (pw / W))
-            composite.resize((pw, ph), Image.LANCZOS).convert("RGB").save("preview_result.png")
-            st.image("preview_result.png", caption="🖼️ Preview", use_container_width=True)
-
-# Sidebar
-st.sidebar.header("🎙️ TTS Spaces")
-for i, s in enumerate(VOXCPM_SPACES, 1):
-    st.sidebar.write(f"**{i}.** `{s['space']}`")
+st.subheader("📁 Step 3 — Ref Audio + Video")
+if "ref" not in st.session_state: st.session_state.ref = None
+c1, c2 = st.columns(2)
+with c1:
+    ref = st.file_uploader("🎤 Ref Audio (Optional)", type=["wav","mp3","m4a"])
+    if ref:
+        with open("ref.wav", "wb") as f: f.write(ref.read())
+        st.session_state.ref = "ref.wav"; st.success("✅ Ref Audio Ready")
+with c2:
+    vid = st.file_uploader("📹 Video Upload", type=["mp4","mov","avi","mkv"])
+    if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
+st.divider()
 
 # Step 4
-st.header("🚀 Step 4: Generate Recap")
+st.subheader("📝 Step 4 — Subtitle")
+use_sub = st.toggle("စာတန်းထိုး (Burn-in)", value=True)
+if use_sub: st.caption(f"🔤 Font {FS}  •  ⬛ Box {BH}px  •  🎨 Opacity {BA}")
 
-if st.button("✨ Generate Recap Video", type="primary"):
-    if not script.strip():
-        st.error("❌ Script paste — Step 2")
-        st.stop()
-    if video_file is None:
-        st.error("❌ Video Upload — Step 3")
-        st.stop()
+if vid and use_sub:
+    st.markdown("**🖼️ Preview**")
+    with st.spinner("Preview..."):
+        vid.seek(0)
+        with open("preview.mp4", "wb") as f: f.write(vid.read())
+        W, H, _ = vid_info("preview.mp4")
+        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, "center", BH, BA)
+        cap = cv2.VideoCapture("preview.mp4"); ok, fr = cap.read(); cap.release()
+        if ok:
+            bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+            fg = Image.open("prev.png").convert("RGBA")
+            comp = Image.alpha_composite(bg, fg); pw = 720
+            comp.resize((pw, int(H*(pw/W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
+            st.image("prev_out.png", use_container_width=True)
+st.divider()
 
-    with st.spinner("📹 Video — စစ်ဆေးနေသည်..."):
-        video_filename = "input_video.mp4"
-        video_file.seek(0)
-        with open(video_filename, "wb") as f:
-            f.write(video_file.read())
-        W, H, video_duration = get_video_info(video_filename)
-        st.write(f"📹 Video: {W}x{H} | Duration: {video_duration:.2f}s")
+# Step 5
+st.subheader("🚀 Step 5 — Generate Recap")
+if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
+    if not script.strip(): st.error("Script paste လုပ်ပါ"); st.stop()
+    if vid is None: st.error("Video Upload တင်ပါ"); st.stop()
 
-    st.write("🎙️ VoxCPM2 → အသံ...")
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    vid.seek(0)
+    with open("input.mp4", "wb") as f: f.write(vid.read())
+    _, _, vdur = vid_info("input.mp4")
 
-    def update_progress(i, total, chunk):
-        progress_bar.progress((i + 1) / total)
-        status_text.write(f"🎙️ [{i+1}/{total}] ({len(chunk)} စာလုံး)")
+    pb = st.progress(0); txt = st.empty()
+    def cb(i, tot, c):
+        pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}] {len(c)} စာလုံး")
 
-    audio_path = "recap_voice.mp3"
+    # TTS
+    try: tts_all(script, "voice.mp3", st.session_state.ref, cb)
+    except Exception as e: st.error(f"TTS — {e}"); st.stop()
 
-    try:
-        run_tts_chunked(script, audio_path,
-                        ref_audio_path=st.session_state.ref_audio_path,
-                        progress_callback=update_progress)
-        st.write("✅ အသံ ထုတ်ပြီး")
-        audio_dur = float(ffmpeg.probe(audio_path)['format']['duration'])
-        st.write(f"🎙️ Audio: {audio_dur:.1f}s")
-    except Exception as e:
-        st.error(f"❌ VoxCPM2 error: {e}")
-        st.stop()
+    adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
+    tempo = max(0.5, min(2.0, adur/vdur))
 
-    tempo = audio_dur / video_duration
-    tempo = max(0.5, min(2.0, tempo))
-    st.write(f"⚡ Audio Speed: {tempo:.2f}x")
+    sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
 
-    srt_path = None
-    if use_subtitle:
-        with st.spinner("📝 Script → SRT..."):
-            srt_path = script_to_srt(script, video_duration, "recap.srt")
-            if srt_path and os.path.exists(srt_path):
-                st.success("✅ SRT — ဖန်တီးပြီး")
+    # ⚡ Render — Fast
+    with st.spinner("🎬 Rendering — Fast Mode..."):
+        vi = ffmpeg.input("input.mp4")
+        va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
+        ffmpeg.output(vi.video, va, "temp.mp4",
+                       vcodec='libx264', crf=ENC_CRF, preset=ENC_PRESET,
+                       acodec='aac', audio_bitrate=AUDIO_BITRATE, shortest=None
+                       ).run(overwrite_output=True)
 
-    with st.spinner("🎬 Recap Video Render..."):
-        temp_video = "temp_recap.mp4"
-        input_video = ffmpeg.input(video_filename)
-        input_audio = ffmpeg.input(audio_path).audio.filter('atempo', tempo)
-
-        stream = ffmpeg.output(
-            input_video.video, input_audio, temp_video,
-            vcodec='libx264', crf=18, preset='medium',
-            acodec='aac', audio_bitrate='192k',
-            shortest=None
-        )
-        ffmpeg.run(stream, overwrite_output=True)
-
-        final_path = "final_recap.mp4"
-
-        if use_subtitle and srt_path:
-            with st.spinner("📝 Subtitle Overlay — လုပ်နေသည်..."):
-                overlay_subtitle_on_video(
-                    video_path=temp_video,
-                    srt_path=srt_path,
-                    output_path=final_path,
-                    font_path=FONT_FILE,
-                    font_size=sub_font_size,
-                    position=sub_position,
-                    blur_height=blur_height,
-                    blur_alpha=blur_alpha
-                )
-                st.success("✅ Subtitle — Overlay ပြီး")
+        if use_sub and sp:
+            # SRT PNG Overlay — မူရင်း နည်းလမ်း
+            overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, "center", BH, BA)
         else:
-            shutil.copy(temp_video, final_path)
+            shutil.copy("temp.mp4", "final.mp4")
 
-    st.success("✅ ပြီးပါပြီ!")
-    st.video(final_path)
+    st.success(f"✅ Done — {adur:.0f}s @ {tempo:.2f}x")
+    st.video("final.mp4")
 
-    f = open(final_path, "rb")
-    st.download_button("📥 Recap Video Download", f, file_name="final_recap.mp4")
-    f.close()
+    with open("final.mp4", "rb") as f:
+        st.download_button("📥 Download Recap Video", f, file_name="recap.mp4")
