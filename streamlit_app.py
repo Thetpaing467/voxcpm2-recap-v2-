@@ -6,9 +6,10 @@ import shutil
 import subprocess
 from PIL import Image, ImageDraw, ImageFont
 import cv2
+import base64
+import requests
 from gradio_client import Client, handle_file
 
-# ===== Global Configuration & Defaults =====
 SPACES = [
     {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
     {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
@@ -23,29 +24,28 @@ ENC_CRF = 23
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 
-st.set_page_config(page_title="VoxCPM2 Recap", page_icon="🎬", layout="centered")
+st.set_page_config(page_title="VoxCPM2 Recap (No API Key)", page_icon="🎬", layout="centered")
 
-# Custom CSS for dark aesthetic UI
 st.markdown("""
 <style>
 .stApp { background: linear-gradient(160deg, #0f0f23, #1a1a35, #0f0f23); color: #e8e8f0; }
 #MainMenu, footer, header { visibility: hidden; }
 .main-title {
     text-align: center; font-size: 2.2rem; font-weight: 900;
-    background: linear-gradient(90deg, #ff6b9d, #c66bff, #6ba8ff);
+    background: linear-gradient(90deg, #00f2fe, #4facfe, #00c6ff);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     background-clip: text; margin-bottom: 4px;
 }
 .main-sub { text-align: center; color: #8888aa; font-size: 0.9rem; margin-bottom: 20px; }
 .stButton>button {
-    background: linear-gradient(135deg, #667eea, #764ba2) !important;
+    background: linear-gradient(135deg, #00c6ff, #0072ff) !important;
     color: #fff !important; border: none !important; border-radius: 10px !important;
     padding: 12px 20px !important; font-weight: 600 !important;
-    box-shadow: 0 4px 15px rgba(102,126,234,0.3) !important;
+    box-shadow: 0 4px 15px rgba(0,198,255,0.3) !important;
 }
 .stButton>button:hover {
     transform: translateY(-1px) !important;
-    box-shadow: 0 6px 20px rgba(102,126,234,0.5) !important;
+    box-shadow: 0 6px 20px rgba(0,198,255,0.5) !important;
 }
 .stTextArea textarea {
     background: rgba(255, 255, 255, 0.04) !important;
@@ -53,8 +53,8 @@ st.markdown("""
     border-radius: 10px !important;
 }
 .stTextArea textarea:focus {
-    border-color: #667eea !important;
-    box-shadow: 0 0 0 2px rgba(102,126,234,0.2) !important;
+    border-color: #00c6ff !important;
+    box-shadow: 0 0 0 2px rgba(0,198,255,0.2) !important;
 }
 .stFileUploader { background: rgba(255, 255, 255, 0.02); border-radius: 10px; padding: 8px; }
 .stAlert { border-radius: 10px !important; border: none !important; }
@@ -62,7 +62,6 @@ hr { border-color: rgba(255, 255, 255, 0.08); margin: 24px 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# ===== Authentication System =====
 if "auth" not in st.session_state:
     st.session_state.auth = False
 
@@ -80,44 +79,60 @@ if not st.session_state.auth:
                 st.error("Password မှားယွင်းနေပါသည်")
     st.stop()
 
-# ===== Free Multimodal AI Script Generator =====
-def generate_script_free_hf(video_path):
+def generate_script_local_ollama(video_path, ollama_url="http://localhost:11434", model_name="llama3.2-vision"):
     """
-    Video ဖိုင်မှတစ်ဆင့် Hugging Face Free AI Space မ်ားကို အသုံးပြု၍ 
-    မြန်မာ Movie Recap Script အား အလိုအလျောက် ထုတ်ယူပေးသည့် စနစ်
+    API Key လုံးဝ မလိုအပ်ဘဲ Local စက်ပေါ်ရှိ Ollama (Llama 3.2 Vision) ကို တိုက်ရိုက် ခေါ်ယူသည့် စနစ်
     """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise Exception("Video ဖိုင်ကို ဖတ်ရှု၍ မရပါ")
+        
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_count = 8
+    step = max(1, total_frames // frame_count)
+    
+    images_b64 = []
+    curr = 0
+    while cap.isOpened() and curr < total_frames and len(images_b64) < frame_count:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, curr)
+        ret, frame = cap.read()
+        if not ret:
+            break
+        resized = cv2.resize(frame, (512, 288))
+        _, buffer = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        b64 = base64.b64encode(buffer).decode('utf-8')
+        images_b64.append(b64)
+        curr += step
+    cap.release()
+    
+    if not images_b64:
+        raise Exception("Video မှ Keyframes များ ထုတ်ယူ၍ မရရှိပါ")
+        
     prompt = (
-        "Watch this video carefully and write a clear, continuous movie recap script in Myanmar language "
-        "for audio narration that matches the length of the video. Return plain speech text only without markdown titles."
+        "Watch these video frames and write a continuous movie recap script in Myanmar language "
+        "for audio voiceover narration. Return plain Myanmar narration text only without markdown headings or brackets."
     )
     
-    # Hugging Face Free Public Spaces for Video/Vision Processing
-    free_spaces = [
-        "Qwen/Qwen2.5-VL-7B-Instruct",
-        "Qwen/Qwen2-VL-7B-Instruct",
-        "AIDC-AI/Ovis1.6-Gemma-9B"
-    ]
+    payload = {
+        "model": model_name,
+        "prompt": prompt,
+        "images": images_b64,
+        "stream": False
+    }
     
-    last_err = None
-    for space in free_spaces:
-        try:
-            client = Client(space)
-            res = client.predict(
-                video=handle_file(video_path),
-                text_input=prompt,
-                api_name="/predict"
-            )
-            output_text = res[0] if isinstance(res, (tuple, list)) else res
-            if output_text and isinstance(output_text, str) and len(output_text.strip()) > 0:
-                return output_text.strip()
-        except Exception as e:
-            last_err = e
-            continue
-            
-    # Fallback message if external spaces are temporarily reaching free queue limits
-    raise Exception(f"Free HuggingFace spaces are busy or updating: {last_err}")
+    try:
+        resp = requests.post(f"{ollama_url}/api/generate", json=payload, timeout=120)
+        if resp.status_code != 200:
+            raise Exception(f"Local Ollama Server Error ({resp.status_code}). Please make sure 'ollama run {model_name}' is active.")
+        data = resp.json()
+        text = data.get("response", "")
+        cleaned = re.sub(r'#+\s*', '', text)
+        cleaned = re.sub(r'\*\*|\*', '', cleaned)
+        cleaned = re.sub(r'\[.*?\]', '', cleaned)
+        return cleaned.strip()
+    except requests.exceptions.ConnectionError:
+        raise Exception("Local Ollama Server (http://localhost:11434) သို့ ချိတ်ဆက်၍ မရပါ။ စက်ထဲတွင် Ollama ဖွင့်ထားပါသလား သို့မဟုတ် Script ကို အောက်တွင် တိုက်ရိုက် ရိုက်ထည့်/Paste လုပ်နိုင်ပါသည်။")
 
-# ===== FFmpeg Video & Timestamp Helpers =====
 def vid_info(p):
     """Retrieve video dimensions and duration using ffmpeg probe."""
     pr = ffmpeg.probe(p)
@@ -144,7 +159,6 @@ def s2t(ts):
         return int(mi)*60 + int(se) + int(ms.ljust(3,'0'))/1000
     return None
 
-# ===== Subtitle Overlay Rendering =====
 def render_png(text, out, fp, W, H, fs=30, pos="center", bh=100, ba=100):
     """Render subtitle text onto a transparent PNG overlay image."""
     img = Image.new("RGBA", (W, H), (0,0,0,0)); d = ImageDraw.Draw(img)
@@ -167,7 +181,6 @@ def render_png(text, out, fp, W, H, fs=30, pos="center", bh=100, ba=100):
         d.text((lx, ty), ln, font=f, fill=(255,255,255,255)); ty += lh
     img.save(out, "PNG"); return out
 
-# ===== Script to SRT Conversion =====
 def scr_to_srt(scr, dur, path, mc=30):
     """Convert full Myanmar text script into synchronized SRT subtitles."""
     sents = [s.strip()+"။" for s in scr.replace("။","။|").split("|") if s.strip()]
@@ -235,7 +248,6 @@ def overlay(vp, sp, op, fp, fs=30, pos="center", bh=100, ba=100):
         except: pass
     return op
 
-# ===== VoxCPM TTS Engine Integration =====
 def split_scr(t, mc=TTS_CHUNK):
     """Split long script text into chunks for TTS processing."""
     sents = [s.strip()+"။" for s in t.replace("။","။|").split("|") if s.strip()]
@@ -297,39 +309,43 @@ def tts_all(text, out, ref=None, cb=None):
     ).run(overwrite_output=True)
     return out
 
-# ===== Streamlit UI Layout =====
 st.markdown("<div class='main-title'>🎬 VoxCPM2 Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Recap Video</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>၁၀၀% API Key မလိုသော Video → မြန်မာ Script → Recap Video</div>", unsafe_allow_html=True)
 st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}")
 st.divider()
 
-# Step 1 & 2: Auto Script Generator
-st.subheader("🤖 Step 1 & 2 — Video Auto Script Generator (No API Key)")
+# Step 1 & 2: Local AI / Manual Script
+st.subheader("📝 Step 1 & 2 — Movie Recap Script (No API Key)")
 
 if "script" not in st.session_state: 
     st.session_state.script = ""
 
-script_vid = st.file_uploader("📹 Script ထုတ်ယူရန် Video တင်ပါ", type=["mp4", "mov", "avi", "mkv"], key="script_gen_vid")
+script_vid = st.file_uploader("📹 Video တင်ပါ (Auto AI Script ထုတ်ယူရန်)", type=["mp4", "mov", "avi", "mkv"], key="script_gen_vid")
+
+c1, c2 = st.columns(2)
+with c1:
+    local_model = st.text_input("💻 Local AI Model Name", value="llama3.2-vision", help="Ollama model name e.g. llama3.2-vision, llava")
+with c2:
+    ollama_host = st.text_input("🌐 Local Ollama Server", value="http://localhost:11434")
 
 if script_vid:
-    if st.button("🪄 AI ဖြင့် Script အလိုအလျောက် ရေးခိုင်းမည် (Free)", type="primary", use_container_width=True):
-        with st.spinner("🎬 Hugging Face Free AI မှ Video ကို စိစစ်ပြီး မြန်မာ Script ရေးသားနေပါသည်..."):
+    if st.button("🤖 Local AI (Ollama) ဖြင့် Script အလိုအလျောက် ရေးခိုင်းမည်", type="primary", use_container_width=True):
+        with st.spinner("🎬 Local AI ဖြင့် Video Frames များကို စိစစ်ပြီး Script ရေးသားနေပါသည်..."):
             try:
                 temp_vid_path = "temp_script_input.mp4"
                 with open(temp_vid_path, "wb") as f:
                     f.write(script_vid.read())
                 
-                # Call free gradio client (No API Key required)
-                generated_script = generate_script_free_hf(temp_vid_path)
+                generated_script = generate_script_local_ollama(temp_vid_path, ollama_url=ollama_host, model_name=local_model)
                 st.session_state.script = generated_script
-                st.success("✨ Script အောင်မြင်စွာ ထုတ်ယူပြီးပါပြီ!")
+                st.success("✨ Local AI ဖြင့် Script ထုတ်ယူပြီးပါပြီ!")
                 
                 if os.path.exists(temp_vid_path):
                     os.remove(temp_vid_path)
             except Exception as e:
-                st.error(f"Script ထုတ်ယူရာတွင် အမှားရှိခဲ့ပါသည်: {e}")
+                st.warning(f"💡 {e}")
 
-script = st.text_area("📝 မြန်မာ Script (တိုက်ရိုက် ပြင်ဆင်/Paste လုပ်နိုင်ပါသည်)", value=st.session_state.script, height=220, placeholder="မြန်မာ Script ဤနေရာတွင် ပေါ်လာမည်...")
+script = st.text_area("📝 မြန်မာ Script (တိုက်ရိုက် ရိုက်ထည့် သို့မဟုတ် Paste လုပ်ပါ)", value=st.session_state.script, height=220, placeholder="မြန်မာ Script ဤနေရာတွင် တိုက်ရိုက် Paste/ရိုက်ထည့်ပါ...")
 st.session_state.script = script
 
 c1, c2 = st.columns([3, 1])
@@ -352,7 +368,7 @@ with c1:
         with open("ref.wav", "wb") as f: f.write(ref.read())
         st.session_state.ref = "ref.wav"; st.success("✅ Ref Audio Ready")
 with c2:
-    vid = st.file_uploader("📹 Video Upload", type=["mp4","mov","avi","mkv"])
+    vid = st.file_uploader("📹 Video Upload", type=["mp4","mov","avi","mkv"], key="final_recap_video")
     if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
@@ -391,7 +407,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     def cb(i, tot, c):
         pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}] {len(c)} စာလုံး")
 
-    # Text-to-Speech Processing
     try: tts_all(script, "voice.mp3", st.session_state.ref, cb)
     except Exception as e: st.error(f"TTS Error — {e}"); st.stop()
 
@@ -400,7 +415,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
 
-    # Video Rendering & Subtitle Overlay
     with st.spinner("🎬 Rendering — Fast Mode..."):
         vi = ffmpeg.input("input.mp4")
         va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
