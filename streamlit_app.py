@@ -433,3 +433,366 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     with open("final.mp4", "rb") as f:
         st.download_button("📥 Download Recap Video", f, file_name="recap.mp4")
+```html
+<!DOCTYPE html>
+<html lang="my" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Myanmar Movie Recap Script Generator AI</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts for Myanmar & English -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Padauk:wght@400;700&display=swap" rel="stylesheet">
+    
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'Padauk', 'sans-serif'],
+                        myanmar: ['Padauk', 'sans-serif'],
+                    },
+                    colors: {
+                        brand: {
+                            50: '#f0f5ff',
+                            100: '#e0ebff',
+                            500: '#3b82f6',
+                            600: '#2563eb',
+                            700: '#1d4ed8',
+                            800: '#1e40af',
+                            900: '#1e3a8a',
+                            950: '#0f172a',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Padauk', 'Inter', sans-serif;
+            background-color: #0b0f19;
+            color: #e2e8f0;
+        }
+        /* Custom scrollbar for Myanmar text */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #111827;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #374151;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #4b5563;
+        }
+        .myanmar-text-view {
+            line-height: 2.2;
+            font-size: 1.15rem;
+            letter-spacing: 0.02em;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col bg-slate-950 text-slate-100">
+
+    <!-- Top Navigation Bar -->
+    <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-blue-500/20">
+                    <i class="fa-solid fa-film"></i>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold text-white leading-tight">Myanmar Movie Recap Generator</h1>
+                    <p class="text-xs text-slate-400">AI Multimodal Script Creator for Audio Narration</p>
+                </div>
+            </div>
+
+            <!-- API Key Controls & Status -->
+            <div class="flex items-center gap-3">
+                <button onclick="openApiKeyModal()" class="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-medium transition flex items-center gap-2">
+                    <i class="fa-solid fa-key text-amber-400"></i>
+                    <span id="apiKeyBadgeText">Gemini API Key</span>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Grid -->
+    <main class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+        <!-- Left Column: Video Input & Config (5 cols) -->
+        <section class="lg:col-span-5 flex flex-col gap-5">
+            
+            <!-- Video Upload Card -->
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl">
+                <h2 class="text-sm font-semibold text-slate-200 mb-3 flex items-center gap-2">
+                    <i class="fa-solid fa-file-video text-blue-400"></i>
+                    ၁။ ဗီဒီယိုဖိုင် တင်ယူပါ (Upload Video)
+                </h2>
+
+                <div id="dropzone" onclick="document.getElementById('videoFileInput').click()" class="border-2 border-dashed border-slate-700 hover:border-blue-500 bg-slate-950/50 rounded-xl p-6 text-center cursor-pointer transition group flex flex-col items-center justify-center min-h-[160px]">
+                    <i class="fa-solid fa-cloud-arrow-up text-3xl text-slate-500 group-hover:text-blue-400 mb-2 transition transform group-hover:-translate-y-1"></i>
+                    <p class="text-sm font-medium text-slate-300">ဗီဒီယိုဖိုင်အား ဤနေရာသို့ ဆွဲထည့်ပါ သို့မဟုတ် နှိပ်ပါ</p>
+                    <p class="text-xs text-slate-500 mt-1">MP4, WEBM, MOV (Max 500MB)</p>
+                    <input type="file" id="videoFileInput" accept="video/*" class="hidden" onchange="handleFileSelect(event)">
+                </div>
+
+                <!-- Video Preview Box (Hidden initially) -->
+                <div id="videoContainer" class="hidden mt-4">
+                    <video id="videoPlayer" controls class="w-full rounded-xl bg-black max-h-64 object-contain border border-slate-800"></video>
+                    
+                    <div class="mt-3 flex items-center justify-between text-xs text-slate-400 px-1">
+                        <span id="videoNameDisplay" class="truncate max-w-[200px]"></span>
+                        <span id="videoDurationDisplay" class="font-mono bg-slate-800 px-2 py-0.5 rounded text-blue-300">00:00</span>
+                    </div>
+
+                    <!-- Keyframes Preview Drawer -->
+                    <div class="mt-4 pt-3 border-t border-slate-800">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs font-medium text-slate-300 flex items-center gap-1.5">
+                                <i class="fa-solid fa-images text-indigo-400"></i>
+                                စစ်ဆေးထုတ်ယူထားသော Frames (<span id="frameCount">0</span>)
+                            </span>
+                            <button onclick="reExtractFrames()" class="text-[11px] text-blue-400 hover:underline">Re-sample</button>
+                        </div>
+                        <div id="frameThumbnails" class="flex gap-2 overflow-x-auto pb-2 scrollbar-thin">
+                            <!-- Canvas Thumbnails injected dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Custom Myanmar Prompt Box -->
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col gap-3">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                        <i class="fa-solid fa-wand-magic-sparkles text-amber-400"></i>
+                        ၂။ AI Prompt စည်းမျဉ်း
+                    </h2>
+                    <button onclick="resetPrompt()" class="text-xs text-slate-400 hover:text-slate-200">Reset Prompt</button>
+                </div>
+
+                <textarea id="promptInput" rows="4" class="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-blue-500 font-myanmar resize-none leading-relaxed"></textarea>
+
+                <div class="p-3 bg-blue-950/40 border border-blue-900/50 rounded-xl text-xs text-blue-300 flex items-start gap-2">
+                    <i class="fa-solid fa-circle-info text-blue-400 mt-0.5 shrink-0"></i>
+                    <span>အထက်ပါ Prompt သည် ခေါင်းစဉ်များ၊ ခွဲခြားစကားများနှင့် သင်္ကေတများ မပါဘဲ သန့်ရှင်းသော မြန်မာစကားပြော Script သာ ထွက်ရှိအောင် ပြုလုပ်ထားပါသည်။</span>
+                </div>
+
+                <!-- Action Button -->
+                <button id="generateBtn" onclick="startScriptGeneration()" disabled class="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold shadow-lg shadow-blue-600/25 transition flex items-center justify-center gap-2 text-sm mt-1">
+                    <i class="fa-solid fa-bolt"></i>
+                    <span>Recap Script စတင်ရေးသားမည်</span>
+                </button>
+            </div>
+
+        </section>
+
+        <!-- Right Column: Clean Myanmar Script Output (7 cols) -->
+        <section class="lg:col-span-7 flex flex-col">
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex-1 flex flex-col h-full min-h-[500px]">
+                
+                <!-- Script Output Header -->
+                <div class="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-800">
+                    <div class="flex items-center gap-2">
+                        <div class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></div>
+                        <h2 class="text-sm font-semibold text-slate-100">မြန်မာ စကားပြော Script (Plain Myanmar Narration)</h2>
+                    </div>
+
+                    <!-- Quick Tools -->
+                    <div class="flex items-center gap-2 text-xs">
+                        <button onclick="cleanScriptTextManual()" class="px-3 py-1.5 rounded-lg bg-indigo-950 hover:bg-indigo-900 text-indigo-300 border border-indigo-800/80 transition flex items-center gap-1.5" title="မလိုအပ်သော သင်္ကေတများ ရှင်းလင်းမည်">
+                            <i class="fa-solid fa-wand-magic"></i>
+                            <span>Clean Text</span>
+                        </button>
+                        <button onclick="copyScriptToClipboard()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition flex items-center gap-1.5" title="ကူးယူမည်">
+                            <i class="fa-regular fa-copy text-blue-400"></i>
+                            <span>Copy</span>
+                        </button>
+                        <button onclick="downloadScriptTxt()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition flex items-center gap-1.5" title="ဆွဲယူမည် (.txt)">
+                            <i class="fa-solid fa-download text-emerald-400"></i>
+                            <span>Export .txt</span>
+                        </button>
+                        <button onclick="toggleTeleprompter()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition flex items-center gap-1.5" title="Teleprompter">
+                            <i class="fa-solid fa-scroll text-amber-400"></i>
+                            <span>Teleprompter</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Main Myanmar Output Area -->
+                <div class="relative flex-1 mt-4 flex flex-col">
+                    
+                    <!-- Text Area / Preview Display -->
+                    <textarea id="scriptOutput" class="w-full flex-1 bg-slate-950 border border-slate-800 rounded-xl p-5 text-slate-100 myanmar-text-view focus:outline-none focus:border-blue-500 font-myanmar resize-none leading-relaxed" placeholder="ဗီဒီယို ဖိုင်တင်ပြီး 'Recap Script စတင်ရေးသားမည်' ကို နှိပ်ပါ..." spellcheck="false"></textarea>
+
+                    <!-- Loading Overlay inside script box -->
+                    <div id="generationLoading" class="hidden absolute inset-0 bg-slate-950/90 backdrop-blur-sm rounded-xl flex flex-col items-center justify-center p-6 text-center z-20">
+                        <div class="relative w-16 h-16 mb-4">
+                            <div class="absolute inset-0 rounded-full border-4 border-blue-500/20 border-t-blue-500 animate-spin"></div>
+                            <i class="fa-solid fa-brain absolute inset-0 m-auto text-xl text-blue-400 flex items-center justify-center"></i>
+                        </div>
+                        <p id="loadingStatusText" class="text-sm font-medium text-slate-200 mb-1">ဗီဒီယို အချက်အလက်များကို AI ဖြင့် စိစစ်နေပါသည်...</p>
+                        <p class="text-xs text-slate-400">သန့်ရှင်းသော မြန်မာ စကားပြော ရာဇဝင်/Script ကို သီးသန့် ရေးသားနေပါသည်</p>
+                    </div>
+                </div>
+
+                <!-- Stats Bar -->
+                <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
+                    <div class="flex items-center gap-4">
+                        <span>စကားလုံးပေါင်း: <strong id="wordCountDisplay" class="text-slate-200">0</strong></span>
+                        <span>ခန့်မှန်း ဖတ်ကြားချိန်: <strong id="readingTimeDisplay" class="text-slate-200">0 မိနစ်</strong></span>
+                    </div>
+                    <div class="text-[11px] text-slate-500">
+                        Gemini 3 Flash Multimodal AI
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Fullscreen Teleprompter Modal -->
+    <div id="prompterModal" class="fixed inset-0 bg-black/95 z-50 hidden flex flex-col">
+        <div class="p-4 border-b border-slate-800 bg-slate-900 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <i class="fa-solid fa-scroll text-amber-400 text-lg"></i>
+                <h3 class="font-bold text-slate-100">Audio Voiceover Teleprompter</h3>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2">
+                    <label class="text-xs text-slate-400">Font Size:</label>
+                    <button onclick="changePrompterFontSize(-2)" class="w-8 h-8 rounded bg-slate-800 text-slate-200 font-bold">-</button>
+                    <button onclick="changePrompterFontSize(2)" class="w-8 h-8 rounded bg-slate-800 text-slate-200 font-bold">+</button>
+                </div>
+                <button id="scrollToggleBtn" onclick="togglePrompterScroll()" class="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center gap-2">
+                    <i class="fa-solid fa-play"></i>
+                    <span>Auto Scroll</span>
+                </button>
+                <button onclick="toggleTeleprompter()" class="w-8 h-8 rounded-full bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+        </div>
+
+        <div id="prompterScrollArea" class="flex-1 overflow-y-auto p-12 text-center flex flex-col items-center">
+            <div id="prompterText" class="max-w-4xl w-full text-slate-100 myanmar-text-view font-myanmar leading-loose pt-20 pb-64 text-2xl">
+                <!-- Text populated dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <!-- API Key Settings Modal -->
+    <div id="apiKeyModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-bold text-slate-100 flex items-center gap-2">
+                    <i class="fa-solid fa-key text-amber-400"></i>
+                    Gemini API Key ထည့်သွင်းရန်
+                </h3>
+                <button onclick="closeApiKeyModal()" class="text-slate-400 hover:text-white">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <p class="text-xs text-slate-400 mb-4 leading-relaxed">
+                Gemini API Key ထည့်သွင်းထားပါက ပိုမိုမြန်ဆန်စွာ စာမူထုတ်ယူနိုင်ပါမည်။ API Key မရှိပါကလည်း စနစ်မှ အခမဲ့ စမ်းသပ်ခွင့် ပေးထားပါသည်။
+            </p>
+
+            <input type="password" id="apiKeyInput" placeholder="AIzaSy..." class="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:outline-none focus:border-blue-500 font-mono mb-4">
+
+            <div class="flex items-center justify-end gap-2">
+                <button onclick="closeApiKeyModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300">မလုပ်ဆောင်ပါ</button>
+                <button onclick="saveApiKey()" class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-medium text-white">သိမ်းဆည်းမည်</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification Container -->
+    <div id="toastContainer" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+    <!-- Hidden Canvas for sampling frames -->
+    <canvas id="hiddenCanvas" class="hidden"></canvas>
+
+    <script>
+        // Default Prompt targeting exact pure Myanmar script narration
+        const DEFAULT_PROMPT = "Watch this video carefully and write a clear, continuous movie recap script in Myanmar language for audio narration that matches the length of the video. Return plain speech text only without markdown titles.";
+
+        // Application State
+        let customApiKey = localStorage.getItem('user_gemini_api_key') || "";
+        let uploadedVideoFile = null;
+        let videoDuration = 0;
+        let extractedFrames = []; // Array of Base64 strings
+        let isGenerating = false;
+        let prompterScrollInterval = null;
+        let isPrompterScrolling = false;
+        let prompterFontSize = 24;
+
+        // Initialize on Load
+        window.onload = function() {
+            document.getElementById('promptInput').value = DEFAULT_PROMPT;
+            updateApiKeyBadge();
+            setupDropzone();
+            
+            // Textarea auto-update stats
+            document.getElementById('scriptOutput').addEventListener('input', updateScriptStats);
+        };
+
+        // --- Video & Canvas Keyframe Sampling ---
+        function setupDropzone() {
+            const dropzone = document.getElementById('dropzone');
+            
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropzone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    dropzone.classList.add('border-blue-500', 'bg-blue-950/20');
+                }, false);
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropzone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    dropzone.classList.remove('border-blue-500', 'bg-blue-950/20');
+                }, false);
+            });
+
+            dropzone.addEventListener('drop', (e) => {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+                if (files && files.length > 0) {
+                    handleVideoFile(files[0]);
+                }
+            });
+        }
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                handleVideoFile(file);
+            }
+        }
+
+        function handleVideoFile(file) {
+            if (!file.type.startsWith('video/')) {
+                showToast('ကျေးဇူးပြု၍ ဗီဒီယို ဖိုင်ကိုသာ တင်ပေးပါ', 'error');
+                return;
+            }
+
+            uploadedVideoFile = file;
+            const videoPlayer = document.getElementById('videoPlayer');
+            const url = URL.createObjectURL(file);
+            videoPlayer.src = url;
+
+            document.getElementById('videoNameDisplay').innerText = file.name;
+            document.getElementById('videoContainer').classList.remove('hidden');
