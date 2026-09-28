@@ -14,10 +14,10 @@ FONT_FILE = "MyanmarPadaung.ttf"
 
 # ⚡ အမြန်ဆုံး Settings
 FS, BH, BA = 30, 100, 100
-ENC_PRESET = "ultrafast"   # ⚡ အမြန်ဆုံး (ရှေ့ medium)
-ENC_CRF = 23               # ⚡ မြန် (ရှေ့ 18)
-AUDIO_BITRATE = "128k"     # ⚡ မြန် (ရှေ့ 192k)
-TTS_CHUNK = 600            # ⚡ API Call နည်း (ရှေ့ 400)
+ENC_PRESET = "ultrafast"
+ENC_CRF = 23
+AUDIO_BITRATE = "128k"
+TTS_CHUNK = 600
 
 st.set_page_config(page_title="VoxCPM2 Recap", page_icon="🎬", layout="centered")
 
@@ -67,7 +67,28 @@ if not st.session_state.auth:
     st.stop()
 
 
-# ===== Helpers =====
+# ===== Helper for Free Auto Script (No API Key Required) =====
+def generate_script_free_hf(video_path):
+    """API Key လုံးဝ မလိုဘဲ HuggingFace Free Space မှတစ်ဆင့် Video Recap Script ထုတ်ပေးသည့် စနစ်"""
+    client = Client("Qwen/Qwen2-VL-7B-Instruct")
+    
+    prompt = (
+        "Watch this video carefully and write a clear, continuous movie recap script in Myanmar language "
+        "for audio narration that matches the length of the video. Return plain speech text only without markdown titles."
+    )
+    
+    # Send Video directly to free space without API keys
+    res = client.predict(
+        video=handle_file(video_path),
+        text_input=prompt,
+        api_name="/predict"
+    )
+    
+    # Extract plain response text
+    output_text = res[0] if isinstance(res, (tuple, list)) else res
+    return output_text.strip()
+
+
 def vid_info(p):
     pr = ffmpeg.probe(p)
     v = next(s for s in pr['streams'] if s['codec_type'] == 'video')
@@ -252,23 +273,43 @@ st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Recap
 st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}")
 st.divider()
 
-# Step 1
-st.subheader("📝 Step 1 — Gemini Web မှ Script")
-st.link_button("🌐 Open Gemini Web", "https://gemini.google.com", use_container_width=True)
-with st.expander("📋 Prompt — Copy"):
-    st.code("Watch this video carefully and write a clear, continuous movie recap script in Myanmar language for audio narration that matches the length of the video. Return plain speech text only without markdown titles.", language="text")
-st.divider()
+# Step 1 & 2: Auto Script Generator (NO API KEY)
+st.subheader("🤖 Step 1 & 2 — Video Auto Script Generator (No API Key)")
 
-# Step 2
-st.subheader("📝 Step 2 — Script Paste")
-if "script" not in st.session_state: st.session_state.script = ""
-script = st.text_area("Script", value=st.session_state.script, height=220, label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
+if "script" not in st.session_state: 
+    st.session_state.script = ""
+
+script_vid = st.file_uploader("📹 Script ထုတ်ယူရန် Video တင်ပါ", type=["mp4", "mov", "avi", "mkv"], key="script_gen_vid")
+
+if script_vid:
+    if st.button("🪄 AI ဖြင့် Script အလိုအလျောက် ရေးခိုင်းမည် (Free)", type="primary", use_container_width=True):
+        with st.spinner("🎬 Hugging Face Free AI မှ Video ကို စိစစ်ပြီး မြန်မာ Script ရေးသားနေပါသည်..."):
+            try:
+                temp_vid_path = "temp_script_input.mp4"
+                with open(temp_vid_path, "wb") as f:
+                    f.write(script_vid.read())
+                
+                # Call free gradio client (No API Key required!)
+                generated_script = generate_script_free_hf(temp_vid_path)
+                st.session_state.script = generated_script
+                st.success("✨ Script အောင်မြင်စွာ ထုတ်ယူပြီးပါပြီ!")
+                
+                if os.path.exists(temp_vid_path):
+                    os.remove(temp_vid_path)
+            except Exception as e:
+                st.error(f"Script ထုတ်ယူရာတွင် အမှားရှိခဲ့ပါသည်: {e}")
+
+script = st.text_area("📝 မြန်မာ Script (တိုက်ရိုက် ပြင်ဆင်/Paste လုပ်နိုင်ပါသည်)", value=st.session_state.script, height=220, placeholder="မြန်မာ Script ဤနေရာတွင် ပေါ်လာမည်...")
 st.session_state.script = script
+
 c1, c2 = st.columns([3, 1])
-with c1: st.caption(f"📝 စာလုံး — {len(script):,}")
+with c1: 
+    st.caption(f"📝 စာလုံး — {len(script):,}")
 with c2:
     if st.button("🗑️ Clear", use_container_width=True):
-        st.session_state.script = ""; st.rerun()
+        st.session_state.script = ""
+        st.rerun()
+
 st.divider()
 
 # Step 3
@@ -309,7 +350,7 @@ st.divider()
 # Step 5
 st.subheader("🚀 Step 5 — Generate Recap")
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
-    if not script.strip(): st.error("Script paste လုပ်ပါ"); st.stop()
+    if not script.strip(): st.error("Script ရေးထားခြင်း မရှိပါ"); st.stop()
     if vid is None: st.error("Video Upload တင်ပါ"); st.stop()
 
     vid.seek(0)
@@ -339,7 +380,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
                        ).run(overwrite_output=True)
 
         if use_sub and sp:
-            # SRT PNG Overlay — မူရင်း နည်းလမ်း
             overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, "center", BH, BA)
         else:
             shutil.copy("temp.mp4", "final.mp4")
