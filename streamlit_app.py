@@ -1,10 +1,14 @@
 import streamlit as st
-import os, re, ffmpeg, shutil, subprocess
+import os
+import re
+import ffmpeg
+import shutil
+import subprocess
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 from gradio_client import Client, handle_file
 
-# ===== Config =====
+# ===== Global Configuration & Defaults =====
 SPACES = [
     {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
     {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
@@ -12,7 +16,7 @@ SPACES = [
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-# ⚡ အမြန်ဆုံး Settings
+# Fast FFmpeg Encoding Settings
 FS, BH, BA = 30, 100, 100
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
@@ -21,34 +25,44 @@ TTS_CHUNK = 600
 
 st.set_page_config(page_title="VoxCPM2 Recap", page_icon="🎬", layout="centered")
 
-# ===== CSS =====
+# Custom CSS for dark aesthetic UI
 st.markdown("""
 <style>
-.stApp{background:linear-gradient(160deg,#0f0f23,#1a1a35,#0f0f23);color:#e8e8f0}
-#MainMenu,footer,header{visibility:hidden}
-.main-title{text-align:center;font-size:2.2rem;font-weight:900;
- background:linear-gradient(90deg,#ff6b9d,#c66bff,#6ba8ff);
- -webkit-background-clip:text;-webkit-text-fill-color:transparent;
- background-clip:text;margin-bottom:4px}
-.main-sub{text-align:center;color:#8888aa;font-size:.9rem;margin-bottom:20px}
-.stButton>button{background:linear-gradient(135deg,#667eea,#764ba2)!important;
- color:#fff!important;border:none!important;border-radius:10px!important;
- padding:12px 20px!important;font-weight:600!important;
- box-shadow:0 4px 15px rgba(102,126,234,.3)!important}
-.stButton>button:hover{transform:translateY(-1px)!important;
- box-shadow:0 6px 20px rgba(102,126,234,.5)!important}
-.stTextArea textarea{background:rgba(255,255,255,.04)!important;
- border:1px solid rgba(255,255,255,.1)!important;color:#fff!important;
- border-radius:10px!important}
-.stTextArea textarea:focus{border-color:#667eea!important;
- box-shadow:0 0 0 2px rgba(102,126,234,.2)!important}
-.stFileUploader{background:rgba(255,255,255,.02);border-radius:10px;padding:8px}
-.stAlert{border-radius:10px!important;border:none!important}
-hr{border-color:rgba(255,255,255,.08);margin:24px 0}
+.stApp { background: linear-gradient(160deg, #0f0f23, #1a1a35, #0f0f23); color: #e8e8f0; }
+#MainMenu, footer, header { visibility: hidden; }
+.main-title {
+    text-align: center; font-size: 2.2rem; font-weight: 900;
+    background: linear-gradient(90deg, #ff6b9d, #c66bff, #6ba8ff);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text; margin-bottom: 4px;
+}
+.main-sub { text-align: center; color: #8888aa; font-size: 0.9rem; margin-bottom: 20px; }
+.stButton>button {
+    background: linear-gradient(135deg, #667eea, #764ba2) !important;
+    color: #fff !important; border: none !important; border-radius: 10px !important;
+    padding: 12px 20px !important; font-weight: 600 !important;
+    box-shadow: 0 4px 15px rgba(102,126,234,0.3) !important;
+}
+.stButton>button:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 20px rgba(102,126,234,0.5) !important;
+}
+.stTextArea textarea {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important; color: #fff !important;
+    border-radius: 10px !important;
+}
+.stTextArea textarea:focus {
+    border-color: #667eea !important;
+    box-shadow: 0 0 0 2px rgba(102,126,234,0.2) !important;
+}
+.stFileUploader { background: rgba(255, 255, 255, 0.02); border-radius: 10px; padding: 8px; }
+.stAlert { border-radius: 10px !important; border: none !important; }
+hr { border-color: rgba(255, 255, 255, 0.08); margin: 24px 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# ===== Password =====
+# ===== Authentication System =====
 if "auth" not in st.session_state:
     st.session_state.auth = False
 
@@ -57,52 +71,68 @@ if not st.session_state.auth:
     st.markdown("<div class='main-sub'>Password ထည့်ပြီး ဝင်ပါ</div>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        pwd = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Password")
+        pwd = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Enter Password")
         if st.button("Login", use_container_width=True):
             if pwd == PASSWORD:
                 st.session_state.auth = True
                 st.rerun()
             else:
-                st.error("Password မှား")
+                st.error("Password မှားယွင်းနေပါသည်")
     st.stop()
 
-
-# ===== Helper for Free Auto Script (No API Key Required) =====
+# ===== Free Multimodal AI Script Generator =====
 def generate_script_free_hf(video_path):
-    """API Key လုံးဝ မလိုဘဲ HuggingFace Free Space မှတစ်ဆင့် Video Recap Script ထုတ်ပေးသည့် စနစ်"""
-    client = Client("Qwen/Qwen2-VL-7B-Instruct")
-    
+    """
+    Video ဖိုင်မှတစ်ဆင့် Hugging Face Free AI Space မ်ားကို အသုံးပြု၍ 
+    မြန်မာ Movie Recap Script အား အလိုအလျောက် ထုတ်ယူပေးသည့် စနစ်
+    """
     prompt = (
         "Watch this video carefully and write a clear, continuous movie recap script in Myanmar language "
         "for audio narration that matches the length of the video. Return plain speech text only without markdown titles."
     )
     
-    # Send Video directly to free space without API keys
-    res = client.predict(
-        video=handle_file(video_path),
-        text_input=prompt,
-        api_name="/predict"
-    )
+    # Hugging Face Free Public Spaces for Video/Vision Processing
+    free_spaces = [
+        "Qwen/Qwen2.5-VL-7B-Instruct",
+        "Qwen/Qwen2-VL-7B-Instruct",
+        "AIDC-AI/Ovis1.6-Gemma-9B"
+    ]
     
-    # Extract plain response text
-    output_text = res[0] if isinstance(res, (tuple, list)) else res
-    return output_text.strip()
+    last_err = None
+    for space in free_spaces:
+        try:
+            client = Client(space)
+            res = client.predict(
+                video=handle_file(video_path),
+                text_input=prompt,
+                api_name="/predict"
+            )
+            output_text = res[0] if isinstance(res, (tuple, list)) else res
+            if output_text and isinstance(output_text, str) and len(output_text.strip()) > 0:
+                return output_text.strip()
+        except Exception as e:
+            last_err = e
+            continue
+            
+    # Fallback message if external spaces are temporarily reaching free queue limits
+    raise Exception(f"Free HuggingFace spaces are busy or updating: {last_err}")
 
-
+# ===== FFmpeg Video & Timestamp Helpers =====
 def vid_info(p):
+    """Retrieve video dimensions and duration using ffmpeg probe."""
     pr = ffmpeg.probe(p)
     v = next(s for s in pr['streams'] if s['codec_type'] == 'video')
     return int(v['width']), int(v['height']), float(pr['format']['duration'])
 
-
 def t2s(s):
+    """Convert seconds to SRT timestamp format (HH:MM:SS,mmm)."""
     ms = int(round((s - int(s)) * 1000)); tot = int(s)
     if ms >= 1000: tot += 1; ms = 0
     h, r = divmod(tot, 3600); m, sec = divmod(r, 60)
     return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
 
-
 def s2t(ts):
+    """Parse SRT timestamp format to floating point seconds."""
     ts = ts.strip()
     m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$', ts)
     if m:
@@ -114,9 +144,9 @@ def s2t(ts):
         return int(mi)*60 + int(se) + int(ms.ljust(3,'0'))/1000
     return None
 
-
+# ===== Subtitle Overlay Rendering =====
 def render_png(text, out, fp, W, H, fs=30, pos="center", bh=100, ba=100):
-    """SRT PNG Overlay — မူရင်း နည်းလမ်း — Pixel Perfect"""
+    """Render subtitle text onto a transparent PNG overlay image."""
     img = Image.new("RGBA", (W, H), (0,0,0,0)); d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
     except: f = ImageFont.load_default()
@@ -137,8 +167,9 @@ def render_png(text, out, fp, W, H, fs=30, pos="center", bh=100, ba=100):
         d.text((lx, ty), ln, font=f, fill=(255,255,255,255)); ty += lh
     img.save(out, "PNG"); return out
 
-
+# ===== Script to SRT Conversion =====
 def scr_to_srt(scr, dur, path, mc=30):
+    """Convert full Myanmar text script into synchronized SRT subtitles."""
     sents = [s.strip()+"။" for s in scr.replace("။","။|").split("|") if s.strip()]
     if not sents: return None
     parts = []
@@ -161,8 +192,8 @@ def scr_to_srt(scr, dur, path, mc=30):
             f.write(f"{i}\n{t2s(cur)} --> {t2s(cur+d)}\n{p}\n\n"); cur += d
     return path
 
-
 def parse_srt(path):
+    """Parse SRT file entries into structured objects."""
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read().replace("\r\n","\n").replace("\r","\n")
     segs = []
@@ -179,11 +210,10 @@ def parse_srt(path):
         if txt: segs.append({"start": a, "end": b, "text": txt})
     return segs
 
-
 def overlay(vp, sp, op, fp, fs=30, pos="center", bh=100, ba=100):
-    """SRT → PNG Overlay — မူရင်း နည်းလမ်း — Pixel Perfect Subtitle"""
+    """Burn PNG subtitle layers into video using FFmpeg complex filter."""
     W, H, _ = vid_info(vp); segs = parse_srt(sp)
-    if not segs: raise Exception("SRT empty")
+    if not segs: raise Exception("SRT file is empty or invalid")
     os.makedirs("subtitle_pngs", exist_ok=True); pngs = []
     for i, s in enumerate(segs):
         p = f"subtitle_pngs/s_{i:04d}.png"
@@ -199,14 +229,15 @@ def overlay(vp, sp, op, fp, fs=30, pos="center", bh=100, ba=100):
             "-c:v","libx264","-crf",str(ENC_CRF),"-preset",ENC_PRESET,
             "-c:a","copy",op]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-500:]}")
+    if r.returncode != 0: raise Exception(f"FFmpeg Error: {(r.stderr or '')[-500:]}")
     for x in pngs:
         try: os.remove(x["p"])
         except: pass
     return op
 
-
+# ===== VoxCPM TTS Engine Integration =====
 def split_scr(t, mc=TTS_CHUNK):
+    """Split long script text into chunks for TTS processing."""
     sents = [s.strip()+"။" for s in t.replace("။","။|").split("|") if s.strip()]
     out, cur = [], ""
     for s in sents:
@@ -220,8 +251,8 @@ def split_scr(t, mc=TTS_CHUNK):
     if cur: out.append(cur)
     return out
 
-
 def tts_run(chunks, ref, space, cb=None):
+    """Call standard VoxCPM Gradio TTS endpoint."""
     cl = Client(space); files = []; rf = handle_file(ref) if ref else None
     for i, c in enumerate(chunks):
         if cb: cb(i, len(chunks), c)
@@ -234,10 +265,10 @@ def tts_run(chunks, ref, space, cb=None):
         dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
     return files
 
-
 def tts_burmese(chunks, ref, space, cb=None):
+    """Call Burmese customized VoxCPM Gradio TTS endpoint."""
     cl = Client(space); files = []
-    if not ref: raise Exception("Reference Audio needed")
+    if not ref: raise Exception("Reference Audio needed for Burmese TTS")
     rf = handle_file(ref)
     for i, c in enumerate(chunks):
         if cb: cb(i, len(chunks), c)
@@ -248,8 +279,8 @@ def tts_burmese(chunks, ref, space, cb=None):
         dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
     return files
 
-
 def tts_all(text, out, ref=None, cb=None):
+    """Orchestrate TTS synthesis across available spaces and concatenate output."""
     chunks = split_scr(text, TTS_CHUNK); files = None
     for s in SPACES:
         try:
@@ -258,7 +289,7 @@ def tts_all(text, out, ref=None, cb=None):
             break
         except Exception:
             files = None; continue
-    if files is None: raise Exception("TTS Failed")
+    if files is None: raise Exception("TTS Synthesis failed on all configured spaces.")
     with open("concat.txt", "w", encoding="utf-8") as f:
         for a in files: f.write(f"file '{a}'\n")
     ffmpeg.input("concat.txt", format="concat", safe=0).output(
@@ -266,14 +297,13 @@ def tts_all(text, out, ref=None, cb=None):
     ).run(overwrite_output=True)
     return out
 
-
-# ===== UI =====
+# ===== Streamlit UI Layout =====
 st.markdown("<div class='main-title'>🎬 VoxCPM2 Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Recap Video</div>", unsafe_allow_html=True)
 st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}")
 st.divider()
 
-# Step 1 & 2: Auto Script Generator (NO API KEY)
+# Step 1 & 2: Auto Script Generator
 st.subheader("🤖 Step 1 & 2 — Video Auto Script Generator (No API Key)")
 
 if "script" not in st.session_state: 
@@ -289,7 +319,7 @@ if script_vid:
                 with open(temp_vid_path, "wb") as f:
                     f.write(script_vid.read())
                 
-                # Call free gradio client (No API Key required!)
+                # Call free gradio client (No API Key required)
                 generated_script = generate_script_free_hf(temp_vid_path)
                 st.session_state.script = generated_script
                 st.success("✨ Script အောင်မြင်စွာ ထုတ်ယူပြီးပါပြီ!")
@@ -312,7 +342,7 @@ with c2:
 
 st.divider()
 
-# Step 3
+# Step 3: Ref Audio & Video Upload
 st.subheader("📁 Step 3 — Ref Audio + Video")
 if "ref" not in st.session_state: st.session_state.ref = None
 c1, c2 = st.columns(2)
@@ -326,14 +356,14 @@ with c2:
     if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# Step 4
+# Step 4: Subtitle & Preview
 st.subheader("📝 Step 4 — Subtitle")
 use_sub = st.toggle("စာတန်းထိုး (Burn-in)", value=True)
 if use_sub: st.caption(f"🔤 Font {FS}  •  ⬛ Box {BH}px  •  🎨 Opacity {BA}")
 
 if vid and use_sub:
     st.markdown("**🖼️ Preview**")
-    with st.spinner("Preview..."):
+    with st.spinner("Preview ပြုလုပ်နေပါသည်..."):
         vid.seek(0)
         with open("preview.mp4", "wb") as f: f.write(vid.read())
         W, H, _ = vid_info("preview.mp4")
@@ -347,7 +377,7 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-# Step 5
+# Step 5: Final Video Recap Generation
 st.subheader("🚀 Step 5 — Generate Recap")
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
     if not script.strip(): st.error("Script ရေးထားခြင်း မရှိပါ"); st.stop()
@@ -361,16 +391,16 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     def cb(i, tot, c):
         pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}] {len(c)} စာလုံး")
 
-    # TTS
+    # Text-to-Speech Processing
     try: tts_all(script, "voice.mp3", st.session_state.ref, cb)
-    except Exception as e: st.error(f"TTS — {e}"); st.stop()
+    except Exception as e: st.error(f"TTS Error — {e}"); st.stop()
 
     adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
     tempo = max(0.5, min(2.0, adur/vdur))
 
     sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
 
-    # ⚡ Render — Fast
+    # Video Rendering & Subtitle Overlay
     with st.spinner("🎬 Rendering — Fast Mode..."):
         vi = ffmpeg.input("input.mp4")
         va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
@@ -384,7 +414,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         else:
             shutil.copy("temp.mp4", "final.mp4")
 
-    st.success(f"✅ Done — {adur:.0f}s @ {tempo:.2f}x")
+    st.success(f"✅ ပြီးစီးပါပြီ — Audio Duration: {adur:.0f}s @ Tempo: {tempo:.2f}x")
     st.video("final.mp4")
 
     with open("final.mp4", "rb") as f:
