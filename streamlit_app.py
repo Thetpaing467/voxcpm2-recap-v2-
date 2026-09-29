@@ -13,7 +13,7 @@ PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
 # ⚡ အမြန်ဆုံး Settings
-FS, BH, BA = 30, 100, 100
+FS, BH, BA = 30, 100, 130
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
