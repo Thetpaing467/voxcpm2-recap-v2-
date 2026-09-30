@@ -19,6 +19,10 @@ ENC_CRF = 23
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 
+# 🎙️ Whisper Settings
+WHISPER_MODEL = "tiny"
+WHISPER_LANG = "my"
+
 st.set_page_config(page_title="VoxCPM2 Recap", page_icon="🎬", layout="centered")
 
 # ===== CSS =====
@@ -97,13 +101,10 @@ def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100):
     img = Image.new("RGBA", (W, H), (0,0,0,0)); d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
     except: f = ImageFont.load_default()
-
-    # Box Y Position — 0% ကနေ 100% အထိ
     max_y = H - bh
     by = int((pos_y / 100) * max_y)
     if by < 0: by = 0
     if by > max_y: by = max_y
-
     d.rectangle([0, by, W, by+bh], fill=(0,0,0,ba))
     mc = max(15, int(W/(fs*0.9))); lines, cur = [], ""
     for w in text.split():
@@ -249,24 +250,75 @@ def tts_all(text, out, ref=None, cb=None):
     return out
 
 
+# ===== 🎙️ Whisper Auto Script =====
+def whisper_to_script(video_path):
+    """Video → Audio → Whisper → မြန်မာ Script"""
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path,
+        "-ar", "16000", "-ac", "1",
+        "-c:a", "pcm_s16le", "whisper_audio.wav"
+    ], capture_output=True, check=True)
+
+    import whisper
+    model = whisper.load_model(WHISPER_MODEL)
+    result = model.transcribe("whisper_audio.wav", language=WHISPER_LANG)
+
+    text_parts = []
+    for seg in result["segments"]:
+        if seg["text"].strip():
+            text_parts.append(seg["text"].strip())
+
+    if not text_parts:
+        raise Exception("Whisper — စကားပြော မတွေ့ဘူး")
+
+    return " ".join(text_parts).strip()
+
+
 # ===== UI =====
 st.markdown("<div class='main-title'>🎬 VoxCPM2 Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Recap Video</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → Whisper Script → မြန်မာ အသံ → Recap</div>", unsafe_allow_html=True)
 st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}")
 st.divider()
 
-# ===== Step 1 =====
-st.subheader("📝 Step 1 — Gemini Web မှ Script")
-st.link_button("🌐 Open Gemini Web", "https://gemini.google.com", use_container_width=True)
-with st.expander("📋 Prompt — Copy"):
-    st.code("Watch this video carefully and write a clear, continuous movie recap script in Myanmar language for audio narration that matches the length of the video. Return plain speech text only without markdown titles.", language="text")
+# ===== Step 1 — Video Upload =====
+st.subheader("📹 Step 1 — Video Upload")
+vid = st.file_uploader("📹 Video", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
+if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# ===== Step 2 =====
-st.subheader("📝 Step 2 — Script Paste")
-if "script" not in st.session_state: st.session_state.script = ""
-script = st.text_area("Script", value=st.session_state.script, height=220, label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
+# ===== Step 2 — Whisper Auto Script =====
+st.subheader("🎙️ Step 2 — Whisper Auto Script")
+st.caption(f"⚡ Whisper `{WHISPER_MODEL}` — မြန်မာ ({WHISPER_LANG})")
+
+if "script" not in st.session_state:
+    st.session_state.script = ""
+
+if vid:
+    if st.button("🎙️ Whisper — Video ကနေ Script ထုတ်", use_container_width=True):
+        vid.seek(0)
+        with open("whisper_input.mp4", "wb") as f:
+            f.write(vid.read())
+        try:
+            with st.spinner(f"🎙️ Whisper `{WHISPER_MODEL}` — Script ထုတ်နေသည်..."):
+                auto_script = whisper_to_script("whisper_input.mp4")
+            st.session_state.script = auto_script
+            st.success(f"✅ Script — {len(auto_script):,} စာလုံး")
+        except Exception as e:
+            st.error(f"❌ Whisper — {e}")
+        finally:
+            vid.seek(0)
+else:
+    st.info("📹 Video Upload တင်ပြီး — Button နှိပ်ပါ")
+
+script = st.text_area(
+    "Script",
+    value=st.session_state.script,
+    height=220,
+    label_visibility="collapsed",
+    placeholder="Whisper auto script သို့မဟုတ် မြန်မာ Script paste..."
+)
 st.session_state.script = script
+
 c1, c2 = st.columns([3, 1])
 with c1: st.caption(f"📝 စာလုံး — {len(script):,}")
 with c2:
@@ -274,18 +326,15 @@ with c2:
         st.session_state.script = ""; st.rerun()
 st.divider()
 
-# ===== Step 3 =====
-st.subheader("📁 Step 3 — Ref Audio + Video")
-if "ref" not in st.session_state: st.session_state.ref = None
-c1, c2 = st.columns(2)
-with c1:
-    ref = st.file_uploader("🎤 Ref Audio (Optional)", type=["wav","mp3","m4a"])
-    if ref:
-        with open("ref.wav", "wb") as f: f.write(ref.read())
-        st.session_state.ref = "ref.wav"; st.success("✅ Ref Audio Ready")
-with c2:
-    vid = st.file_uploader("📹 Video Upload", type=["mp4","mov","avi","mkv"])
-    if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
+# ===== Step 3 — Ref Audio =====
+st.subheader("🎤 Step 3 — Ref Audio (Optional)")
+if "ref" not in st.session_state:
+    st.session_state.ref = None
+ref = st.file_uploader("🎤 Ref Audio", type=["wav","mp3","m4a"], label_visibility="collapsed")
+if ref:
+    with open("ref.wav", "wb") as f: f.write(ref.read())
+    st.session_state.ref = "ref.wav"
+    st.success("✅ Ref Audio Ready")
 st.divider()
 
 # ===== Step 4 — Subtitle + Position Slider =====
@@ -305,7 +354,6 @@ if use_sub:
         help="စာတန်းထိုးကို — အပေါ်/အောက် — ရွေ့နိုင်ပါတယ်"
     )
 
-    # Position Label
     if pos_y <= 20:
         pos_label = "⬆️ အပေါ်ဆုံး"
     elif pos_y <= 40:
