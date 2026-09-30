@@ -3,4 +3,5 @@ gradio_client
 ffmpeg-python
 opencv-python-headless
 Pillow
-openai-whisper
+faster-whisper==1.0.3
+huggingface_hub==0.23.0
