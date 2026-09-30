@@ -97,11 +97,15 @@ def s2t(ts):
     return None
 
 
-def render_png(text, out, fp, W, H, fs=30, pos="center", bh=100, ba=100):
+def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100):
+    """Subtitle PNG — pos_y: 0=အပေါ်ဆုံး, 50=အလယ်, 100=အောက်ဆုံး"""
     img = Image.new("RGBA", (W, H), (0,0,0,0)); d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
     except: f = ImageFont.load_default()
-    by = (H-bh)//2 if pos=="center" else (H-bh if pos=="bottom" else 0)
+    max_y = H - bh
+    by = int((pos_y / 100) * max_y)
+    if by < 0: by = 0
+    if by > max_y: by = max_y
     d.rectangle([0, by, W, by+bh], fill=(0,0,0,ba))
     mc = max(15, int(W/(fs*0.9))); lines, cur = [], ""
     for w in text.split():
@@ -161,13 +165,13 @@ def parse_srt(path):
     return segs
 
 
-def overlay(vp, sp, op, fp, fs=30, pos="center", bh=100, ba=100):
+def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100):
     W, H, _ = vid_info(vp); segs = parse_srt(sp)
     if not segs: raise Exception("SRT empty")
     os.makedirs("subtitle_pngs", exist_ok=True); pngs = []
     for i, s in enumerate(segs):
         p = f"subtitle_pngs/s_{i:04d}.png"
-        render_png(s["text"], p, fp, W, H, fs, pos, bh, ba)
+        render_png(s["text"], p, fp, W, H, fs, pos_y, bh, ba)
         pngs.append({"p": p, "a": s["start"], "b": s["end"]})
     cmd = ["ffmpeg","-y","-i",vp] + sum([["-i",x["p"]] for x in pngs], [])
     flt, cur = [], "[0:v]"
@@ -345,7 +349,15 @@ st.divider()
 # Step 4
 st.subheader("📝 Step 4 — Subtitle")
 use_sub = st.toggle("စာတန်းထိုး (Burn-in)", value=True)
-if use_sub: st.caption(f"🔤 Font {FS}  •  ⬛ Box {BH}px  •  🎨 Opacity {BA}")
+
+pos_y = 100
+
+if use_sub:
+    pos_y = st.slider(
+        "📍 Subtitle Position (0=အပေါ်, 50=အလယ်, 100=အောက်)",
+        min_value=0, max_value=100, value=100, step=5
+    )
+    st.caption(f"📍 {pos_y}%  •  🔤 Font {FS}  •  ⬛ Box {BH}px  •  🎨 Opacity {BA}")
 
 if vid and use_sub:
     st.markdown("**🖼️ Preview**")
@@ -353,7 +365,7 @@ if vid and use_sub:
         vid.seek(0)
         with open("preview.mp4", "wb") as f: f.write(vid.read())
         W, H, _ = vid_info("preview.mp4")
-        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, "center", BH, BA)
+        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA)
         cap = cv2.VideoCapture("preview.mp4"); ok, fr = cap.read(); cap.release()
         if ok:
             bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
@@ -415,7 +427,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
                        ).run(overwrite_output=True)
 
         if use_sub and sp:
-            overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, "center", BH, BA)
+            overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA)
         else:
             shutil.copy("temp.mp4", "final.mp4")
 
@@ -424,4 +436,3 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     with open("final.mp4", "rb") as f:
         st.download_button("📥 Download Recap Video", f, file_name="recap.mp4")
-
