@@ -19,11 +19,6 @@ ENC_CRF = 23
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 
-# 🎙️ Whisper Settings
-WHISPER_MODEL = "tiny"
-WHISPER_LANG = "my"
-SPEECH_MERGE_GAP = 0.5
-
 st.set_page_config(page_title="VoxCPM2 Recap", page_icon="🎬", layout="centered")
 
 # ===== CSS =====
@@ -97,11 +92,18 @@ def s2t(ts):
     return None
 
 
-def render_png(text, out, fp, W, H, fs=30, pos="center", bh=100, ba=100):
+def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100):
+    """Subtitle PNG — pos_y: 0=အပေါ်ဆုံး, 50=အလယ်, 100=အောက်ဆုံး"""
     img = Image.new("RGBA", (W, H), (0,0,0,0)); d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
     except: f = ImageFont.load_default()
-    by = (H-bh)//2 if pos=="center" else (H-bh if pos=="bottom" else 0)
+
+    # Box Y Position — 0% ကနေ 100% အထိ
+    max_y = H - bh
+    by = int((pos_y / 100) * max_y)
+    if by < 0: by = 0
+    if by > max_y: by = max_y
+
     d.rectangle([0, by, W, by+bh], fill=(0,0,0,ba))
     mc = max(15, int(W/(fs*0.9))); lines, cur = [], ""
     for w in text.split():
@@ -161,13 +163,13 @@ def parse_srt(path):
     return segs
 
 
-def overlay(vp, sp, op, fp, fs=30, pos="center", bh=100, ba=100):
+def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100):
     W, H, _ = vid_info(vp); segs = parse_srt(sp)
     if not segs: raise Exception("SRT empty")
     os.makedirs("subtitle_pngs", exist_ok=True); pngs = []
     for i, s in enumerate(segs):
         p = f"subtitle_pngs/s_{i:04d}.png"
-        render_png(s["text"], p, fp, W, H, fs, pos, bh, ba)
+        render_png(s["text"], p, fp, W, H, fs, pos_y, bh, ba)
         pngs.append({"p": p, "a": s["start"], "b": s["end"]})
     cmd = ["ffmpeg","-y","-i",vp] + sum([["-i",x["p"]] for x in pngs], [])
     flt, cur = [], "[0:v]"
@@ -247,76 +249,20 @@ def tts_all(text, out, ref=None, cb=None):
     return out
 
 
-# ===== 🎙️ Whisper Auto Cut =====
-def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
-    """Whisper နဲ့ စကားပြောခန်း ရှာပြီး FFmpeg နဲ့ ဖြတ်"""
-    subprocess.run([
-        "ffmpeg", "-y", "-i", input_video,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", "audio.wav"
-    ], capture_output=True, check=True)
-
-    speech_segments = []
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(
-            "audio.wav", language=WHISPER_LANG,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500)
-        )
-        for seg in segments:
-            speech_segments.append((seg.start, seg.end))
-    except ImportError:
-        import whisper
-        model = whisper.load_model(WHISPER_MODEL)
-        result = model.transcribe("audio.wav", language=WHISPER_LANG)
-        for seg in result["segments"]:
-            speech_segments.append((seg["start"], seg["end"]))
-
-    if not speech_segments:
-        raise Exception("စကားပြောခန်း မတွေ့ဘူး")
-
-    merged = []
-    for s, e in speech_segments:
-        if merged and s - merged[-1][1] < SPEECH_MERGE_GAP:
-            merged[-1] = (merged[-1][0], e)
-        else:
-            merged.append((s, e))
-
-    select_exprs = [f"between(t,{s:.2f},{e:.2f})" for s, e in merged]
-    select_str = "+".join(select_exprs)
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_video,
-        "-vf", f"select='{select_str}',setpts=N/FRAME_RATE/TB",
-        "-af", f"aselect='{select_str}',asetpts=N/SR/TB",
-        "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
-        "-c:a", "aac", "-b:a", "128k",
-        output_video
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
-
-    total = sum(e - s for s, e in merged)
-    return output_video, len(merged), total
-
-
 # ===== UI =====
 st.markdown("<div class='main-title'>🎬 VoxCPM2 Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Recap Video</div>", unsafe_allow_html=True)
 st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}")
 st.divider()
 
-# Step 1
+# ===== Step 1 =====
 st.subheader("📝 Step 1 — Gemini Web မှ Script")
 st.link_button("🌐 Open Gemini Web", "https://gemini.google.com", use_container_width=True)
 with st.expander("📋 Prompt — Copy"):
     st.code("Watch this video carefully and write a clear, continuous movie recap script in Myanmar language for audio narration that matches the length of the video. Return plain speech text only without markdown titles.", language="text")
 st.divider()
 
-# Step 2
+# ===== Step 2 =====
 st.subheader("📝 Step 2 — Script Paste")
 if "script" not in st.session_state: st.session_state.script = ""
 script = st.text_area("Script", value=st.session_state.script, height=220, label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
@@ -328,7 +274,7 @@ with c2:
         st.session_state.script = ""; st.rerun()
 st.divider()
 
-# Step 3
+# ===== Step 3 =====
 st.subheader("📁 Step 3 — Ref Audio + Video")
 if "ref" not in st.session_state: st.session_state.ref = None
 c1, c2 = st.columns(2)
@@ -342,10 +288,36 @@ with c2:
     if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# Step 4
+# ===== Step 4 — Subtitle + Position Slider =====
 st.subheader("📝 Step 4 — Subtitle")
 use_sub = st.toggle("စာတန်းထိုး (Burn-in)", value=True)
-if use_sub: st.caption(f"🔤 Font {FS}  •  ⬛ Box {BH}px  •  🎨 Opacity {BA}")
+
+pos_y = 100  # Default — အောက်ဆုံး
+
+if use_sub:
+    st.markdown("**📍 စာတန်းထိုး တည်နေရာ ရွေးပါ**")
+    pos_y = st.slider(
+        "Position (0 = အပေါ်ဆုံး, 50 = အလယ်, 100 = အောက်ဆုံး)",
+        min_value=0,
+        max_value=100,
+        value=100,
+        step=5,
+        help="စာတန်းထိုးကို — အပေါ်/အောက် — ရွေ့နိုင်ပါတယ်"
+    )
+
+    # Position Label
+    if pos_y <= 20:
+        pos_label = "⬆️ အပေါ်ဆုံး"
+    elif pos_y <= 40:
+        pos_label = "↗️ အပေါ်ဘက်"
+    elif pos_y <= 60:
+        pos_label = "⏺️ အလယ်"
+    elif pos_y <= 80:
+        pos_label = "↘️ အောက်ဘက်"
+    else:
+        pos_label = "⬇️ အောက်ဆုံး"
+
+    st.caption(f"📍 {pos_label} ({pos_y}%)  •  🔤 Font {FS}  •  ⬛ Box {BH}px  •  🎨 Opacity {BA}")
 
 if vid and use_sub:
     st.markdown("**🖼️ Preview**")
@@ -353,7 +325,7 @@ if vid and use_sub:
         vid.seek(0)
         with open("preview.mp4", "wb") as f: f.write(vid.read())
         W, H, _ = vid_info("preview.mp4")
-        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, "center", BH, BA)
+        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA)
         cap = cv2.VideoCapture("preview.mp4"); ok, fr = cap.read(); cap.release()
         if ok:
             bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
@@ -363,35 +335,18 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-# Step 4.5 — Dubbing Mode
-st.subheader("🎙️ Step 4.5 — Dubbing Mode")
-st.caption("🎬 စကားပြောခန်းပဲ ထားပြီး — ကျန်တာ ဖြတ်မယ် (Whisper Auto)")
-dubbing_mode = st.toggle("✂️ Dubbing Mode — Whisper Auto Cut", value=False)
-if dubbing_mode:
-    st.info(f"⚡ Whisper `{WHISPER_MODEL}` — မြန်မာ ({WHISPER_LANG}) — RAM နည်း")
-st.divider()
-
-# Step 5
+# ===== Step 5 — Generate =====
 st.subheader("🚀 Step 5 — Generate Recap")
+
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
-    if not script.strip(): st.error("Script paste လုပ်ပါ"); st.stop()
-    if vid is None: st.error("Video Upload တင်ပါ"); st.stop()
+    if not script.strip():
+        st.error("Script paste လုပ်ပါ"); st.stop()
+    if vid is None:
+        st.error("Video Upload တင်ပါ"); st.stop()
 
     vid.seek(0)
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
-
-    # 🎙️ Whisper Dubbing Mode
-    if dubbing_mode:
-        with st.spinner(f"🎙️ Whisper `{WHISPER_MODEL}` — စကားပြောခန်း ရှာနေသည်..."):
-            try:
-                cut_path, seg_count, cut_dur = whisper_cut_speech("input.mp4", "input_cut.mp4")
-                shutil.move("input_cut.mp4", "input.mp4")
-                _, _, vdur = vid_info("input.mp4")
-                st.success(f"✅ ဖြတ်ပြီး — {seg_count} ခန်း • {cut_dur:.0f}s")
-            except Exception as e:
-                st.error(f"❌ Whisper — {e}")
-                st.stop()
 
     pb = st.progress(0); txt = st.empty()
     def cb(i, tot, c):
@@ -415,7 +370,8 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
                        ).run(overwrite_output=True)
 
         if use_sub and sp:
-            overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, "center", BH, BA)
+            # ⭐ SRT PNG Overlay — Position Slider ပါဝင်
+            overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA)
         else:
             shutil.copy("temp.mp4", "final.mp4")
 
