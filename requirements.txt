@@ -1,5 +1,5 @@
-streamlit==1.40.0
-gradio_client==1.4.2
-ffmpeg-python==0.2.0
-opencv-python-headless==4.10.0.84
-Pillow==11.0.0
+streamlit
+gradio_client
+ffmpeg-python
+opencv-python-headless
+Pillow
