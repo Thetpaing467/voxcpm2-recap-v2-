@@ -3,18 +3,13 @@ import os, re, ffmpeg, shutil, subprocess, asyncio
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
-from gradio_client import Client, handle_file
 
 # ===== Config =====
-SPACES = [
-    {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
-    {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
-]
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
 # ⚡ Fast Settings
-FS, BH, BA = 30, 100, 200
+FS, BH, BA = 30, 100, 100
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
@@ -25,13 +20,13 @@ WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
 SPEECH_MERGE_GAP = 0.5
 
-# 🎙️ Edge TTS Voices (မြန်မာ)
+# 🎙️ Edge TTS Voices
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",   # နီလာ
     "male":   "my-MM-ThihaNeural",   # သီဟ
 }
 
-st.set_page_config(page_title="VoxCPM2 Recap", page_icon="🎬", layout="centered")
+st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
 # ===== CSS =====
 st.markdown("""
@@ -105,7 +100,6 @@ def s2t(ts):
 
 
 def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100):
-    """Subtitle PNG — pos_y: 0=အပေါ်ဆုံး, 50=အလယ်, 100=အောက်ဆုံး"""
     img = Image.new("RGBA", (W, H), (0,0,0,0)); d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
     except: f = ImageFont.load_default()
@@ -212,42 +206,14 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-def tts_run(chunks, ref, space, cb=None):
-    cl = Client(space); files = []; rf = handle_file(ref) if ref else None
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
-        res = cl.predict(text_input=c,
-            control_instruction="A warm young woman, calm and expressive",
-            reference_wav_path_input=rf, use_prompt_text=False,
-            prompt_text_input="", cfg_value_input=2.0,
-            do_normalize=True, denoise=False, api_name="/generate")
-        p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
-    return files
-
-
-def tts_burmese(chunks, ref, space, cb=None):
-    cl = Client(space); files = []
-    if not ref: raise Exception("Reference Audio needed")
-    rf = handle_file(ref)
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
-        res = cl.predict(target_text=c, ref_audio=rf,
-            ref_text="မြန်မာ အသံနမူနာ", cfg_value=2.0,
-            inference_timesteps=10, api_name="/tts")
-        p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
-    return files
-
-
-# ===== 🎙️ Edge TTS Fallback =====
+# ===== 🎙️ Edge TTS =====
 async def _edge_tts_async(text, out_file, voice):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_file)
 
 
 def edge_tts_run(chunks, out_path, voice="female", cb=None):
-    """Edge TTS — မြန်မာ အသံ — VoxCPM2 Fail ရင် — Fallback"""
+    """Edge TTS — မြန်မာ အသံ"""
     voice_id = EDGE_VOICES.get(voice, EDGE_VOICES["female"])
     files = []
 
@@ -273,50 +239,17 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None):
     return out_path
 
 
-def tts_all(text, out, ref=None, cb=None, edge_voice="female"):
-    """VoxCPM2 → Fail ရင် — Edge TTS ကို Auto Fallback"""
+def tts_all(text, out, voice="female", cb=None):
+    """Edge TTS — တစ်ခုတည်း"""
     chunks = split_scr(text, TTS_CHUNK)
-    files = None
-    last_error = None
-
-    # 1. VoxCPM2 စမ်း
-    for s in SPACES:
-        try:
-            st.info(f"🎙️ {s['space']} — စမ်းနေသည်...")
-            if s["type"] == "demo":
-                files = tts_run(chunks, ref, s["space"], cb)
-            else:
-                files = tts_burmese(chunks, ref, s["space"], cb)
-            st.success(f"✅ {s['space']} — အောင်မြင်")
-            break
-        except Exception as e:
-            last_error = str(e)
-            st.warning(f"⚠️ {s['space']} — Fail: {last_error[:120]}")
-            files = None
-            continue
-
-    # 2. VoxCPM2 Fail ရင် — Edge TTS
-    if files is None:
-        st.warning(f"⚠️ VoxCPM2 — Busy/Fail — Edge TTS ကို ပြောင်းသုံးမယ်")
-        try:
-            edge_tts_run(chunks, out, voice=edge_voice, cb=cb)
-            st.success(f"✅ Edge TTS — {EDGE_VOICES[edge_voice]} — အောင်မြင်")
-            return out
-        except Exception as e:
-            raise Exception(f"VoxCPM2 + Edge TTS — Fail: {e}")
-
-    # 3. VoxCPM2 အောင်မြင် — Concat
-    with open("concat.txt", "w", encoding="utf-8") as f:
-        for a in files: f.write(f"file '{a}'\n")
-    ffmpeg.input("concat.txt", format="concat", safe=0).output(
-        out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
+    st.info(f"🎙️ Edge TTS — {EDGE_VOICES[voice]} — ဖန်တီးနေသည်...")
+    edge_tts_run(chunks, out, voice=voice, cb=cb)
+    st.success(f"✅ Edge TTS — အောင်မြင်")
     return out
 
 
 # ===== 🎙️ Whisper Auto Cut =====
 def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
-    """Whisper နဲ့ စကားပြောခန်း ရှာပြီး FFmpeg နဲ့ ဖြတ်"""
     subprocess.run([
         "ffmpeg", "-y", "-i", input_video,
         "-ar", "16000", "-ac", "1",
@@ -371,9 +304,9 @@ def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
 
 
 # ===== UI =====
-st.markdown("<div class='main-title'>🎬 VoxCPM2 Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Recap Video</div>", unsafe_allow_html=True)
-st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}")
+st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
+st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}  •  🎙️ Edge TTS")
 st.divider()
 
 # Step 1
@@ -396,17 +329,9 @@ with c2:
 st.divider()
 
 # Step 3
-st.subheader("📁 Step 3 — Ref Audio + Video")
-if "ref" not in st.session_state: st.session_state.ref = None
-c1, c2 = st.columns(2)
-with c1:
-    ref = st.file_uploader("🎤 Ref Audio (Optional)", type=["wav","mp3","m4a"])
-    if ref:
-        with open("ref.wav", "wb") as f: f.write(ref.read())
-        st.session_state.ref = "ref.wav"; st.success("✅ Ref Audio Ready")
-with c2:
-    vid = st.file_uploader("📹 Video Upload", type=["mp4","mov","avi","mkv"])
-    if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
+st.subheader("📁 Step 3 — Video")
+vid = st.file_uploader("📹 Video Upload", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
+if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
 # Step 4
@@ -451,7 +376,7 @@ st.subheader("🚀 Step 5 — Generate Recap")
 
 # 🎤 Edge TTS Voice Option
 edge_voice = st.radio(
-    "🎤 VoxCPM2 Fail ရင် — Edge TTS အသံ",
+    "🎤 Edge TTS အသံ ရွေးပါ",
     options=["female", "male"],
     format_func=lambda x: "👩 နီလာ (Nilar)" if x == "female" else "👨 သီဟ (Thiha)",
     horizontal=True,
@@ -482,9 +407,9 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     def cb(i, tot, c):
         pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}] {len(c)} စာလုံး")
 
-    # TTS — VoxCPM2 → Edge TTS Fallback
+    # TTS — Edge TTS
     try:
-        tts_all(script, "voice.mp3", st.session_state.ref, cb, edge_voice=edge_voice)
+        tts_all(script, "voice.mp3", voice=edge_voice, cb=cb)
     except Exception as e:
         st.error(f"TTS — {e}")
         st.stop()
