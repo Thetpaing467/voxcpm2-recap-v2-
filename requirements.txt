@@ -3,5 +3,4 @@ ffmpeg-python
 opencv-python-headless
 Pillow
 edge-tts
-faster-whisper==1.0.3
-huggingface_hub==0.23.0
+faster-whisper
