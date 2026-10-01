@@ -1,5 +1,5 @@
 import streamlit as st
-import os, re, ffmpeg, shutil, subprocess, asyncio
+import os, re, ffmpeg, shutil, subprocess, asyncio, time
 import concurrent.futures
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
@@ -52,6 +52,56 @@ st.markdown("""
 .stFileUploader{background:rgba(255,255,255,.02);border-radius:10px;padding:8px}
 .stAlert{border-radius:10px!important;border:none!important}
 hr{border-color:rgba(255,255,255,.08);margin:24px 0}
+/* ⏱️ Timer Box */
+.timer-box {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    border-radius: 16px;
+    padding: 24px;
+    text-align: center;
+    margin: 15px 0;
+    box-shadow: 0 8px 30px rgba(102,126,234,.4);
+}
+.timer-title {
+    color: #ffffff;
+    font-size: 0.9rem;
+    font-weight: 600;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+    opacity: 0.9;
+}
+.timer-value {
+    color: #ffffff;
+    font-size: 3.2rem;
+    font-weight: 900;
+    line-height: 1;
+    text-shadow: 0 4px 15px rgba(0,0,0,.3);
+}
+.timer-unit {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-left: 8px;
+    opacity: 0.85;
+}
+.timer-sub {
+    color: #ffffff;
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-top: 8px;
+    opacity: 0.9;
+}
+.step-timer {
+    background: rgba(255,255,255,.05);
+    border-left: 4px solid #667eea;
+    border-radius: 10px;
+    padding: 12px 18px;
+    margin: 8px 0;
+    color: #e8e8f0;
+    font-size: 0.95rem;
+}
+.step-timer b {
+    color: #6ba8ff;
+    font-size: 1.05rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -75,6 +125,15 @@ if not st.session_state.auth:
 
 
 # ===== Helpers =====
+def fmt_time(sec):
+    """Seconds → 'Xm Ys' + 'X.XXs' format"""
+    m = int(sec // 60)
+    s = sec - m * 60
+    if m > 0:
+        return f"{m}m {s:.1f}s", f"{sec:.2f}s"
+    return f"{s:.1f}s", f"{sec:.2f}s"
+
+
 def vid_info(p):
     pr = ffmpeg.probe(p)
     v = next(s for s in pr['streams'] if s['codec_type'] == 'video')
@@ -169,24 +228,22 @@ def parse_srt(path):
 
 
 def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100):
-    """Subtitle PNG Overlay — Parallel PNG Render — 30-50% မြန်"""
+    """Subtitle PNG Overlay — Parallel PNG Render"""
     W, H, _ = vid_info(vp); segs = parse_srt(sp)
     if not segs: raise Exception("SRT empty")
     os.makedirs("subtitle_pngs", exist_ok=True)
 
-    # ⚡ PNG — Parallel Render
     def render_one(args):
         i, s = args
         p = f"subtitle_pngs/s_{i:04d}.png"
         render_png(s["text"], p, fp, W, H, fs, pos_y, bh, ba)
-        return {"p": p, "a": s["start"], "b": s["end"]}
+        return i, {"p": p, "a": s["start"], "b": s["end"]}
 
     pngs = [None] * len(segs)
     with concurrent.futures.ThreadPoolExecutor(max_workers=PNG_WORKERS) as ex:
         for idx, item in ex.map(render_one, enumerate(segs)):
             pngs[idx] = item
 
-    # FFmpeg — Overlay
     cmd = ["ffmpeg","-y","-i",vp] + sum([["-i",x["p"]] for x in pngs], [])
     flt, cur = [], "[0:v]"
     for i, x in enumerate(pngs):
@@ -405,12 +462,17 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     if not script.strip(): st.error("Script paste လုပ်ပါ"); st.stop()
     if vid is None: st.error("Video Upload တင်ပါ"); st.stop()
 
+    # ⏱️ Total Timer — Start
+    total_start = time.time()
+    step_times = {}
+
     vid.seek(0)
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    # Whisper Dubbing Mode
+    # Step 1 — Whisper
     if dubbing_mode:
+        t0 = time.time()
         with st.spinner(f"🎙️ Whisper `{WHISPER_MODEL}` — စကားပြောခန်း ရှာနေသည်..."):
             try:
                 cut_path, seg_count, cut_dur = whisper_cut_speech("input.mp4", "input_cut.mp4")
@@ -420,23 +482,28 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             except Exception as e:
                 st.error(f"❌ Whisper — {e}")
                 st.stop()
+        step_times["🎙️ Whisper Cut"] = time.time() - t0
 
+    # Step 2 — Edge TTS
+    t0 = time.time()
     pb = st.progress(0); txt = st.empty()
     def cb(i, tot, c):
         pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}] {len(c)} စာလုံး")
 
-    # TTS — Edge TTS Parallel
     try:
         tts_all(script, "voice.mp3", voice=edge_voice, cb=cb)
     except Exception as e:
         st.error(f"TTS — {e}")
         st.stop()
+    step_times["🎙️ Edge TTS"] = time.time() - t0
 
     adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
     tempo = max(0.5, min(2.0, adur/vdur))
 
     sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
 
+    # Step 3 — Render
+    t0 = time.time()
     with st.spinner("🎬 Rendering — Fast Mode..."):
         vi = ffmpeg.input("input.mp4")
         va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
@@ -457,8 +524,33 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA)
         else:
             shutil.copy("temp.mp4", "final.mp4")
+    step_times["🎬 Video Render"] = time.time() - t0
 
-    st.success(f"✅ Done — {adur:.0f}s @ {tempo:.2f}x")
+    # ⏱️ Total Timer — End
+    total_elapsed = time.time() - total_start
+    total_str, total_sec_str = fmt_time(total_elapsed)
+
+    # ===== ⏱️ TIMER DISPLAY — ကြီးကြီး =====
+    st.markdown(f"""
+    <div class="timer-box">
+        <div class="timer-title">⏱️ TOTAL PROCESSING TIME</div>
+        <div class="timer-value">{total_elapsed:.1f}<span class="timer-unit">sec</span></div>
+        <div class="timer-sub">≈ {total_str}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Step-by-Step Times
+    st.markdown("### 📊 Step-by-Step Times")
+    for name, t in step_times.items():
+        _, sec_str = fmt_time(t)
+        pct = (t / total_elapsed * 100) if total_elapsed > 0 else 0
+        st.markdown(f"""
+        <div class="step-timer">
+            {name} — <b>{t:.1f}s</b> ({sec_str}) — <b>{pct:.1f}%</b>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.success(f"✅ Done — {adur:.0f}s @ {tempo:.2f}x  •  ⏱️ {total_elapsed:.1f}s")
     st.video("final.mp4")
 
     with open("final.mp4", "rb") as f:
