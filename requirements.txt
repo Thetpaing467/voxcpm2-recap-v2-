@@ -3,6 +3,3 @@ gradio_client
 ffmpeg-python
 opencv-python-headless
 Pillow
-pyannote.audio
-torch
-torchaudio
