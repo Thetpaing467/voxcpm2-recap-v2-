@@ -15,17 +15,14 @@ ENC_CRF = 23
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 
-# 🎙️ Whisper Settings — 0.5s မြန်မြန် Cut
-WHISPER_MODEL = "tiny"
-WHISPER_LANG = "my"
-MIN_SILENCE_MS = 500      # ⚡ 0.5 စက္ကန့်
-SPEECH_PAD_MS = 0         # ⚡ Pad မထည့်
-SPEECH_MERGE_GAP = 0.5    # ⚡ 0.5s
+# ✂️ Silence Cut Settings — Default
+DEFAULT_SILENCE_DB = -30
+DEFAULT_MIN_SILENCE = 0.1
 
 # 🎙️ Edge TTS Voices
 EDGE_VOICES = {
-    "female": "my-MM-NilarNeural",   # နီလာ
-    "male":   "my-MM-ThihaNeural",   # သီဟ
+    "female": "my-MM-NilarNeural",
+    "male":   "my-MM-ThihaNeural",
 }
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
@@ -248,48 +245,38 @@ def tts_all(text, out, voice="female", cb=None):
     return out
 
 
-# ===== 🎙️ Whisper Auto Cut — 0.5s မြန်မြန် =====
-def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
-    """Whisper — စကားသံ ရှာ — 0.5s ထိ မြန်မြန် Cut"""
-    subprocess.run([
-        "ffmpeg", "-y", "-i", input_video,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", "audio.wav"
-    ], capture_output=True, check=True)
+# ===== ✂️ FFmpeg Silence Cut =====
+def ffmpeg_silence_cut(input_video, output_video="input_cut.mp4",
+                        silence_db=DEFAULT_SILENCE_DB,
+                        min_silence=DEFAULT_MIN_SILENCE):
+    """FFmpeg silencedetect — တိတ်ဆိတ်တဲ့ အပိုင်း ချက်ချင်း Cut"""
 
+    cmd = [
+        "ffmpeg", "-i", input_video,
+        "-af", f"silencedetect=noise={silence_db}dB:d={min_silence}",
+        "-f", "null", "-"
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+
+    silence_starts = [float(x) for x in re.findall(r"silence_start: ([\d.]+)", r.stderr)]
+    silence_ends   = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", r.stderr)]
+
+    duration = float(ffmpeg.probe(input_video)['format']['duration'])
+
+    silences = list(zip(silence_starts, silence_ends))
     speech_segments = []
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(
-            "audio.wav", language=WHISPER_LANG,
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=MIN_SILENCE_MS,   # ⚡ 0.5s
-                speech_pad_ms=SPEECH_PAD_MS                # ⚡ 0
-            )
-        )
-        for seg in segments:
-            speech_segments.append((seg.start, seg.end))
-    except ImportError:
-        import whisper
-        model = whisper.load_model(WHISPER_MODEL)
-        result = model.transcribe("audio.wav", language=WHISPER_LANG)
-        for seg in result["segments"]:
-            speech_segments.append((seg["start"], seg["end"]))
+    cur = 0.0
+    for s, e in silences:
+        if s > cur:
+            speech_segments.append((cur, s))
+        cur = e
+    if cur < duration:
+        speech_segments.append((cur, duration))
 
     if not speech_segments:
-        raise Exception("စကားပြောခန်း မတွေ့ဘူး")
+        raise Exception("Speech မတွေ့ဘူး")
 
-    # 0.5s ထိ ကပ်နေတဲ့ Segment တွေ ပေါင်း
-    merged = []
-    for s, e in speech_segments:
-        if merged and s - merged[-1][1] < SPEECH_MERGE_GAP:
-            merged[-1] = (merged[-1][0], e)
-        else:
-            merged.append((s, e))
-
-    select_exprs = [f"between(t,{s:.2f},{e:.2f})" for s, e in merged]
+    select_exprs = [f"between(t,{s:.3f},{e:.3f})" for s, e in speech_segments]
     select_str = "+".join(select_exprs)
 
     cmd = [
@@ -304,14 +291,14 @@ def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
     if r.returncode != 0:
         raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
 
-    total = sum(e - s for s, e in merged)
-    return output_video, len(merged), total
+    total = sum(e - s for s, e in speech_segments)
+    return output_video, len(speech_segments), total
 
 
 # ===== UI =====
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Whisper Cut → Edge TTS → Recap</div>", unsafe_allow_html=True)
-st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}  •  🎙️ Edge TTS  •  ✂️ {MIN_SILENCE_MS}ms Cut")
+st.markdown("<div class='main-sub'>Video → Silence Cut → Edge TTS → Recap</div>", unsafe_allow_html=True)
+st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}  •  🎙️ Edge TTS  •  ✂️ Silence Cut")
 st.divider()
 
 # Step 1
@@ -368,12 +355,30 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-# Step 4.5 — Dubbing Mode
-st.subheader("🎙️ Step 4.5 — Dubbing Mode")
-st.caption(f"✂️ စကားသံ ကလွဲ — ကျန်တာ Cut — {MIN_SILENCE_MS}ms ထိ မြန်မြန်")
-dubbing_mode = st.toggle("✂️ Dubbing Mode — Whisper Auto Cut", value=False)
+# Step 4.5 — Silence Cut
+st.subheader("✂️ Step 4.5 — Silence Cut")
+st.caption("တိတ်ဆိတ်တဲ့ အပိုင်း — ချက်ချင်း Cut — Whisper မလိုဘူး")
+
+dubbing_mode = st.toggle("✂️ Silence Cut — On/Off", value=False)
+
+silence_db = DEFAULT_SILENCE_DB
+min_silence = DEFAULT_MIN_SILENCE
+
 if dubbing_mode:
-    st.info(f"⚡ Whisper `{WHISPER_MODEL}` — မြန်မာ ({WHISPER_LANG}) — {MIN_SILENCE_MS}ms")
+    col1, col2 = st.columns(2)
+    with col1:
+        silence_db = st.slider(
+            "🔊 Silence Threshold (dB)",
+            min_value=-50, max_value=-10,
+            value=DEFAULT_SILENCE_DB, step=1
+        )
+    with col2:
+        min_silence = st.slider(
+            "⏱️ Min Silence (sec)",
+            min_value=0.05, max_value=1.0,
+            value=DEFAULT_MIN_SILENCE, step=0.05
+        )
+    st.info(f"⚡ `{min_silence}s` ထိ Cut — `{silence_db}dB`")
 st.divider()
 
 # Step 5
@@ -395,16 +400,19 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    # 🎙️ Whisper Dubbing Mode — 0.5s Cut
+    # ✂️ Silence Cut
     if dubbing_mode:
-        with st.spinner(f"✂️ Whisper — {MIN_SILENCE_MS}ms ထိ Cut လုပ်နေသည်..."):
+        with st.spinner(f"✂️ Silence Cut — {min_silence}s ထိ..."):
             try:
-                cut_path, seg_count, cut_dur = whisper_cut_speech("input.mp4", "input_cut.mp4")
+                cut_path, seg_count, cut_dur = ffmpeg_silence_cut(
+                    "input.mp4", "input_cut.mp4",
+                    silence_db=silence_db, min_silence=min_silence
+                )
                 shutil.move("input_cut.mp4", "input.mp4")
                 _, _, vdur = vid_info("input.mp4")
-                st.success(f"✅ Cut ပြီး — {seg_count} ခန်း • {cut_dur:.0f}s")
+                st.success(f"✅ Cut ပြီး — {seg_count} ခန်း • {cut_dur:.1f}s")
             except Exception as e:
-                st.error(f"❌ Whisper — {e}")
+                st.error(f"❌ Silence Cut — {e}")
                 st.stop()
 
     pb = st.progress(0); txt = st.empty()
