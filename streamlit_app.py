@@ -8,18 +8,25 @@ import cv2
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
+# ⚡ Fast Settings
 FS, BH, BA = 30, 100, 100
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 
+# 🎙️ Whisper Settings
+WHISPER_MODEL = "tiny"
+WHISPER_LANG = "my"
+SPEECH_MERGE_GAP = 0.5
+
+# 🎙️ Edge TTS Voices
 EDGE_VOICES = {
-    "female": "my-MM-NilarNeural",
-    "male":   "my-MM-ThihaNeural",
+    "female": "my-MM-NilarNeural",   # နီလာ
+    "male":   "my-MM-ThihaNeural",   # သီဟ
 }
 
-st.set_page_config(page_title="Audio Offset Dubbing", page_icon="🎬", layout="centered")
+st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
 # ===== CSS =====
 st.markdown("""
@@ -35,6 +42,8 @@ st.markdown("""
  color:#fff!important;border:none!important;border-radius:10px!important;
  padding:12px 20px!important;font-weight:600!important;
  box-shadow:0 4px 15px rgba(102,126,234,.3)!important}
+.stButton>button:hover{transform:translateY(-1px)!important;
+ box-shadow:0 6px 20px rgba(102,126,234,.5)!important}
 .stTextArea textarea{background:rgba(255,255,255,.04)!important;
  border:1px solid rgba(255,255,255,.1)!important;color:#fff!important;
  border-radius:10px!important}
@@ -50,6 +59,7 @@ if "auth" not in st.session_state:
 
 if not st.session_state.auth:
     st.markdown("<div class='main-title'>🔐 Private App</div>", unsafe_allow_html=True)
+    st.markdown("<div class='main-sub'>Password ထည့်ပြီး ဝင်ပါ</div>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
         pwd = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Password")
@@ -196,13 +206,14 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-# ===== Edge TTS =====
+# ===== 🎙️ Edge TTS =====
 async def _edge_tts_async(text, out_file, voice):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_file)
 
 
 def edge_tts_run(chunks, out_path, voice="female", cb=None):
+    """Edge TTS — မြန်မာ အသံ"""
     voice_id = EDGE_VOICES.get(voice, EDGE_VOICES["female"])
     files = []
 
@@ -229,6 +240,7 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None):
 
 
 def tts_all(text, out, voice="female", cb=None):
+    """Edge TTS — တစ်ခုတည်း"""
     chunks = split_scr(text, TTS_CHUNK)
     st.info(f"🎙️ Edge TTS — {EDGE_VOICES[voice]} — ဖန်တီးနေသည်...")
     edge_tts_run(chunks, out, voice=voice, cb=cb)
@@ -236,62 +248,78 @@ def tts_all(text, out, voice="female", cb=None):
     return out
 
 
-# ===== 🎯 itsoffset — Global Audio Offset =====
-def itsoffset_dubbing(video_path, audio_path, output_path, offset_sec=0.0,
-                       keep_original_audio=False):
-    """itsoffset — အသံတစ်ခုလုံး — ရှေ့/နောက် ရွှေ့"""
+# ===== 🎙️ Whisper Auto Cut =====
+def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
+    subprocess.run([
+        "ffmpeg", "-y", "-i", input_video,
+        "-ar", "16000", "-ac", "1",
+        "-c:a", "pcm_s16le", "audio.wav"
+    ], capture_output=True, check=True)
 
-    if keep_original_audio:
-        # Video + Original Audio + Myanmar Audio
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-itsoffset", str(offset_sec),
-            "-i", audio_path,
-            "-map", "0:v:0",
-            "-map", "0:a:0?",
-            "-map", "1:a:0",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", AUDIO_BITRATE,
-            "-shortest",
-            output_path
-        ]
-    else:
-        # Video + Myanmar Audio ပဲ
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-itsoffset", str(offset_sec),
-            "-i", audio_path,
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", AUDIO_BITRATE,
-            "-shortest",
-            output_path
-        ]
+    speech_segments = []
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(
+            "audio.wav", language=WHISPER_LANG,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500)
+        )
+        for seg in segments:
+            speech_segments.append((seg.start, seg.end))
+    except ImportError:
+        import whisper
+        model = whisper.load_model(WHISPER_MODEL)
+        result = model.transcribe("audio.wav", language=WHISPER_LANG)
+        for seg in result["segments"]:
+            speech_segments.append((seg["start"], seg["end"]))
 
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="ignore")
+    if not speech_segments:
+        raise Exception("စကားပြောခန်း မတွေ့ဘူး")
+
+    merged = []
+    for s, e in speech_segments:
+        if merged and s - merged[-1][1] < SPEECH_MERGE_GAP:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+
+    select_exprs = [f"between(t,{s:.2f},{e:.2f})" for s, e in merged]
+    select_str = "+".join(select_exprs)
+
+    cmd = [
+        "ffmpeg", "-y", "-i", input_video,
+        "-vf", f"select='{select_str}',setpts=N/FRAME_RATE/TB",
+        "-af", f"aselect='{select_str}',asetpts=N/SR/TB",
+        "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
+        "-c:a", "aac", "-b:a", "128k",
+        output_video
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if r.returncode != 0:
-        raise Exception(f"FFmpeg: {(r.stderr or '')[-500:]}")
-    return output_path
+        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+
+    total = sum(e - s for s, e in merged)
+    return output_video, len(merged), total
 
 
 # ===== UI =====
-st.markdown("<div class='main-title'>🎬 Audio Offset Dubbing</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Script → Edge TTS → Offset</div>", unsafe_allow_html=True)
-st.caption(f"⚡ itsoffset  •  🎙️ Edge TTS  •  ⚠️ Global Offset")
+st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
+st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}  •  🎙️ Edge TTS")
 st.divider()
 
-# Step 1 — Script
-st.subheader("📝 Step 1 — Script")
+# Step 1
+st.subheader("📝 Step 1 — Gemini Web မှ Script")
 st.link_button("🌐 Open Gemini Web", "https://gemini.google.com", use_container_width=True)
 with st.expander("📋 Prompt — Copy"):
     st.code("Watch this video carefully and write a clear, continuous movie recap script in Myanmar language for audio narration that matches the length of the video. Return plain speech text only without markdown titles.", language="text")
+st.divider()
 
+# Step 2
+st.subheader("📝 Step 2 — Script Paste")
 if "script" not in st.session_state: st.session_state.script = ""
-script = st.text_area("Script", value=st.session_state.script, height=200, label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
+script = st.text_area("Script", value=st.session_state.script, height=220, label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
 st.session_state.script = script
 c1, c2 = st.columns([3, 1])
 with c1: st.caption(f"📝 စာလုံး — {len(script):,}")
@@ -300,14 +328,14 @@ with c2:
         st.session_state.script = ""; st.rerun()
 st.divider()
 
-# Step 2 — Video
-st.subheader("📹 Step 2 — Video Upload")
-vid = st.file_uploader("Video", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
+# Step 3
+st.subheader("📁 Step 3 — Video")
+vid = st.file_uploader("📹 Video Upload", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
 if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# Step 3 — Subtitle
-st.subheader("📝 Step 3 — Subtitle")
+# Step 4
+st.subheader("📝 Step 4 — Subtitle")
 use_sub = st.toggle("စာတန်းထိုး (Burn-in)", value=True)
 
 pos_y = 100
@@ -335,44 +363,27 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-# Step 4 — Voice
-st.subheader("🎤 Step 4 — Edge TTS Voice")
+# Step 4.5 — Dubbing Mode
+st.subheader("🎙️ Step 4.5 — Dubbing Mode")
+st.caption("🎬 စကားပြောခန်းပဲ ထားပြီး — ကျန်တာ ဖြတ်မယ် (Whisper Auto)")
+dubbing_mode = st.toggle("✂️ Dubbing Mode — Whisper Auto Cut", value=False)
+if dubbing_mode:
+    st.info(f"⚡ Whisper `{WHISPER_MODEL}` — မြန်မာ ({WHISPER_LANG}) — RAM နည်း")
+st.divider()
+
+# Step 5
+st.subheader("🚀 Step 5 — Generate Recap")
+
+# 🎤 Edge TTS Voice Option
 edge_voice = st.radio(
-    "အသံ ရွေးပါ",
+    "🎤 Edge TTS အသံ ရွေးပါ",
     options=["female", "male"],
     format_func=lambda x: "👩 နီလာ (Nilar)" if x == "female" else "👨 သီဟ (Thiha)",
     horizontal=True,
     index=0
 )
 
-keep_original = st.toggle("🔊 မူရင်းအသံ ဆက်ထား (Background အတွက်)", value=False)
-st.divider()
-
-# Step 5 — Offset
-st.subheader("⏱️ Step 5 — Audio Offset (itsoffset)")
-st.caption("မြန်မာအသံ — ရှေ့/နောက် — ရွှေ့")
-
-offset_sec = st.slider(
-    "🎚️ Offset (sec)",
-    min_value=-2.0,
-    max_value=2.0,
-    value=0.0,
-    step=0.1,
-    help="-2.0 = အသံ ရှေ့၊ +2.0 = အသံ နောက်"
-)
-
-if offset_sec < 0:
-    st.caption(f"⬅️ အသံ — {abs(offset_sec):.1f}s — ရှေ့ရွေ့")
-elif offset_sec > 0:
-    st.caption(f"➡️ အသံ — {offset_sec:.1f}s — နောက်ရွေ့")
-else:
-    st.caption("⏺️ Offset — မရှိ")
-st.divider()
-
-# Step 6 — Generate
-st.subheader("🚀 Step 6 — Generate Dubbing")
-
-if st.button("✨ Generate Dubbing Video", type="primary", use_container_width=True):
+if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
     if not script.strip(): st.error("Script paste လုပ်ပါ"); st.stop()
     if vid is None: st.error("Video Upload တင်ပါ"); st.stop()
 
@@ -380,39 +391,49 @@ if st.button("✨ Generate Dubbing Video", type="primary", use_container_width=T
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
+    # 🎙️ Whisper Dubbing Mode
+    if dubbing_mode:
+        with st.spinner(f"🎙️ Whisper `{WHISPER_MODEL}` — စကားပြောခန်း ရှာနေသည်..."):
+            try:
+                cut_path, seg_count, cut_dur = whisper_cut_speech("input.mp4", "input_cut.mp4")
+                shutil.move("input_cut.mp4", "input.mp4")
+                _, _, vdur = vid_info("input.mp4")
+                st.success(f"✅ ဖြတ်ပြီး — {seg_count} ခန်း • {cut_dur:.0f}s")
+            except Exception as e:
+                st.error(f"❌ Whisper — {e}")
+                st.stop()
+
     pb = st.progress(0); txt = st.empty()
     def cb(i, tot, c):
         pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}] {len(c)} စာလုံး")
 
-    # Edge TTS
+    # TTS — Edge TTS
     try:
         tts_all(script, "voice.mp3", voice=edge_voice, cb=cb)
     except Exception as e:
         st.error(f"TTS — {e}")
         st.stop()
 
-    # itsoffset
-    with st.spinner(f"⏱️ itsoffset — Offset {offset_sec:.1f}s..."):
-        try:
-            itsoffset_dubbing(
-                "input.mp4", "voice.mp3", "temp.mp4",
-                offset_sec=offset_sec,
-                keep_original_audio=keep_original
-            )
-        except Exception as e:
-            st.error(f"❌ itsoffset — {e}")
-            st.stop()
+    adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
+    tempo = max(0.5, min(2.0, adur/vdur))
 
-    # Subtitle Overlay
-    if use_sub:
-        sp = scr_to_srt(script, vdur, "sub.srt")
-        with st.spinner("📝 Subtitle Overlay..."):
+    sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
+
+    with st.spinner("🎬 Rendering — Fast Mode..."):
+        vi = ffmpeg.input("input.mp4")
+        va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
+        ffmpeg.output(vi.video, va, "temp.mp4",
+                       vcodec='libx264', crf=ENC_CRF, preset=ENC_PRESET,
+                       acodec='aac', audio_bitrate=AUDIO_BITRATE, shortest=None
+                       ).run(overwrite_output=True)
+
+        if use_sub and sp:
             overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA)
-    else:
-        shutil.copy("temp.mp4", "final.mp4")
+        else:
+            shutil.copy("temp.mp4", "final.mp4")
 
-    st.success(f"✅ Done — Offset {offset_sec:.1f}s")
+    st.success(f"✅ Done — {adur:.0f}s @ {tempo:.2f}x")
     st.video("final.mp4")
 
     with open("final.mp4", "rb") as f:
-        st.download_button("📥 Download Dubbing Video", f, file_name="dubbing.mp4")
+        st.download_button("📥 Download Recap Video", f, file_name="recap.mp4")
