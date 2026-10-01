@@ -213,7 +213,6 @@ async def _edge_tts_async(text, out_file, voice):
 
 
 def edge_tts_run(chunks, out_path, voice="female", cb=None):
-    """Edge TTS — မြန်မာ အသံ"""
     voice_id = EDGE_VOICES.get(voice, EDGE_VOICES["female"])
     files = []
 
@@ -240,7 +239,6 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None):
 
 
 def tts_all(text, out, voice="female", cb=None):
-    """Edge TTS — တစ်ခုတည်း"""
     chunks = split_scr(text, TTS_CHUNK)
     st.info(f"🎙️ Edge TTS — {EDGE_VOICES[voice]} — ဖန်တီးနေသည်...")
     edge_tts_run(chunks, out, voice=voice, cb=cb)
@@ -267,7 +265,7 @@ def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
         )
         for seg in segments:
             speech_segments.append((seg.start, seg.end))
-    except ImportError:
+    except Exception:      # ⬅️ ImportError မဟုတ် — Exception ပဲ
         import whisper
         model = whisper.load_model(WHISPER_MODEL)
         result = model.transcribe("audio.wav", language=WHISPER_LANG)
@@ -374,7 +372,6 @@ st.divider()
 # Step 5
 st.subheader("🚀 Step 5 — Generate Recap")
 
-# 🎤 Edge TTS Voice Option
 edge_voice = st.radio(
     "🎤 Edge TTS အသံ ရွေးပါ",
     options=["female", "male"],
@@ -407,7 +404,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     def cb(i, tot, c):
         pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}] {len(c)} စာလုံး")
 
-    # TTS — Edge TTS
     try:
         tts_all(script, "voice.mp3", voice=edge_voice, cb=cb)
     except Exception as e:
