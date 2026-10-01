@@ -18,9 +18,6 @@ TTS_CHUNK = 600
 TTS_WORKERS = 3
 PNG_WORKERS = 4
 
-SILENCE_DB = -30
-MIN_SILENCE = 0.5
-
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
 
@@ -274,8 +271,7 @@ def whisper_fast(video_path, optimize=True):
             segments, _ = model.transcribe(
                 "whisper_audio.wav", language=WHISPER_LANG,
                 vad_filter=False, beam_size=1,
-                condition_on_previous_text=False,
-                temperature=0
+                condition_on_previous_text=False, temperature=0
             )
         else:
             segments, _ = model.transcribe(
@@ -320,6 +316,7 @@ st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Edge 
 st.caption(f"⚡ Whisper Optimized — 3-6s")
 st.divider()
 
+# ===== Step 1 — Script =====
 st.subheader("📝 Step 1 — Script")
 st.link_button("🌐 Gemini Web", "https://gemini.google.com", use_container_width=True)
 with st.expander("📋 Prompt"):
@@ -335,28 +332,48 @@ with c2:
         st.session_state.script = ""; st.rerun()
 st.divider()
 
+# ===== Step 2 — Video =====
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
+# ===== Step 3 — Subtitle + Preview =====
 st.subheader("📝 Step 3 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
 if use_sub:
     pos_y = st.slider(
         "📍 Position (0=အပေါ်, 50=အလယ်, 100=အောက်)",
-        min_value=0, max_value=100, value=100, step=1   # ⬅️ Step 1 — 100 ကွက်
+        min_value=0, max_value=100, value=100, step=1
     )
-    st.caption(f"📍 {pos_y}%")
+    st.caption(f"📍 {pos_y}%  •  🔤 Font {FS}  •  ⬛ Box {BH}px  •  🎨 Opacity {BA}")
+
+# 🖼️ Preview — Video Upload ရှိရင်
+if vid and use_sub:
+    st.markdown("**🖼️ Preview**")
+    with st.spinner("Preview..."):
+        vid.seek(0)
+        with open("preview.mp4", "wb") as f: f.write(vid.read())
+        W, H, _ = vid_info("preview.mp4")
+        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA)
+        cap = cv2.VideoCapture("preview.mp4"); ok, fr = cap.read(); cap.release()
+        if ok:
+            bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+            fg = Image.open("prev.png").convert("RGBA")
+            comp = Image.alpha_composite(bg, fg); pw = 720
+            comp.resize((pw, int(H*(pw/W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
+            st.image("prev_out.png", use_container_width=True)
 st.divider()
 
+# ===== Step 4 — Whisper Optimize Cut =====
 st.subheader("⚡ Step 4 — Whisper Optimize Cut")
 dubbing_mode = st.toggle("✂️ Whisper Optimize Cut", value=False)
 if dubbing_mode:
     st.info("⚡ Whisper — VAD Off + Beam 1 + Context Off + Temp 0 — 3-6s")
 st.divider()
 
+# ===== Step 5 — Generate =====
 st.subheader("🚀 Step 5 — Generate")
 edge_voice = st.radio("🎤 Voice", ["female", "male"],
     format_func=lambda x: "👩 နီလာ" if x == "female" else "👨 သီဟ", horizontal=True)
