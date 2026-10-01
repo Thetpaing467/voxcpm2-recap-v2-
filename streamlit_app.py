@@ -9,16 +9,18 @@ PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
 # ⚡ Fast Settings
-FS, BH, BA = 30, 100, 200
+FS, BH, BA = 30, 100, 100
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 
-# 🎙️ Whisper Settings
+# 🎙️ Whisper Settings — 0.5s မြန်မြန် Cut
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
-SPEECH_MERGE_GAP = 0.5
+MIN_SILENCE_MS = 500      # ⚡ 0.5 စက္ကန့်
+SPEECH_PAD_MS = 0         # ⚡ Pad မထည့်
+SPEECH_MERGE_GAP = 0.5    # ⚡ 0.5s
 
 # 🎙️ Edge TTS Voices
 EDGE_VOICES = {
@@ -213,7 +215,6 @@ async def _edge_tts_async(text, out_file, voice):
 
 
 def edge_tts_run(chunks, out_path, voice="female", cb=None):
-    """Edge TTS — မြန်မာ အသံ"""
     voice_id = EDGE_VOICES.get(voice, EDGE_VOICES["female"])
     files = []
 
@@ -240,7 +241,6 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None):
 
 
 def tts_all(text, out, voice="female", cb=None):
-    """Edge TTS — တစ်ခုတည်း"""
     chunks = split_scr(text, TTS_CHUNK)
     st.info(f"🎙️ Edge TTS — {EDGE_VOICES[voice]} — ဖန်တီးနေသည်...")
     edge_tts_run(chunks, out, voice=voice, cb=cb)
@@ -248,8 +248,9 @@ def tts_all(text, out, voice="female", cb=None):
     return out
 
 
-# ===== 🎙️ Whisper Auto Cut =====
+# ===== 🎙️ Whisper Auto Cut — 0.5s မြန်မြန် =====
 def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
+    """Whisper — စကားသံ ရှာ — 0.5s ထိ မြန်မြန် Cut"""
     subprocess.run([
         "ffmpeg", "-y", "-i", input_video,
         "-ar", "16000", "-ac", "1",
@@ -263,7 +264,10 @@ def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
         segments, _ = model.transcribe(
             "audio.wav", language=WHISPER_LANG,
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500)
+            vad_parameters=dict(
+                min_silence_duration_ms=MIN_SILENCE_MS,   # ⚡ 0.5s
+                speech_pad_ms=SPEECH_PAD_MS                # ⚡ 0
+            )
         )
         for seg in segments:
             speech_segments.append((seg.start, seg.end))
@@ -277,6 +281,7 @@ def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
     if not speech_segments:
         raise Exception("စကားပြောခန်း မတွေ့ဘူး")
 
+    # 0.5s ထိ ကပ်နေတဲ့ Segment တွေ ပေါင်း
     merged = []
     for s, e in speech_segments:
         if merged and s - merged[-1][1] < SPEECH_MERGE_GAP:
@@ -305,8 +310,8 @@ def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
 
 # ===== UI =====
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
-st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}  •  🎙️ Edge TTS")
+st.markdown("<div class='main-sub'>Video → Whisper Cut → Edge TTS → Recap</div>", unsafe_allow_html=True)
+st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}  •  🎙️ Edge TTS  •  ✂️ {MIN_SILENCE_MS}ms Cut")
 st.divider()
 
 # Step 1
@@ -365,16 +370,15 @@ st.divider()
 
 # Step 4.5 — Dubbing Mode
 st.subheader("🎙️ Step 4.5 — Dubbing Mode")
-st.caption("🎬 စကားပြောခန်းပဲ ထားပြီး — ကျန်တာ ဖြတ်မယ် (Whisper Auto)")
+st.caption(f"✂️ စကားသံ ကလွဲ — ကျန်တာ Cut — {MIN_SILENCE_MS}ms ထိ မြန်မြန်")
 dubbing_mode = st.toggle("✂️ Dubbing Mode — Whisper Auto Cut", value=False)
 if dubbing_mode:
-    st.info(f"⚡ Whisper `{WHISPER_MODEL}` — မြန်မာ ({WHISPER_LANG}) — RAM နည်း")
+    st.info(f"⚡ Whisper `{WHISPER_MODEL}` — မြန်မာ ({WHISPER_LANG}) — {MIN_SILENCE_MS}ms")
 st.divider()
 
 # Step 5
 st.subheader("🚀 Step 5 — Generate Recap")
 
-# 🎤 Edge TTS Voice Option
 edge_voice = st.radio(
     "🎤 Edge TTS အသံ ရွေးပါ",
     options=["female", "male"],
@@ -391,14 +395,14 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    # 🎙️ Whisper Dubbing Mode
+    # 🎙️ Whisper Dubbing Mode — 0.5s Cut
     if dubbing_mode:
-        with st.spinner(f"🎙️ Whisper `{WHISPER_MODEL}` — စကားပြောခန်း ရှာနေသည်..."):
+        with st.spinner(f"✂️ Whisper — {MIN_SILENCE_MS}ms ထိ Cut လုပ်နေသည်..."):
             try:
                 cut_path, seg_count, cut_dur = whisper_cut_speech("input.mp4", "input_cut.mp4")
                 shutil.move("input_cut.mp4", "input.mp4")
                 _, _, vdur = vid_info("input.mp4")
-                st.success(f"✅ ဖြတ်ပြီး — {seg_count} ခန်း • {cut_dur:.0f}s")
+                st.success(f"✅ Cut ပြီး — {seg_count} ခန်း • {cut_dur:.0f}s")
             except Exception as e:
                 st.error(f"❌ Whisper — {e}")
                 st.stop()
