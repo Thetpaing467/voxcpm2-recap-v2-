@@ -18,11 +18,11 @@ TTS_CHUNK = 600
 TTS_WORKERS = 3
 PNG_WORKERS = 4
 
-# 🎙️ Whisper Settings
-WHISPER_MODEL = "tiny"
-WHISPER_LANG = "my"
-SPEECH_MERGE_GAP = 0.5
+# ✂️ Silence Detection Settings
+SILENCE_DB = -30        # Default Threshold
+MIN_SILENCE = 0.5       # Default Min Silence (sec)
 
+# 🎙️ Edge TTS Voices
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
     "male":   "my-MM-ThihaNeural",
@@ -52,56 +52,24 @@ st.markdown("""
 .stFileUploader{background:rgba(255,255,255,.02);border-radius:10px;padding:8px}
 .stAlert{border-radius:10px!important;border:none!important}
 hr{border-color:rgba(255,255,255,.08);margin:24px 0}
-/* ⏱️ Timer Box */
 .timer-box {
     background: linear-gradient(135deg, #667eea, #764ba2);
-    border-radius: 16px;
-    padding: 24px;
-    text-align: center;
-    margin: 15px 0;
-    box-shadow: 0 8px 30px rgba(102,126,234,.4);
+    border-radius: 16px; padding: 24px; text-align: center;
+    margin: 15px 0; box-shadow: 0 8px 30px rgba(102,126,234,.4);
 }
-.timer-title {
-    color: #ffffff;
-    font-size: 0.9rem;
-    font-weight: 600;
-    letter-spacing: 1px;
-    margin-bottom: 8px;
-    opacity: 0.9;
-}
-.timer-value {
-    color: #ffffff;
-    font-size: 3.2rem;
-    font-weight: 900;
-    line-height: 1;
-    text-shadow: 0 4px 15px rgba(0,0,0,.3);
-}
-.timer-unit {
-    font-size: 1.5rem;
-    font-weight: 700;
-    margin-left: 8px;
-    opacity: 0.85;
-}
-.timer-sub {
-    color: #ffffff;
-    font-size: 1.1rem;
-    font-weight: 600;
-    margin-top: 8px;
-    opacity: 0.9;
-}
+.timer-title { color: #fff; font-size: 0.9rem; font-weight: 600;
+    letter-spacing: 1px; margin-bottom: 8px; opacity: 0.9; }
+.timer-value { color: #fff; font-size: 3.2rem; font-weight: 900;
+    line-height: 1; text-shadow: 0 4px 15px rgba(0,0,0,.3); }
+.timer-unit { font-size: 1.5rem; font-weight: 700; margin-left: 8px; opacity: 0.85; }
+.timer-sub { color: #fff; font-size: 1.1rem; font-weight: 600;
+    margin-top: 8px; opacity: 0.9; }
 .step-timer {
-    background: rgba(255,255,255,.05);
-    border-left: 4px solid #667eea;
-    border-radius: 10px;
-    padding: 12px 18px;
-    margin: 8px 0;
-    color: #e8e8f0;
-    font-size: 0.95rem;
+    background: rgba(255,255,255,.05); border-left: 4px solid #667eea;
+    border-radius: 10px; padding: 12px 18px; margin: 8px 0;
+    color: #e8e8f0; font-size: 0.95rem;
 }
-.step-timer b {
-    color: #6ba8ff;
-    font-size: 1.05rem;
-}
+.step-timer b { color: #6ba8ff; font-size: 1.05rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -126,9 +94,7 @@ if not st.session_state.auth:
 
 # ===== Helpers =====
 def fmt_time(sec):
-    """Seconds → 'Xm Ys' + 'X.XXs' format"""
-    m = int(sec // 60)
-    s = sec - m * 60
+    m = int(sec // 60); s = sec - m * 60
     if m > 0:
         return f"{m}m {s:.1f}s", f"{sec:.2f}s"
     return f"{s:.1f}s", f"{sec:.2f}s"
@@ -324,43 +290,36 @@ def tts_all(text, out, voice="female", cb=None):
     return out
 
 
-# ===== Whisper Auto Cut =====
-def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", input_video,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", "audio.wav"
-    ], capture_output=True, check=True)
+# ===== ✂️ FFmpeg Silence Cut =====
+def ffmpeg_silence_cut(input_video, output_video="input_cut.mp4",
+                        silence_db=SILENCE_DB, min_silence=MIN_SILENCE):
+    """FFmpeg silencedetect — Whisper မလိုဘဲ Cut — 10x မြန်"""
+    cmd = [
+        "ffmpeg", "-i", input_video,
+        "-af", f"silencedetect=noise={silence_db}dB:d={min_silence}",
+        "-f", "null", "-"
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+
+    starts = [float(x) for x in re.findall(r"silence_start: ([\d.]+)", r.stderr)]
+    ends   = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", r.stderr)]
+
+    duration = float(ffmpeg.probe(input_video)['format']['duration'])
+    silences = list(zip(starts, ends))
 
     speech_segments = []
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(
-            "audio.wav", language=WHISPER_LANG,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500)
-        )
-        for seg in segments:
-            speech_segments.append((seg.start, seg.end))
-    except Exception:
-        import whisper
-        model = whisper.load_model(WHISPER_MODEL)
-        result = model.transcribe("audio.wav", language=WHISPER_LANG)
-        for seg in result["segments"]:
-            speech_segments.append((seg["start"], seg["end"]))
+    cur = 0.0
+    for s, e in silences:
+        if s > cur:
+            speech_segments.append((cur, s))
+        cur = e
+    if cur < duration:
+        speech_segments.append((cur, duration))
 
     if not speech_segments:
-        raise Exception("စကားပြောခန်း မတွေ့ဘူး")
+        raise Exception("Speech မတွေ့ဘူး")
 
-    merged = []
-    for s, e in speech_segments:
-        if merged and s - merged[-1][1] < SPEECH_MERGE_GAP:
-            merged[-1] = (merged[-1][0], e)
-        else:
-            merged.append((s, e))
-
-    select_exprs = [f"between(t,{s:.2f},{e:.2f})" for s, e in merged]
+    select_exprs = [f"between(t,{s:.3f},{e:.3f})" for s, e in speech_segments]
     select_str = "+".join(select_exprs)
 
     cmd = [
@@ -375,8 +334,8 @@ def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
     if r.returncode != 0:
         raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
 
-    total = sum(e - s for s, e in merged)
-    return output_video, len(merged), total
+    total = sum(e - s for s, e in speech_segments)
+    return output_video, len(speech_segments), total
 
 
 # ===== UI =====
@@ -439,12 +398,30 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-# Step 4.5 — Dubbing Mode
-st.subheader("🎙️ Step 4.5 — Dubbing Mode")
-st.caption("🎬 စကားပြောခန်းပဲ ထားပြီး — ကျန်တာ ဖြတ်မယ် (Whisper Auto)")
-dubbing_mode = st.toggle("✂️ Dubbing Mode — Whisper Auto Cut", value=False)
+# Step 4.5 — Silence Cut
+st.subheader("✂️ Step 4.5 — Silence Cut (FFmpeg)")
+st.caption("🎬 တိတ်ဆိတ်တဲ့ အပိုင်း ဖြတ် — Whisper မလိုဘဲ — အလွန်မြန်")
+
+dubbing_mode = st.toggle("✂️ Silence Cut — On/Off", value=False)
+
+silence_db = SILENCE_DB
+min_silence = MIN_SILENCE
+
 if dubbing_mode:
-    st.info(f"⚡ Whisper `{WHISPER_MODEL}` — မြန်မာ ({WHISPER_LANG}) — RAM နည်း")
+    c1, c2 = st.columns(2)
+    with c1:
+        silence_db = st.slider(
+            "🔊 Silence Threshold (dB)",
+            min_value=-50, max_value=-10,
+            value=SILENCE_DB, step=1
+        )
+    with c2:
+        min_silence = st.slider(
+            "⏱️ Min Silence (sec)",
+            min_value=0.1, max_value=2.0,
+            value=MIN_SILENCE, step=0.1
+        )
+    st.info(f"⚡ `{min_silence}s` ထိ Cut — `{silence_db}dB` — Whisper မလိုဘူး")
 st.divider()
 
 # Step 5
@@ -462,7 +439,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     if not script.strip(): st.error("Script paste လုပ်ပါ"); st.stop()
     if vid is None: st.error("Video Upload တင်ပါ"); st.stop()
 
-    # ⏱️ Total Timer — Start
     total_start = time.time()
     step_times = {}
 
@@ -470,21 +446,24 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    # Step 1 — Whisper
+    # ✂️ Silence Cut
     if dubbing_mode:
         t0 = time.time()
-        with st.spinner(f"🎙️ Whisper `{WHISPER_MODEL}` — စကားပြောခန်း ရှာနေသည်..."):
+        with st.spinner(f"✂️ Silence Cut — {min_silence}s ထိ..."):
             try:
-                cut_path, seg_count, cut_dur = whisper_cut_speech("input.mp4", "input_cut.mp4")
+                cut_path, seg_count, cut_dur = ffmpeg_silence_cut(
+                    "input.mp4", "input_cut.mp4",
+                    silence_db=silence_db, min_silence=min_silence
+                )
                 shutil.move("input_cut.mp4", "input.mp4")
                 _, _, vdur = vid_info("input.mp4")
-                st.success(f"✅ ဖြတ်ပြီး — {seg_count} ခန်း • {cut_dur:.0f}s")
+                st.success(f"✅ Cut ပြီး — {seg_count} ခန်း • {cut_dur:.1f}s")
             except Exception as e:
-                st.error(f"❌ Whisper — {e}")
+                st.error(f"❌ Silence Cut — {e}")
                 st.stop()
-        step_times["🎙️ Whisper Cut"] = time.time() - t0
+        step_times["✂️ Silence Cut"] = time.time() - t0
 
-    # Step 2 — Edge TTS
+    # Edge TTS
     t0 = time.time()
     pb = st.progress(0); txt = st.empty()
     def cb(i, tot, c):
@@ -502,7 +481,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
 
-    # Step 3 — Render
+    # Render
     t0 = time.time()
     with st.spinner("🎬 Rendering — Fast Mode..."):
         vi = ffmpeg.input("input.mp4")
@@ -526,11 +505,10 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             shutil.copy("temp.mp4", "final.mp4")
     step_times["🎬 Video Render"] = time.time() - t0
 
-    # ⏱️ Total Timer — End
     total_elapsed = time.time() - total_start
-    total_str, total_sec_str = fmt_time(total_elapsed)
+    total_str, _ = fmt_time(total_elapsed)
 
-    # ===== ⏱️ TIMER DISPLAY — ကြီးကြီး =====
+    # ===== ⏱️ TIMER DISPLAY =====
     st.markdown(f"""
     <div class="timer-box">
         <div class="timer-title">⏱️ TOTAL PROCESSING TIME</div>
@@ -539,7 +517,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     </div>
     """, unsafe_allow_html=True)
 
-    # Step-by-Step Times
     st.markdown("### 📊 Step-by-Step Times")
     for name, t in step_times.items():
         _, sec_str = fmt_time(t)
