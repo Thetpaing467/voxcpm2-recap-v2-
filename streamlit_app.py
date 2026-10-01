@@ -10,7 +10,7 @@ os.environ["HF_HOME"] = "/tmp/hf_cache"
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-FS, BH, BA = 30, 100, 200
+FS, BH, BA = 30, 100, 100
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
@@ -21,8 +21,8 @@ PNG_WORKERS = 4
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
 
-# 🎨 Rounded Box Settings
-PADDING_X = 30
+# 🎨 Box Settings — အရှည် ပုံသေ
+BOX_WIDTH_RATIO = 0.9      # Video Width × 90%
 PADDING_Y = 15
 CORNER_RADIUS = 20
 
@@ -107,10 +107,11 @@ def s2t(ts):
     return None
 
 
-# ===== 🎨 Rounded Blur Box render_png =====
+# ===== 🎨 Fixed-Width Rounded Box render_png =====
 def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
-                padding_x=PADDING_X, padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
-    """Subtitle PNG — Rounded Blur Box — ဘေးဘောင်လုံးလုံး"""
+                box_width_ratio=BOX_WIDTH_RATIO,
+                padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
+    """Subtitle PNG — Rounded Box — အရှည် ပုံသေ (Video Width × Ratio)"""
     img = Image.new("RGBA", (W, H), (0,0,0,0))
     d = ImageDraw.Draw(img)
 
@@ -128,16 +129,12 @@ def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
     if cur: lines.append(cur)
     if not lines: return out
 
-    # Text Size
+    # Text Height
     lh = int(fs * 1.3)
-    text_w = max(
-        (d.textbbox((0,0), ln, font=f)[2] - d.textbbox((0,0), ln, font=f)[0])
-        for ln in lines
-    )
     text_h = len(lines) * lh
 
-    # Box Size — Text + Padding
-    box_w = text_w + padding_x * 2
+    # ⚡ Box Width — ပုံသေ (Video Width × Ratio)
+    box_w = int(W * box_width_ratio)
     box_h = text_h + padding_y * 2
     box_x = (W - box_w) // 2
 
@@ -146,7 +143,7 @@ def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
     box_y = int((pos_y / 100) * max_y)
     box_y = max(0, min(box_y, max_y))
 
-    # 🎨 Rounded Rectangle — ဘေးဘောင်လုံးလုံး
+    # 🎨 Rounded Rectangle — အရှည် ပုံသေ
     d.rounded_rectangle(
         [box_x, box_y, box_x + box_w, box_y + box_h],
         radius=corner_radius,
@@ -212,7 +209,8 @@ def parse_srt(path):
     return segs
 
 
-def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100):
+def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100,
+            box_width_ratio=BOX_WIDTH_RATIO):
     W, H, _ = vid_info(vp); segs = parse_srt(sp)
     if not segs: raise Exception("SRT empty")
     os.makedirs("subtitle_pngs", exist_ok=True)
@@ -220,7 +218,8 @@ def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100):
     def render_one(args):
         i, s = args
         p = f"subtitle_pngs/s_{i:04d}.png"
-        render_png(s["text"], p, fp, W, H, fs, pos_y, bh, ba)
+        render_png(s["text"], p, fp, W, H, fs, pos_y, bh, ba,
+                   box_width_ratio=box_width_ratio)
         return i, {"p": p, "a": s["start"], "b": s["end"]}
 
     pngs = [None] * len(segs)
@@ -357,7 +356,7 @@ def silence_cut_v2(input_video, output_video="input_cut.mp4"):
     return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
-st.caption(f"⚡ Whisper Optimized  •  🎨 Rounded Blur Box")
+st.caption(f"⚡ Whisper Optimized  •  🎨 Fixed-Width Rounded Box")
 st.divider()
 
 # Step 1 — Script
@@ -386,12 +385,18 @@ st.divider()
 st.subheader("📝 Step 3 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
+box_width_ratio = BOX_WIDTH_RATIO
+
 if use_sub:
     pos_y = st.slider(
         "📍 Position (0=အပေါ်, 50=အလယ်, 100=အောက်)",
         min_value=0, max_value=100, value=100, step=1
     )
-    st.caption(f"📍 {pos_y}%  •  🔤 Font {FS}  •  ⬛ Box {BH}px  •  🎨 Opacity {BA}")
+    box_width_ratio = st.slider(
+        "📏 Box Width (Video %)",
+        min_value=0.5, max_value=1.0, value=BOX_WIDTH_RATIO, step=0.05
+    )
+    st.caption(f"📍 {pos_y}%  •  📏 Box {int(box_width_ratio*100)}%  •  🔤 Font {FS}  •  ⬛ Opacity {BA}")
 
 if vid and use_sub:
     st.markdown("**🖼️ Preview**")
@@ -399,7 +404,8 @@ if vid and use_sub:
         vid.seek(0)
         with open("preview.mp4", "wb") as f: f.write(vid.read())
         W, H, _ = vid_info("preview.mp4")
-        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA)
+        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA,
+                   box_width_ratio=box_width_ratio)
         cap = cv2.VideoCapture("preview.mp4"); ok, fr = cap.read(); cap.release()
         if ok:
             bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
@@ -463,7 +469,8 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             movflags='+faststart', acodec='aac', audio_bitrate=AUDIO_BITRATE,
             shortest=None, threads=0).run(overwrite_output=True)
         if use_sub and sp:
-            overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA)
+            overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA,
+                    box_width_ratio=box_width_ratio)
         else:
             shutil.copy("temp.mp4", "final.mp4")
     step_times["🎬 Render"] = time.time() - t0
