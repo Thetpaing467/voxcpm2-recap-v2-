@@ -5,13 +5,12 @@ import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 
-# ⚡ HF Model Cache — 2x မြန် (ဒုတိယ Run)
 os.environ["HF_HOME"] = "/tmp/hf_cache"
 
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-FS, BH, BA = 30, 100, 200
+FS, BH, BA = 30, 100, 100
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
@@ -260,9 +259,7 @@ def tts_all(text, out, voice="female", cb=None):
     return out
 
 
-# ===== ⚡ Whisper Optimized — 5 Methods =====
 def whisper_fast(video_path, optimize=True):
-    """Whisper tiny — 5 Methods Optimize — 3-6s"""
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
         "-ar", "16000", "-ac", "1",
@@ -273,53 +270,38 @@ def whisper_fast(video_path, optimize=True):
     try:
         from faster_whisper import WhisperModel
         model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-
         if optimize:
-            # ⚡ 5 Methods
             segments, _ = model.transcribe(
                 "whisper_audio.wav", language=WHISPER_LANG,
-                vad_filter=False,                    # ၁။ VAD ဖျက်
-                beam_size=1,                          # ၂။ Beam 1
-                condition_on_previous_text=False,     # ၃။ Context ဖျက်
-                temperature=0,                        # ၄။ Temperature 0
-                compression_ratio_threshold=2.4,     # ၅။ Skip Heuristic
-                log_prob_threshold=-1.0,
-                no_speech_threshold=0.6
+                vad_filter=False, beam_size=1,
+                condition_on_previous_text=False,
+                temperature=0
             )
         else:
             segments, _ = model.transcribe(
                 "whisper_audio.wav", language=WHISPER_LANG, vad_filter=True
             )
-
         for seg in segments:
             speech_segments.append((seg.start, seg.end))
-
     except Exception:
         import whisper
         model = whisper.load_model(WHISPER_MODEL)
         result = model.transcribe(
             "whisper_audio.wav", language=WHISPER_LANG,
-            condition_on_previous_text=False,
-            beam_size=1, temperature=0
+            condition_on_previous_text=False, beam_size=1, temperature=0
         )
         for seg in result["segments"]:
             speech_segments.append((seg["start"], seg["end"]))
-
     return speech_segments
 
 
-def silence_cut_v2(input_video, output_video="input_cut.mp4",
-                    silence_db=SILENCE_DB, min_silence=MIN_SILENCE, verify=True):
+def silence_cut_v2(input_video, output_video="input_cut.mp4"):
     t0 = time.time()
-
-    # ⚡ Whisper Fast — Speeds
     speech_segments = whisper_fast(input_video, optimize=True)
     whisper_time = time.time() - t0
 
-    if not speech_segments:
-        raise Exception("Speech မတွေ့")
+    if not speech_segments: raise Exception("Speech မတွေ့")
 
-    # FFmpeg Cut
     select_exprs = [f"between(t,{s:.3f},{e:.3f})" for s, e in speech_segments]
     select_str = "+".join(select_exprs)
 
@@ -332,13 +314,7 @@ def silence_cut_v2(input_video, output_video="input_cut.mp4",
     if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
 
     total = sum(e - s for s, e in speech_segments)
-
-    return {
-        "segments": len(speech_segments),
-        "duration": total,
-        "whisper_time": whisper_time,
-        "verify": {"status": "⚡ Optimized", "message": f"Whisper {whisper_time:.1f}s"}
-    }
+    return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
 st.caption(f"⚡ Whisper Optimized — 3-6s")
@@ -368,7 +344,10 @@ st.subheader("📝 Step 3 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
 if use_sub:
-    pos_y = st.slider("📍 Position", 0, 100, 100, 5)
+    pos_y = st.slider(
+        "📍 Position (0=အပေါ်, 50=အလယ်, 100=အောက်)",
+        min_value=0, max_value=100, value=100, step=1   # ⬅️ Step 1 — 100 ကွက်
+    )
     st.caption(f"📍 {pos_y}%")
 st.divider()
 
