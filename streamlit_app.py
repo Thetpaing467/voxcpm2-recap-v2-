@@ -1,5 +1,6 @@
 import streamlit as st
 import os, re, ffmpeg, shutil, subprocess, asyncio
+import concurrent.futures
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
@@ -14,6 +15,7 @@ ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
+TTS_WORKERS = 3     # ⚡ Parallel TTS Workers
 
 # 🎙️ Whisper Settings
 WHISPER_MODEL = "tiny"
@@ -100,6 +102,7 @@ def s2t(ts):
 
 
 def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100):
+    """Subtitle PNG — Pixel Perfect"""
     img = Image.new("RGBA", (W, H), (0,0,0,0)); d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
     except: f = ImageFont.load_default()
@@ -167,6 +170,7 @@ def parse_srt(path):
 
 
 def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100):
+    """Subtitle PNG Overlay — မူရင်း — Pixel Perfect"""
     W, H, _ = vid_info(vp); segs = parse_srt(sp)
     if not segs: raise Exception("SRT empty")
     os.makedirs("subtitle_pngs", exist_ok=True); pngs = []
@@ -182,6 +186,7 @@ def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100):
         cur = lbl
     cmd += ["-filter_complex",";".join(flt),"-map",cur,"-map","0:a?",
             "-c:v","libx264","-crf",str(ENC_CRF),"-preset",ENC_PRESET,
+            "-tune","fastdecode",
             "-c:a","copy",op]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-500:]}")
@@ -206,18 +211,18 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-# ===== 🎙️ Edge TTS =====
+# ===== 🎙️ Edge TTS — Parallel =====
 async def _edge_tts_async(text, out_file, voice):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_file)
 
 
-def edge_tts_run(chunks, out_path, voice="female", cb=None):
+def edge_tts_run(chunks, out_path, voice="female", cb=None, workers=TTS_WORKERS):
+    """Edge TTS — Parallel — 3x မြန်"""
     voice_id = EDGE_VOICES.get(voice, EDGE_VOICES["female"])
-    files = []
 
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
+    def tts_one(args):
+        i, c = args
         dst = f"edge_chunk_{i}.mp3"
         try:
             asyncio.run(_edge_tts_async(c, dst, voice_id))
@@ -226,10 +231,18 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None):
             asyncio.set_event_loop(loop)
             loop.run_until_complete(_edge_tts_async(c, dst, voice_id))
             loop.close()
-        files.append(dst)
+        return (i, dst)
+
+    results = [None] * len(chunks)
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for idx, dst in ex.map(tts_one, enumerate(chunks)):
+            results[idx] = dst
+            done += 1
+            if cb: cb(done - 1, len(chunks), chunks[idx])
 
     with open("edge_concat.txt", "w", encoding="utf-8") as f:
-        for a in files: f.write(f"file '{a}'\n")
+        for a in results: f.write(f"file '{a}'\n")
 
     ffmpeg.input("edge_concat.txt", format="concat", safe=0).output(
         out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
@@ -240,7 +253,7 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None):
 
 def tts_all(text, out, voice="female", cb=None):
     chunks = split_scr(text, TTS_CHUNK)
-    st.info(f"🎙️ Edge TTS — {EDGE_VOICES[voice]} — ဖန်တီးနေသည်...")
+    st.info(f"🎙️ Edge TTS — {EDGE_VOICES[voice]} — Parallel x{TT_WORKERS}...")
     edge_tts_run(chunks, out, voice=voice, cb=cb)
     st.success(f"✅ Edge TTS — အောင်မြင်")
     return out
@@ -265,7 +278,7 @@ def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
         )
         for seg in segments:
             speech_segments.append((seg.start, seg.end))
-    except Exception:      # ⬅️ ImportError မဟုတ် — Exception ပဲ
+    except Exception:
         import whisper
         model = whisper.load_model(WHISPER_MODEL)
         result = model.transcribe("audio.wav", language=WHISPER_LANG)
@@ -304,7 +317,7 @@ def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
 # ===== UI =====
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
-st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}  •  🎙️ Edge TTS")
+st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}  •  🎙️ Edge TTS x{TT_WORKERS}")
 st.divider()
 
 # Step 1
@@ -404,6 +417,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     def cb(i, tot, c):
         pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}] {len(c)} စာလုံး")
 
+    # TTS — Edge TTS Parallel
     try:
         tts_all(script, "voice.mp3", voice=edge_voice, cb=cb)
     except Exception as e:
@@ -418,10 +432,18 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with st.spinner("🎬 Rendering — Fast Mode..."):
         vi = ffmpeg.input("input.mp4")
         va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
-        ffmpeg.output(vi.video, va, "temp.mp4",
-                       vcodec='libx264', crf=ENC_CRF, preset=ENC_PRESET,
-                       acodec='aac', audio_bitrate=AUDIO_BITRATE, shortest=None
-                       ).run(overwrite_output=True)
+        ffmpeg.output(
+            vi.video, va, "temp.mp4",
+            vcodec='libx264',
+            crf=ENC_CRF,
+            preset='ultrafast',
+            tune='fastdecode',
+            movflags='+faststart',
+            acodec='aac',
+            audio_bitrate=AUDIO_BITRATE,
+            shortest=None,
+            threads=0
+        ).run(overwrite_output=True)
 
         if use_sub and sp:
             overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA)
