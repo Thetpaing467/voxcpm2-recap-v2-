@@ -253,7 +253,7 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None, workers=TTS_WORKERS)
 
 def tts_all(text, out, voice="female", cb=None):
     chunks = split_scr(text, TTS_CHUNK)
-    st.info(f"🎙️ Edge TTS — {EDGE_VOICES[voice]} — Parallel x{TT_WORKERS}...")
+    st.info(f"🎙️ Edge TTS — {EDGE_VOICES[voice]} — Parallel x{TTS_WORKERS}...")
     edge_tts_run(chunks, out, voice=voice, cb=cb)
     st.success(f"✅ Edge TTS — အောင်မြင်")
     return out
@@ -317,7 +317,7 @@ def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
 # ===== UI =====
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
-st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}  •  🎙️ Edge TTS x{TT_WORKERS}")
+st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}  •  🎙️ Edge TTS x{TTS_WORKERS}")
 st.divider()
 
 # Step 1
