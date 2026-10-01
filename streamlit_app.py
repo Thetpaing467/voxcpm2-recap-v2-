@@ -10,7 +10,7 @@ os.environ["HF_HOME"] = "/tmp/hf_cache"
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-FS, BH, BA = 30, 100, 200
+FS, BH, BA = 30, 100, 100
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
@@ -20,6 +20,11 @@ PNG_WORKERS = 4
 
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
+
+# 🎨 Rounded Box Settings
+PADDING_X = 30
+PADDING_Y = 15
+CORNER_RADIUS = 20
 
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
@@ -102,28 +107,67 @@ def s2t(ts):
     return None
 
 
-def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100):
-    img = Image.new("RGBA", (W, H), (0,0,0,0)); d = ImageDraw.Draw(img)
+# ===== 🎨 Rounded Blur Box render_png =====
+def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
+                padding_x=PADDING_X, padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
+    """Subtitle PNG — Rounded Blur Box — ဘေးဘောင်လုံးလုံး"""
+    img = Image.new("RGBA", (W, H), (0,0,0,0))
+    d = ImageDraw.Draw(img)
+
     try: f = ImageFont.truetype(fp, fs)
     except: f = ImageFont.load_default()
-    max_y = H - bh
-    by = int((pos_y / 100) * max_y)
-    by = max(0, min(by, max_y))
-    d.rectangle([0, by, W, by+bh], fill=(0,0,0,ba))
-    mc = max(15, int(W/(fs*0.9))); lines, cur = [], ""
+
+    # Text Wrap
+    mc = max(15, int(W/(fs*0.9)))
+    lines, cur = [], ""
     for w in text.split():
         if len(cur)+len(w)+1 <= mc: cur = cur+" "+w if cur else w
         else:
             if cur: lines.append(cur)
             cur = w
     if cur: lines.append(cur)
-    lh = int(fs*1.3); ty = by + (bh - len(lines)*lh)//2
+    if not lines: return out
+
+    # Text Size
+    lh = int(fs * 1.3)
+    text_w = max(
+        (d.textbbox((0,0), ln, font=f)[2] - d.textbbox((0,0), ln, font=f)[0])
+        for ln in lines
+    )
+    text_h = len(lines) * lh
+
+    # Box Size — Text + Padding
+    box_w = text_w + padding_x * 2
+    box_h = text_h + padding_y * 2
+    box_x = (W - box_w) // 2
+
+    # Y Position
+    max_y = H - box_h
+    box_y = int((pos_y / 100) * max_y)
+    box_y = max(0, min(box_y, max_y))
+
+    # 🎨 Rounded Rectangle — ဘေးဘောင်လုံးလုံး
+    d.rounded_rectangle(
+        [box_x, box_y, box_x + box_w, box_y + box_h],
+        radius=corner_radius,
+        fill=(0, 0, 0, ba)
+    )
+
+    # Text Draw — Box အလယ်
+    ty = box_y + padding_y
     for ln in lines:
-        bb = d.textbbox((0,0), ln, font=f); lw = bb[2]-bb[0]; lx = (W-lw)//2
+        bb = d.textbbox((0, 0), ln, font=f)
+        lw = bb[2] - bb[0]
+        lx = box_x + (box_w - lw) // 2
+
         for dx in [-2,-1,0,1,2]:
-            for dy in [-2,-1,0,1,2]: d.text((lx+dx, ty+dy), ln, font=f, fill=(0,0,0,255))
-        d.text((lx, ty), ln, font=f, fill=(255,255,255,255)); ty += lh
-    img.save(out, "PNG"); return out
+            for dy in [-2,-1,0,1,2]:
+                d.text((lx+dx, ty+dy), ln, font=f, fill=(0,0,0,255))
+        d.text((lx, ty), ln, font=f, fill=(255,255,255,255))
+        ty += lh
+
+    img.save(out, "PNG")
+    return out
 
 
 def scr_to_srt(scr, dur, path, mc=30):
@@ -313,10 +357,10 @@ def silence_cut_v2(input_video, output_video="input_cut.mp4"):
     return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
-st.caption(f"⚡ Whisper Optimized — 3-6s")
+st.caption(f"⚡ Whisper Optimized  •  🎨 Rounded Blur Box")
 st.divider()
 
-# ===== Step 1 — Script =====
+# Step 1 — Script
 st.subheader("📝 Step 1 — Script")
 st.link_button("🌐 Gemini Web", "https://gemini.google.com", use_container_width=True)
 with st.expander("📋 Prompt"):
@@ -332,13 +376,13 @@ with c2:
         st.session_state.script = ""; st.rerun()
 st.divider()
 
-# ===== Step 2 — Video =====
+# Step 2 — Video
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# ===== Step 3 — Subtitle + Preview =====
+# Step 3 — Subtitle + Preview
 st.subheader("📝 Step 3 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
@@ -349,7 +393,6 @@ if use_sub:
     )
     st.caption(f"📍 {pos_y}%  •  🔤 Font {FS}  •  ⬛ Box {BH}px  •  🎨 Opacity {BA}")
 
-# 🖼️ Preview — Video Upload ရှိရင်
 if vid and use_sub:
     st.markdown("**🖼️ Preview**")
     with st.spinner("Preview..."):
@@ -366,14 +409,14 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-# ===== Step 4 — Whisper Optimize Cut =====
+# Step 4 — Whisper Optimize Cut
 st.subheader("⚡ Step 4 — Whisper Optimize Cut")
 dubbing_mode = st.toggle("✂️ Whisper Optimize Cut", value=False)
 if dubbing_mode:
     st.info("⚡ Whisper — VAD Off + Beam 1 + Context Off + Temp 0 — 3-6s")
 st.divider()
 
-# ===== Step 5 — Generate =====
+# Step 5 — Generate
 st.subheader("🚀 Step 5 — Generate")
 edge_voice = st.radio("🎤 Voice", ["female", "male"],
     format_func=lambda x: "👩 နီလာ" if x == "female" else "👨 သီဟ", horizontal=True)
