@@ -9,7 +9,7 @@ PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
 # ⚡ Fast Settings
-FS, BH, BA = 30, 100, 100
+FS, BH, BA = 30, 100, 200
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
