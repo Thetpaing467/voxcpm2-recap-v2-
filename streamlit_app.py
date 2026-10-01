@@ -1,5 +1,5 @@
 import streamlit as st
-import os, re, ffmpeg, shutil, subprocess
+import os, re, ffmpeg, shutil, subprocess, json
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 from gradio_client import Client, handle_file
@@ -19,12 +19,10 @@ ENC_CRF = 23
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 
-# 🎙️ Whisper Settings
-WHISPER_MODEL = "tiny"
-WHISPER_LANG = "my"
-SPEECH_MERGE_GAP = 0.5
+# 🎙️ HF Token — Speaker Diarization အတွက်
+HF_TOKEN = os.getenv("HF_TOKEN", "")
 
-st.set_page_config(page_title="VoxCPM2 Recap", page_icon="🎬", layout="centered")
+st.set_page_config(page_title="VoxCPM2 Dubbing", page_icon="🎬", layout="centered")
 
 # ===== CSS =====
 st.markdown("""
@@ -40,16 +38,14 @@ st.markdown("""
  color:#fff!important;border:none!important;border-radius:10px!important;
  padding:12px 20px!important;font-weight:600!important;
  box-shadow:0 4px 15px rgba(102,126,234,.3)!important}
-.stButton>button:hover{transform:translateY(-1px)!important;
- box-shadow:0 6px 20px rgba(102,126,234,.5)!important}
 .stTextArea textarea{background:rgba(255,255,255,.04)!important;
  border:1px solid rgba(255,255,255,.1)!important;color:#fff!important;
  border-radius:10px!important}
 .stFileUploader{background:rgba(255,255,255,.02);border-radius:10px;padding:8px}
-.stAlert{border-radius:10px!important;border:none!important}
 hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 </style>
 """, unsafe_allow_html=True)
+
 
 # ===== Password =====
 if "auth" not in st.session_state:
@@ -98,7 +94,6 @@ def s2t(ts):
 
 
 def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100):
-    """Subtitle PNG — pos_y: 0=အပေါ်ဆုံး, 50=အလယ်, 100=အောက်ဆုံး"""
     img = Image.new("RGBA", (W, H), (0,0,0,0)); d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
     except: f = ImageFont.load_default()
@@ -190,6 +185,65 @@ def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100):
     return op
 
 
+# ===== 🎙️ Speaker Diarization (pyannote) =====
+def diarize_speakers(video_path):
+    """Video → Audio → pyannote → Speaker Segments"""
+    # 1. Audio ခွဲ
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path,
+        "-ar", "16000", "-ac", "1",
+        "-c:a", "pcm_s16le", "diarize_audio.wav"
+    ], capture_output=True, check=True)
+
+    # 2. pyannote Pipeline
+    from pyannote.audio import Pipeline
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1",
+        use_auth_token=HF_TOKEN
+    )
+
+    diarization = pipeline("diarize_audio.wav")
+
+    # 3. Segments စုစည်း
+    segments = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        segments.append({
+            "start": turn.start,
+            "end": turn.end,
+            "speaker": speaker
+        })
+
+    if not segments:
+        raise Exception("Speaker မတွေ့ဘူး")
+
+    # 4. Speaker တစ်ယောက်ချင်း — Sample Audio ဖြတ်
+    os.makedirs("speaker_samples", exist_ok=True)
+    speakers = sorted(set(s["speaker"] for s in segments))
+    speaker_samples = {}
+
+    for spk in speakers:
+        # အရှည်ဆုံး Segment ကို Sample အဖြစ် ရွေး
+        spk_segs = [s for s in segments if s["speaker"] == spk]
+        longest = max(spk_segs, key=lambda x: x["end"] - x["start"])
+
+        # Sample 10 စက္ကန့် အထိ
+        sample_start = longest["start"]
+        sample_end = min(longest["end"], sample_start + 10)
+
+        sample_path = f"speaker_samples/{spk}.wav"
+        subprocess.run([
+            "ffmpeg", "-y", "-i", video_path,
+            "-ss", str(sample_start),
+            "-to", str(sample_end),
+            "-ar", "16000", "-ac", "1",
+            "-c:a", "pcm_s16le",
+            sample_path
+        ], capture_output=True, check=True)
+
+        speaker_samples[spk] = sample_path
+
+    return segments, speakers, speaker_samples
+# ===== TTS Helpers =====
 def split_scr(t, mc=TTS_CHUNK):
     sents = [s.strip()+"။" for s in t.replace("။","။|").split("|") if s.strip()]
     out, cur = [], ""
@@ -205,234 +259,209 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-def tts_run(chunks, ref, space, cb=None):
-    cl = Client(space); files = []; rf = handle_file(ref) if ref else None
+def tts_with_ref(chunks, ref_audio, space="openbmb/VoxCPM-Demo", cb=None):
+    """VoxCPM2 — Ref Audio + Script → မြန်မာ အသံ"""
+    cl = Client(space)
+    files = []
+    rf = handle_file(ref_audio) if ref_audio else None
+
     for i, c in enumerate(chunks):
         if cb: cb(i, len(chunks), c)
-        res = cl.predict(text_input=c,
+        res = cl.predict(
+            text_input=c,
             control_instruction="A warm young woman, calm and expressive",
-            reference_wav_path_input=rf, use_prompt_text=False,
-            prompt_text_input="", cfg_value_input=2.0,
-            do_normalize=True, denoise=False, api_name="/generate")
-        p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
-    return files
-
-
-def tts_burmese(chunks, ref, space, cb=None):
-    cl = Client(space); files = []
-    if not ref: raise Exception("Reference Audio needed")
-    rf = handle_file(ref)
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
-        res = cl.predict(target_text=c, ref_audio=rf,
-            ref_text="မြန်မာ အသံနမူနာ", cfg_value=2.0,
-            inference_timesteps=10, api_name="/tts")
-        p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
-    return files
-
-
-def tts_all(text, out, ref=None, cb=None):
-    chunks = split_scr(text, TTS_CHUNK); files = None
-    for s in SPACES:
-        try:
-            if s["type"] == "demo": files = tts_run(chunks, ref, s["space"], cb)
-            else: files = tts_burmese(chunks, ref, s["space"], cb)
-            break
-        except Exception:
-            files = None; continue
-    if files is None: raise Exception("TTS Failed")
-    with open("concat.txt", "w", encoding="utf-8") as f:
-        for a in files: f.write(f"file '{a}'\n")
-    ffmpeg.input("concat.txt", format="concat", safe=0).output(
-        out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
-    return out
-
-
-# ===== 🎙️ Whisper Auto Cut =====
-def whisper_cut_speech(input_video, output_video="input_cut.mp4"):
-    """Whisper နဲ့ စကားပြောခန်း ရှာပြီး FFmpeg နဲ့ ဖြတ်"""
-    subprocess.run([
-        "ffmpeg", "-y", "-i", input_video,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", "audio.wav"
-    ], capture_output=True, check=True)
-
-    speech_segments = []
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(
-            "audio.wav", language=WHISPER_LANG,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500)
+            reference_wav_path_input=rf,
+            use_prompt_text=False,
+            prompt_text_input="",
+            cfg_value_input=2.0,
+            do_normalize=True,
+            denoise=False,
+            api_name="/generate"
         )
-        for seg in segments:
-            speech_segments.append((seg.start, seg.end))
-    except ImportError:
-        import whisper
-        model = whisper.load_model(WHISPER_MODEL)
-        result = model.transcribe("audio.wav", language=WHISPER_LANG)
-        for seg in result["segments"]:
-            speech_segments.append((seg["start"], seg["end"]))
+        p = res[0] if isinstance(res, (tuple, list)) else res
+        dst = f"dub_chunk_{i}.wav"
+        shutil.copy(p, dst)
+        files.append(dst)
 
-    if not speech_segments:
-        raise Exception("စကားပြောခန်း မတွေ့ဘူး")
-
-    merged = []
-    for s, e in speech_segments:
-        if merged and s - merged[-1][1] < SPEECH_MERGE_GAP:
-            merged[-1] = (merged[-1][0], e)
-        else:
-            merged.append((s, e))
-
-    select_exprs = [f"between(t,{s:.2f},{e:.2f})" for s, e in merged]
-    select_str = "+".join(select_exprs)
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_video,
-        "-vf", f"select='{select_str}',setpts=N/FRAME_RATE/TB",
-        "-af", f"aselect='{select_str}',asetpts=N/SR/TB",
-        "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
-        "-c:a", "aac", "-b:a", "128k",
-        output_video
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
-
-    total = sum(e - s for s, e in merged)
-    return output_video, len(merged), total
+    return files
 
 
 # ===== UI =====
-st.markdown("<div class='main-title'>🎬 VoxCPM2 Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Recap Video</div>", unsafe_allow_html=True)
-st.caption(f"⚡ Fast Mode — {ENC_PRESET} @ CRF {ENC_CRF}")
+st.markdown("<div class='main-title'>🎬 VoxCPM2 Dubbing</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → Speaker Diarization → Voice Clone Dubbing</div>", unsafe_allow_html=True)
 st.divider()
 
-# Step 1
-st.subheader("📝 Step 1 — Gemini Web မှ Script")
-st.link_button("🌐 Open Gemini Web", "https://gemini.google.com", use_container_width=True)
-with st.expander("📋 Prompt — Copy"):
-    st.code("Watch this video carefully and write a clear, continuous movie recap script in Myanmar language for audio narration that matches the length of the video. Return plain speech text only without markdown titles.", language="text")
+# Step 1 — Video Upload
+st.subheader("📹 Step 1 — Video Upload")
+vid = st.file_uploader("📹 Video", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
+if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# Step 2
-st.subheader("📝 Step 2 — Script Paste")
-if "script" not in st.session_state: st.session_state.script = ""
-script = st.text_area("Script", value=st.session_state.script, height=220, label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
-st.session_state.script = script
-c1, c2 = st.columns([3, 1])
-with c1: st.caption(f"📝 စာလုံး — {len(script):,}")
-with c2:
-    if st.button("🗑️ Clear", use_container_width=True):
-        st.session_state.script = ""; st.rerun()
-st.divider()
+# Step 2 — Speaker Diarization
+st.subheader("🎙️ Step 2 — Speaker Diarization")
+st.caption("⚡ pyannote — လူတစ်ယောက်ချင်းစီ — အသံ ခွဲ")
 
-# Step 3
-st.subheader("📁 Step 3 — Ref Audio + Video")
-if "ref" not in st.session_state: st.session_state.ref = None
-c1, c2 = st.columns(2)
-with c1:
-    ref = st.file_uploader("🎤 Ref Audio (Optional)", type=["wav","mp3","m4a"])
-    if ref:
-        with open("ref.wav", "wb") as f: f.write(ref.read())
-        st.session_state.ref = "ref.wav"; st.success("✅ Ref Audio Ready")
-with c2:
-    vid = st.file_uploader("📹 Video Upload", type=["mp4","mov","avi","mkv"])
-    if vid: st.success(f"✅ Video — {vid.size/(1024*1024):.1f} MB")
-st.divider()
+if not HF_TOKEN:
+    st.warning("⚠️ HF_TOKEN မထည့်ထားဘူး — Hugging Face Settings → Tokens → Read Token ယူပါ")
+    hf_token_input = st.text_input("HF Token", type="password", placeholder="hf_...")
+    if hf_token_input:
+        HF_TOKEN = hf_token_input
+        st.session_state.hf_token = hf_token_input
+elif "hf_token" in st.session_state:
+    HF_TOKEN = st.session_state.hf_token
 
-# Step 4
-st.subheader("📝 Step 4 — Subtitle")
-use_sub = st.toggle("စာတန်းထိုး (Burn-in)", value=True)
-
-pos_y = 100
-
-if use_sub:
-    pos_y = st.slider(
-        "📍 Subtitle Position (0=အပေါ်, 50=အလယ်, 100=အောက်)",
-        min_value=0, max_value=100, value=100, step=5
-    )
-    st.caption(f"📍 {pos_y}%  •  🔤 Font {FS}  •  ⬛ Box {BH}px  •  🎨 Opacity {BA}")
-
-if vid and use_sub:
-    st.markdown("**🖼️ Preview**")
-    with st.spinner("Preview..."):
+if vid and HF_TOKEN:
+    if st.button("🎙️ Speaker Diarization — Start", use_container_width=True):
         vid.seek(0)
-        with open("preview.mp4", "wb") as f: f.write(vid.read())
-        W, H, _ = vid_info("preview.mp4")
-        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA)
-        cap = cv2.VideoCapture("preview.mp4"); ok, fr = cap.read(); cap.release()
-        if ok:
-            bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-            fg = Image.open("prev.png").convert("RGBA")
-            comp = Image.alpha_composite(bg, fg); pw = 720
-            comp.resize((pw, int(H*(pw/W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
-            st.image("prev_out.png", use_container_width=True)
+        with open("diarize_input.mp4", "wb") as f:
+            f.write(vid.read())
+        try:
+            with st.spinner("🎙️ Speaker Diarization လုပ်နေသည်..."):
+                segments, speakers, speaker_samples = diarize_speakers("diarize_input.mp4")
+            st.session_state.segments = segments
+            st.session_state.speakers = speakers
+            st.session_state.speaker_samples = speaker_samples
+            st.success(f"✅ Speaker {len(speakers)} ယောက် တွေ့ပြီး")
+        except Exception as e:
+            st.error(f"❌ Diarization — {e}")
+        finally:
+            vid.seek(0)
+elif vid:
+    st.info("📹 Video တင်ပြီး — HF Token ထည့်ပါ")
 st.divider()
 
-# Step 4.5 — Dubbing Mode
-st.subheader("🎙️ Step 4.5 — Dubbing Mode")
-st.caption("🎬 စကားပြောခန်းပဲ ထားပြီး — ကျန်တာ ဖြတ်မယ် (Whisper Auto)")
-dubbing_mode = st.toggle("✂️ Dubbing Mode — Whisper Auto Cut", value=False)
-if dubbing_mode:
-    st.info(f"⚡ Whisper `{WHISPER_MODEL}` — မြန်မာ ({WHISPER_LANG}) — RAM နည်း")
-st.divider()
+# Step 3 — Speaker Scripts
+if "speakers" in st.session_state and st.session_state.speakers:
+    st.subheader("📝 Step 3 — Speaker Scripts")
+    st.caption("👤 Speaker တစ်ယောက်ချင်း — မြန်မာ Script ရေးပါ")
 
-# Step 5
-st.subheader("🚀 Step 5 — Generate Recap")
-if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
-    if not script.strip(): st.error("Script paste လုပ်ပါ"); st.stop()
-    if vid is None: st.error("Video Upload တင်ပါ"); st.stop()
+    if "speaker_scripts" not in st.session_state:
+        st.session_state.speaker_scripts = {}
 
-    vid.seek(0)
-    with open("input.mp4", "wb") as f: f.write(vid.read())
-    _, _, vdur = vid_info("input.mp4")
+    for spk in st.session_state.speakers:
+        with st.expander(f"👤 {spk} — Script", expanded=False):
+            # Sample Audio Player
+            sample_path = st.session_state.speaker_samples.get(spk)
+            if sample_path and os.path.exists(sample_path):
+                st.audio(sample_path, format="audio/wav")
 
-    # 🎙️ Whisper Dubbing Mode
-    if dubbing_mode:
-        with st.spinner(f"🎙️ Whisper `{WHISPER_MODEL}` — စကားပြောခန်း ရှာနေသည်..."):
+            script_input = st.text_area(
+                f"Script — {spk}",
+                value=st.session_state.speaker_scripts.get(spk, ""),
+                height=120,
+                key=f"script_{spk}",
+                placeholder="မြန်မာ Script ရေးပါ..."
+            )
+            st.session_state.speaker_scripts[spk] = script_input
+
+    st.divider()
+# Step 4 — Generate Dubbing
+st.subheader("🚀 Step 4 — Generate Dubbing")
+
+if "speakers" in st.session_state and st.session_state.speakers:
+    if st.button("✨ Generate Dubbing Video", type="primary", use_container_width=True):
+        if not HF_TOKEN:
+            st.error("HF Token မရှိဘူး")
+            st.stop()
+
+        vid.seek(0)
+        with open("input.mp4", "wb") as f:
+            f.write(vid.read())
+        _, _, vdur = vid_info("input.mp4")
+
+        # Speaker တစ်ယောက်ချင်း — TTS
+        all_audio = {}  # {spk: [files]}
+        for spk in st.session_state.speakers:
+            spk_script = st.session_state.speaker_scripts.get(spk, "").strip()
+            if not spk_script:
+                continue
+
+            st.write(f"🎙️ {spk} — TTS...")
+            pb = st.progress(0)
+
+            chunks = split_scr(spk_script, TTS_CHUNK)
+            sample = st.session_state.speaker_samples.get(spk)
+
+            def cb(i, tot, c, _pb=pb, _spk=spk):
+                _pb.progress((i+1)/tot)
+                st.caption(f"👤 {_spk} — [{i+1}/{tot}]")
+
             try:
-                cut_path, seg_count, cut_dur = whisper_cut_speech("input.mp4", "input_cut.mp4")
-                shutil.move("input_cut.mp4", "input.mp4")
-                _, _, vdur = vid_info("input.mp4")
-                st.success(f"✅ ဖြတ်ပြီး — {seg_count} ခန်း • {cut_dur:.0f}s")
+                files = tts_with_ref(chunks, sample, "openbmb/VoxCPM-Demo", cb)
+                # Concat
+                concat_file = f"dub_concat_{spk}.txt"
+                with open(concat_file, "w", encoding="utf-8") as f:
+                    for a in files: f.write(f"file '{a}'\n")
+
+                spk_audio = f"dub_{spk}.mp3"
+                ffmpeg.input(concat_file, format="concat", safe=0).output(
+                    spk_audio, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
+                ).run(overwrite_output=True)
+
+                all_audio[spk] = spk_audio
             except Exception as e:
-                st.error(f"❌ Whisper — {e}")
+                st.error(f"❌ {spk} — TTS — {e}")
                 st.stop()
 
-    pb = st.progress(0); txt = st.empty()
-    def cb(i, tot, c):
-        pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}] {len(c)} စာလုံး")
+        # Timeline — Speaker Segment တစ်ခုချင်း — Audio ထည့်
+        st.write("🎬 Timeline — Render...")
+        with st.spinner("Timeline ပြန်ထည့်နေသည်..."):
+            # မူရင်း Video — Mute + Audio Track ထည့်
+            cmd = ["ffmpeg", "-y", "-i", "input.mp4"]
 
-    # TTS
-    try: tts_all(script, "voice.mp3", st.session_state.ref, cb)
-    except Exception as e: st.error(f"TTS — {e}"); st.stop()
+            # Speaker Audio File တွေ — Input ထည့်
+            spk_list = list(all_audio.keys())
+            for spk in spk_list:
+                cmd += ["-i", all_audio[spk]]
 
-    adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
-    tempo = max(0.5, min(2.0, adur/vdur))
+            # Filter Complex
+            filters = []
+            audio_labels = []
 
-    sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
+            # Video — Original
+            filters.append("[0:v]copy[v]")
 
-    with st.spinner("🎬 Rendering — Fast Mode..."):
-        vi = ffmpeg.input("input.mp4")
-        va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
-        ffmpeg.output(vi.video, va, "temp.mp4",
-                       vcodec='libx264', crf=ENC_CRF, preset=ENC_PRESET,
-                       acodec='aac', audio_bitrate=AUDIO_BITRATE, shortest=None
-                       ).run(overwrite_output=True)
+            # Speaker Segment တစ်ခုချင်း — Split + Delay + Mix
+            amix_inputs = []
+            for idx, spk in enumerate(spk_list, start=1):
+                # Speaker Segment တွေ — Timeline အတိုင်း — Trim + Delay
+                spk_segs = [s for s in st.session_state.segments if s["speaker"] == spk]
+                for si, seg in enumerate(spk_segs):
+                    start_ms = int(seg["start"] * 1000)
+                    dur = seg["end"] - seg["start"]
 
-        if use_sub and sp:
-            overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA)
-        else:
-            shutil.copy("temp.mp4", "final.mp4")
+                    # Audio — Trim + Delay
+                    label = f"a_{spk}_{si}"
+                    filters.append(
+                        f"[{idx}:a]atrim=0:{dur:.3f},"
+                        f"adelay={start_ms}|{start_ms}[{label}]"
+                    )
+                    amix_inputs.append(f"[{label}]")
 
-    st.success(f"✅ Done — {adur:.0f}s @ {tempo:.2f}x")
-    st.video("final.mp4")
+            # Mix All
+            if amix_inputs:
+                filters.append(f"{''.join(amix_inputs)}amix=inputs={len(amix_inputs)}:duration=first[aout]")
+                filter_complex = ";".join(filters)
+                cmd += ["-filter_complex", filter_complex,
+                        "-map", "[v]", "-map", "[aout]"]
+            else:
+                filter_complex = ";".join(filters)
+                cmd += ["-filter_complex", filter_complex, "-map", "[v]"]
 
-    with open("final.mp4", "rb") as f:
-        st.download_button("📥 Download Recap Video", f, file_name="recap.mp4")
+            cmd += ["-c:v", "libx264", "-crf", str(ENC_CRF), "-preset", ENC_PRESET,
+                    "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest",
+                    "dub_final.mp4"]
+
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding="utf-8", errors="ignore")
+            if r.returncode != 0:
+                st.error(f"❌ FFmpeg — {(r.stderr or '')[-400:]}")
+                st.stop()
+
+        st.success(f"✅ Dubbing Video — ပြီးပါပြီ")
+        st.video("dub_final.mp4")
+
+        with open("dub_final.mp4", "rb") as f:
+            st.download_button("📥 Download Dubbing Video", f, file_name="dubbing.mp4")
+else:
+    st.info("📹 Video Upload → HF Token → Diarization → Scripts → Generate")
