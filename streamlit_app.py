@@ -19,14 +19,21 @@ TTS_WORKERS = 3
 PNG_WORKERS = 4
 
 # ✂️ Silence Detection Settings
-SILENCE_DB = -30        # Default Threshold
-MIN_SILENCE = 0.5       # Default Min Silence (sec)
+SILENCE_DB = -30
+MIN_SILENCE = 0.5
+
+# 🎙️ Whisper Settings
+WHISPER_MODEL = "tiny"
+WHISPER_LANG = "my"
 
 # 🎙️ Edge TTS Voices
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
     "male":   "my-MM-ThihaNeural",
 }
+
+# ⚡ Model Cache
+os.environ["HF_HOME"] = "/tmp/hf_cache"
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
@@ -290,10 +297,61 @@ def tts_all(text, out, voice="female", cb=None):
     return out
 
 
-# ===== ✂️ FFmpeg Silence Cut =====
-def ffmpeg_silence_cut(input_video, output_video="input_cut.mp4",
-                        silence_db=SILENCE_DB, min_silence=MIN_SILENCE):
-    """FFmpeg silencedetect — Whisper မလိုဘဲ Cut — 10x မြန်"""
+# ===== Whisper Verify =====
+def whisper_verify(video_path):
+    """Whisper — Cut ပြီး Video — Verify"""
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path,
+        "-ar", "16000", "-ac", "1",
+        "-c:a", "pcm_s16le", "verify_audio.wav"
+    ], capture_output=True, check=True)
+
+    speech_segments = []
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(
+            "verify_audio.wav", language=WHISPER_LANG,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=300)
+        )
+        for seg in segments:
+            speech_segments.append((seg.start, seg.end))
+    except Exception:
+        import whisper
+        model = whisper.load_model(WHISPER_MODEL)
+        result = model.transcribe("verify_audio.wav", language=WHISPER_LANG)
+        for seg in result["segments"]:
+            speech_segments.append((seg["start"], seg["end"]))
+
+    if not speech_segments:
+        return {
+            "status": "⚠️ Warning",
+            "message": "စကားသံ မတွေ့ဘူး",
+            "speech_count": 0,
+            "speech_dur": 0
+        }
+
+    speech_dur = sum(e - s for s, e in speech_segments)
+    total = float(ffmpeg.probe(video_path)['format']['duration'])
+    speech_pct = (speech_dur / total * 100) if total > 0 else 0
+
+    return {
+        "status": "✅ OK" if speech_pct > 50 else "⚠️ Warning",
+        "message": f"စကားသံ {len(speech_segments)} ခန်း — {speech_dur:.1f}s ({speech_pct:.0f}%)",
+        "speech_count": len(speech_segments),
+        "speech_dur": speech_dur,
+        "speech_pct": speech_pct
+    }
+
+
+# ===== ✂️ FFmpeg Silence + Whisper Verify Combo =====
+def ffmpeg_silence_cut_v2(input_video, output_video="input_cut.mp4",
+                            silence_db=SILENCE_DB, min_silence=MIN_SILENCE,
+                            verify=True):
+    """FFmpeg Cut + Whisper Verify — Combo"""
+    # Step 1 — FFmpeg Silence Detect
+    t0 = time.time()
     cmd = [
         "ffmpeg", "-i", input_video,
         "-af", f"silencedetect=noise={silence_db}dB:d={min_silence}",
@@ -319,6 +377,7 @@ def ffmpeg_silence_cut(input_video, output_video="input_cut.mp4",
     if not speech_segments:
         raise Exception("Speech မတွေ့ဘူး")
 
+    # Step 2 — FFmpeg Cut
     select_exprs = [f"between(t,{s:.3f},{e:.3f})" for s, e in speech_segments]
     select_str = "+".join(select_exprs)
 
@@ -332,10 +391,30 @@ def ffmpeg_silence_cut(input_video, output_video="input_cut.mp4",
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if r.returncode != 0:
-        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+        raise Exception(f"FFmpeg Cut: {(r.stderr or '')[-300:]}")
 
+    ffmpeg_time = time.time() - t0
     total = sum(e - s for s, e in speech_segments)
-    return output_video, len(speech_segments), total
+
+    # Step 3 — Whisper Verify
+    whisper_time = 0
+    verify_result = None
+    if verify:
+        t1 = time.time()
+        try:
+            verify_result = whisper_verify(output_video)
+        except Exception as e:
+            verify_result = {"error": str(e), "status": "❌ Fail"}
+        whisper_time = time.time() - t1
+
+    return {
+        "output": output_video,
+        "segments": len(speech_segments),
+        "duration": total,
+        "ffmpeg_time": ffmpeg_time,
+        "whisper_time": whisper_time,
+        "verify": verify_result
+    }
 
 
 # ===== UI =====
@@ -398,11 +477,13 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-# Step 4.5 — Silence Cut
-st.subheader("✂️ Step 4.5 — Silence Cut (FFmpeg)")
-st.caption("🎬 တိတ်ဆိတ်တဲ့ အပိုင်း ဖြတ် — Whisper မလိုဘဲ — အလွန်မြန်")
+# Step 4.5 — Silence Cut + Verify
+st.subheader("✂️ Step 4.5 — Silence Cut + Verify")
+st.caption("FFmpeg Cut (1–3s) + Whisper Verify (5–10s)")
 
 dubbing_mode = st.toggle("✂️ Silence Cut — On/Off", value=False)
+verify_mode = st.toggle("🔍 Whisper Verify — On/Off", value=True,
+                         help="FFmpeg Cut ပြီး — Whisper Verify (5–10s ပိုကြာ)")
 
 silence_db = SILENCE_DB
 min_silence = MIN_SILENCE
@@ -410,18 +491,10 @@ min_silence = MIN_SILENCE
 if dubbing_mode:
     c1, c2 = st.columns(2)
     with c1:
-        silence_db = st.slider(
-            "🔊 Silence Threshold (dB)",
-            min_value=-50, max_value=-10,
-            value=SILENCE_DB, step=1
-        )
+        silence_db = st.slider("🔊 Silence Threshold (dB)", -50, -10, SILENCE_DB, 1)
     with c2:
-        min_silence = st.slider(
-            "⏱️ Min Silence (sec)",
-            min_value=0.1, max_value=2.0,
-            value=MIN_SILENCE, step=0.1
-        )
-    st.info(f"⚡ `{min_silence}s` ထိ Cut — `{silence_db}dB` — Whisper မလိုဘူး")
+        min_silence = st.slider("⏱️ Min Silence (sec)", 0.1, 2.0, MIN_SILENCE, 0.1)
+    st.info(f"⚡ `{min_silence}s` ထိ Cut — `{silence_db}dB` — Verify: {'✅ On' if verify_mode else '❌ Off'}")
 st.divider()
 
 # Step 5
@@ -446,89 +519,32 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    # ✂️ Silence Cut
+    # ✂️ Silence Cut + Verify
     if dubbing_mode:
         t0 = time.time()
         with st.spinner(f"✂️ Silence Cut — {min_silence}s ထိ..."):
             try:
-                cut_path, seg_count, cut_dur = ffmpeg_silence_cut(
+                result = ffmpeg_silence_cut_v2(
                     "input.mp4", "input_cut.mp4",
-                    silence_db=silence_db, min_silence=min_silence
+                    silence_db=silence_db, min_silence=min_silence,
+                    verify=verify_mode
                 )
                 shutil.move("input_cut.mp4", "input.mp4")
                 _, _, vdur = vid_info("input.mp4")
-                st.success(f"✅ Cut ပြီး — {seg_count} ခန်း • {cut_dur:.1f}s")
+
+                st.success(f"✅ Cut — {result['segments']} ခန်း • {result['duration']:.1f}s "
+                           f"• FFmpeg {result['ffmpeg_time']:.1f}s")
+
+                if verify_mode and result["verify"]:
+                    v = result["verify"]
+                    if "error" in v:
+                        st.warning(f"⚠️ Verify Fail: {v['error'][:100]}")
+                    else:
+                        st.info(f"🔍 Verify — {v['status']} — {v['message']} "
+                               f"(Whisper {result['whisper_time']:.1f}s)")
             except Exception as e:
                 st.error(f"❌ Silence Cut — {e}")
                 st.stop()
         step_times["✂️ Silence Cut"] = time.time() - t0
 
-    # Edge TTS
-    t0 = time.time()
-    pb = st.progress(0); txt = st.empty()
-    def cb(i, tot, c):
-        pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}] {len(c)} စာလုံး")
-
-    try:
-        tts_all(script, "voice.mp3", voice=edge_voice, cb=cb)
-    except Exception as e:
-        st.error(f"TTS — {e}")
-        st.stop()
-    step_times["🎙️ Edge TTS"] = time.time() - t0
-
-    adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
-    tempo = max(0.5, min(2.0, adur/vdur))
-
-    sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
-
-    # Render
-    t0 = time.time()
-    with st.spinner("🎬 Rendering — Fast Mode..."):
-        vi = ffmpeg.input("input.mp4")
-        va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
-        ffmpeg.output(
-            vi.video, va, "temp.mp4",
-            vcodec='libx264',
-            crf=ENC_CRF,
-            preset='ultrafast',
-            tune='fastdecode',
-            movflags='+faststart',
-            acodec='aac',
-            audio_bitrate=AUDIO_BITRATE,
-            shortest=None,
-            threads=0
-        ).run(overwrite_output=True)
-
-        if use_sub and sp:
-            overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA)
-        else:
-            shutil.copy("temp.mp4", "final.mp4")
-    step_times["🎬 Video Render"] = time.time() - t0
-
-    total_elapsed = time.time() - total_start
-    total_str, _ = fmt_time(total_elapsed)
-
-    # ===== ⏱️ TIMER DISPLAY =====
-    st.markdown(f"""
-    <div class="timer-box">
-        <div class="timer-title">⏱️ TOTAL PROCESSING TIME</div>
-        <div class="timer-value">{total_elapsed:.1f}<span class="timer-unit">sec</span></div>
-        <div class="timer-sub">≈ {total_str}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("### 📊 Step-by-Step Times")
-    for name, t in step_times.items():
-        _, sec_str = fmt_time(t)
-        pct = (t / total_elapsed * 100) if total_elapsed > 0 else 0
-        st.markdown(f"""
-        <div class="step-timer">
-            {name} — <b>{t:.1f}s</b> ({sec_str}) — <b>{pct:.1f}%</b>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.success(f"✅ Done — {adur:.0f}s @ {tempo:.2f}x  •  ⏱️ {total_elapsed:.1f}s")
-    st.video("final.mp4")
-
-    with open("final.mp4", "rb") as f:
-        st.download_button("📥 Download Recap Video", f, file_name="recap.mp4")
+   
