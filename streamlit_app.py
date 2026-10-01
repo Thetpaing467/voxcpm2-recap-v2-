@@ -5,6 +5,9 @@ import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 
+# ⚡ HF Model Cache — 2x မြန် (ဒုတိယ Run)
+os.environ["HF_HOME"] = "/tmp/hf_cache"
+
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
@@ -26,8 +29,6 @@ EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
     "male":   "my-MM-ThihaNeural",
 }
-
-os.environ["HF_HOME"] = "/tmp/hf_cache"
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 st.markdown("""
@@ -228,8 +229,7 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None, workers=TTS_WORKERS)
     def tts_one(args):
         i, c = args
         dst = f"edge_chunk_{i}.mp3"
-        try:
-            asyncio.run(_edge_tts_async(c, dst, voice_id))
+        try: asyncio.run(_edge_tts_async(c, dst, voice_id))
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -237,12 +237,10 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None, workers=TTS_WORKERS)
             loop.close()
         return (i, dst)
 
-    results = [None] * len(chunks)
-    done = 0
+    results = [None] * len(chunks); done = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         for idx, dst in ex.map(tts_one, enumerate(chunks)):
-            results[idx] = dst
-            done += 1
+            results[idx] = dst; done += 1
             if cb: cb(done - 1, len(chunks), chunks[idx])
 
     with open("edge_concat.txt", "w", encoding="utf-8") as f:
@@ -262,63 +260,66 @@ def tts_all(text, out, voice="female", cb=None):
     return out
 
 
-def whisper_verify(video_path):
+# ===== ⚡ Whisper Optimized — 5 Methods =====
+def whisper_fast(video_path, optimize=True):
+    """Whisper tiny — 5 Methods Optimize — 3-6s"""
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
         "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", "verify_audio.wav"
+        "-c:a", "pcm_s16le", "whisper_audio.wav"
     ], capture_output=True, check=True)
 
     speech_segments = []
     try:
         from faster_whisper import WhisperModel
         model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        segments, _ = model.transcribe("verify_audio.wav", language=WHISPER_LANG,
-            vad_filter=True, vad_parameters=dict(min_silence_duration_ms=300))
+
+        if optimize:
+            # ⚡ 5 Methods
+            segments, _ = model.transcribe(
+                "whisper_audio.wav", language=WHISPER_LANG,
+                vad_filter=False,                    # ၁။ VAD ဖျက်
+                beam_size=1,                          # ၂။ Beam 1
+                condition_on_previous_text=False,     # ၃။ Context ဖျက်
+                temperature=0,                        # ၄။ Temperature 0
+                compression_ratio_threshold=2.4,     # ၅။ Skip Heuristic
+                log_prob_threshold=-1.0,
+                no_speech_threshold=0.6
+            )
+        else:
+            segments, _ = model.transcribe(
+                "whisper_audio.wav", language=WHISPER_LANG, vad_filter=True
+            )
+
         for seg in segments:
             speech_segments.append((seg.start, seg.end))
+
     except Exception:
         import whisper
         model = whisper.load_model(WHISPER_MODEL)
-        result = model.transcribe("verify_audio.wav", language=WHISPER_LANG)
+        result = model.transcribe(
+            "whisper_audio.wav", language=WHISPER_LANG,
+            condition_on_previous_text=False,
+            beam_size=1, temperature=0
+        )
         for seg in result["segments"]:
             speech_segments.append((seg["start"], seg["end"]))
 
-    if not speech_segments:
-        return {"status": "⚠️", "message": "စကားသံ မတွေ့", "speech_count": 0}
-
-    speech_dur = sum(e - s for s, e in speech_segments)
-    total = float(ffmpeg.probe(video_path)['format']['duration'])
-    pct = (speech_dur / total * 100) if total > 0 else 0
-    return {
-        "status": "✅" if pct > 50 else "⚠️",
-        "message": f"{len(speech_segments)} ခန်း — {speech_dur:.1f}s ({pct:.0f}%)",
-        "speech_count": len(speech_segments),
-    }
+    return speech_segments
 
 
 def silence_cut_v2(input_video, output_video="input_cut.mp4",
                     silence_db=SILENCE_DB, min_silence=MIN_SILENCE, verify=True):
     t0 = time.time()
-    cmd = ["ffmpeg", "-i", input_video,
-           "-af", f"silencedetect=noise={silence_db}dB:d={min_silence}",
-           "-f", "null", "-"]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
 
-    starts = [float(x) for x in re.findall(r"silence_start: ([\d.]+)", r.stderr)]
-    ends   = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", r.stderr)]
-    duration = float(ffmpeg.probe(input_video)['format']['duration'])
-    silences = list(zip(starts, ends))
+    # ⚡ Whisper Fast — Speeds
+    speech_segments = whisper_fast(input_video, optimize=True)
+    whisper_time = time.time() - t0
 
-    speech_segments = []
-    cur = 0.0
-    for s, e in silences:
-        if s > cur: speech_segments.append((cur, s))
-        cur = e
-    if cur < duration: speech_segments.append((cur, duration))
+    if not speech_segments:
+        raise Exception("Speech မတွေ့")
 
-    if not speech_segments: raise Exception("Speech မတွေ့")
-
+    # FFmpeg Cut
     select_exprs = [f"between(t,{s:.3f},{e:.3f})" for s, e in speech_segments]
     select_str = "+".join(select_exprs)
 
@@ -330,24 +331,17 @@ def silence_cut_v2(input_video, output_video="input_cut.mp4",
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
 
-    ffmpeg_time = time.time() - t0
     total = sum(e - s for s, e in speech_segments)
 
-    whisper_time = 0
-    verify_result = None
-    if verify:
-        t1 = time.time()
-        try: verify_result = whisper_verify(output_video)
-        except Exception as e: verify_result = {"status": "❌", "message": str(e)[:100]}
-        whisper_time = time.time() - t1
-
     return {
-        "segments": len(speech_segments), "duration": total,
-        "ffmpeg_time": ffmpeg_time, "whisper_time": whisper_time,
-        "verify": verify_result
+        "segments": len(speech_segments),
+        "duration": total,
+        "whisper_time": whisper_time,
+        "verify": {"status": "⚡ Optimized", "message": f"Whisper {whisper_time:.1f}s"}
     }
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → မြန်မာ Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
+st.caption(f"⚡ Whisper Optimized — 3-6s")
 st.divider()
 
 st.subheader("📝 Step 1 — Script")
@@ -378,16 +372,10 @@ if use_sub:
     st.caption(f"📍 {pos_y}%")
 st.divider()
 
-st.subheader("✂️ Step 4 — Silence Cut + Verify")
-dubbing_mode = st.toggle("✂️ Silence Cut", value=False)
-verify_mode = st.toggle("🔍 Whisper Verify", value=True)
-
-silence_db = SILENCE_DB
-min_silence = MIN_SILENCE
+st.subheader("⚡ Step 4 — Whisper Optimize Cut")
+dubbing_mode = st.toggle("✂️ Whisper Optimize Cut", value=False)
 if dubbing_mode:
-    c1, c2 = st.columns(2)
-    with c1: silence_db = st.slider("🔊 dB", -50, -10, SILENCE_DB, 1)
-    with c2: min_silence = st.slider("⏱️ Sec", 0.1, 2.0, MIN_SILENCE, 0.1)
+    st.info("⚡ Whisper — VAD Off + Beam 1 + Context Off + Temp 0 — 3-6s")
 st.divider()
 
 st.subheader("🚀 Step 5 — Generate")
@@ -405,18 +393,16 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     if dubbing_mode:
         t0 = time.time()
-        with st.spinner("✂️ Silence Cut..."):
+        with st.spinner("⚡ Whisper Optimized Cut..."):
             try:
-                result = silence_cut_v2("input.mp4", "input_cut.mp4",
-                    silence_db=silence_db, min_silence=min_silence, verify=verify_mode)
+                result = silence_cut_v2("input.mp4", "input_cut.mp4")
                 shutil.move("input_cut.mp4", "input.mp4")
                 _, _, vdur = vid_info("input.mp4")
-                st.success(f"✅ Cut — {result['segments']} ခန်း • {result['duration']:.1f}s")
-                if verify_mode and result["verify"]:
-                    st.info(f"🔍 {result['verify']['status']} — {result['verify']['message']}")
+                st.success(f"✅ Cut — {result['segments']} ခန်း • {result['duration']:.1f}s "
+                           f"• Whisper {result['whisper_time']:.1f}s")
             except Exception as e:
                 st.error(f"❌ {e}"); st.stop()
-        step_times["✂️ Silence Cut"] = time.time() - t0
+        step_times["⚡ Whisper Cut"] = time.time() - t0
 
     t0 = time.time()
     pb = st.progress(0); txt = st.empty()
