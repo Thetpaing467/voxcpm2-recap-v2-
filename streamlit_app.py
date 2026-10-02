@@ -5,8 +5,14 @@ import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 import streamlit.components.v1 as components
+from gradio_client import Client, handle_file
 
 os.environ["HF_HOME"] = "/tmp/hf_cache"
+
+SPACES = [
+    {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
+    {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
+]
 
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
@@ -19,14 +25,19 @@ TTS_CHUNK = 600
 TTS_WORKERS = 3
 PNG_WORKERS = 4
 
+WHISPER_MODEL = "tiny"
+WHISPER_LANG = "my"
+
 BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
 CORNER_RADIUS = 20
 
+# 👨 Edge TTS — သီဟ (Male) — ပုံသေ
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
-    "male":   "my-MM-ThihaNeural",
+    "male":   "my-MM-ThihaNeural",   # ⬅️ ဒါ — ပုံသေ သုံး
 }
+EDGE_VOICE_FIXED = "male"   # 👨 သီဟ — ပုံသေ
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
@@ -239,13 +250,47 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
+def tts_demo(chunks, ref, space, cb=None):
+    cl = Client(space); files = []; rf = handle_file(ref) if ref else None
+    for i, c in enumerate(chunks):
+        if cb: cb(i, len(chunks), c)
+        res = cl.predict(
+            text_input=c,
+            control_instruction="A warm young woman, calm and expressive",
+            reference_wav_path_input=rf,
+            use_prompt_text=False, prompt_text_input="",
+            cfg_value_input=2.0, do_normalize=True, denoise=False,
+            api_name="/generate"
+        )
+        p = res[0] if isinstance(res, (tuple, list)) else res
+        dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
+    return files
+
+
+def tts_burmese(chunks, ref, space, cb=None):
+    cl = Client(space); files = []
+    if not ref: raise Exception("Reference Audio needed")
+    rf = handle_file(ref)
+    for i, c in enumerate(chunks):
+        if cb: cb(i, len(chunks), c)
+        res = cl.predict(
+            target_text=c, ref_audio=rf,
+            ref_text="မြန်မာ အသံနမူနာ", cfg_value=2.0,
+            inference_timesteps=10, api_name="/tts"
+        )
+        p = res[0] if isinstance(res, (tuple, list)) else res
+        dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
+    return files
+
+
 async def _edge_tts_async(text, out_file, voice):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_file)
 
 
-def edge_tts_run(chunks, out_path, voice="female", cb=None, workers=TTS_WORKERS):
-    voice_id = EDGE_VOICES.get(voice, EDGE_VOICES["female"])
+def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
+    """Edge TTS — သီဟ (Male) — ပုံသေ"""
+    voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
 
     def tts_one(args):
         i, c = args
@@ -273,9 +318,38 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None, workers=TTS_WORKERS)
     return out_path
 
 
-def tts_all(text, out, voice="female", cb=None):
+def tts_all(text, out, ref=None, cb=None):
+    """VoxCPM2 → Fail/Busy ရင် — Edge TTS သီဟ (Male) Auto"""
     chunks = split_scr(text, TTS_CHUNK)
-    edge_tts_run(chunks, out, voice=voice, cb=cb)
+    files = None
+    last_error = None
+
+    for s in SPACES:
+        try:
+            st.info(f"🎙️ VoxCPM2 — {s['space']} — စမ်းနေသည်...")
+            if s["type"] == "demo":
+                files = tts_demo(chunks, ref, s["space"], cb)
+            else:
+                files = tts_burmese(chunks, ref, s["space"], cb)
+            st.success("✅ VoxCPM2 — အောင်မြင်")
+            break
+        except Exception as e:
+            last_error = str(e)
+            st.warning(f"⚠️ VoxCPM2 — Fail: {last_error[:80]}")
+            files = None
+            continue
+
+    if files is None:
+        st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS သီဟ Auto")
+        edge_tts_run(chunks, out, cb=cb)
+        st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
+        return out
+
+    with open("concat.txt", "w", encoding="utf-8") as f:
+        for a in files: f.write(f"file '{a}'\n")
+    ffmpeg.input("concat.txt", format="concat", safe=0).output(
+        out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
+    ).run(overwrite_output=True)
     return out
 
 
@@ -289,9 +363,9 @@ def whisper_fast(video_path):
     speech_segments = []
     try:
         from faster_whisper import WhisperModel
-        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
         segments, _ = model.transcribe(
-            "whisper_audio.wav", language="my",
+            "whisper_audio.wav", language=WHISPER_LANG,
             vad_filter=False, beam_size=1,
             condition_on_previous_text=False, temperature=0
         )
@@ -299,9 +373,9 @@ def whisper_fast(video_path):
             speech_segments.append((seg.start, seg.end))
     except Exception:
         import whisper
-        model = whisper.load_model("tiny")
+        model = whisper.load_model(WHISPER_MODEL)
         result = model.transcribe(
-            "whisper_audio.wav", language="my",
+            "whisper_audio.wav", language=WHISPER_LANG,
             condition_on_previous_text=False, beam_size=1, temperature=0
         )
         for seg in result["segments"]:
@@ -331,53 +405,39 @@ def silence_cut_v2(input_video, output_video="input_cut.mp4"):
     return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
 
 
-# ===== UI =====
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
+st.caption("🎙️ VoxCPM2 + 👨 Edge TTS သီဟ Fallback  •  📋 Paste  •  🎨 Box 100%")
 st.divider()
 
-# ===== Paste Button =====
-components.html("""
+paste_js = """
 <script>
-function pasteToStreamlit() {
+function getPaste() {
     navigator.clipboard.readText().then(function(text) {
-        const url = new URL(window.parent.location.href);
-        const base = window.parent.location.href.split('?')[0];
-        window.parent.location.href = base + '?paste=' + encodeURIComponent(text);
-    }).catch(function(err) {
-        alert('Clipboard Access မရဘူး — Manual Paste ပါ');
+        const ta = window.parent.document.querySelectorAll('textarea');
+        if (ta.length > 0) {
+            const t = ta[0];
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+            setter.call(t, text);
+            t.dispatchEvent(new Event('input', { bubbles: true }));
+            t.dispatchEvent(new Event('change', { bubbles: true }));
+            t.blur();
+        }
+    }).catch(function(e) {
+        alert('Clipboard မရဘူး — Manual Paste ပါ');
     });
 }
 </script>
-""", height=0)
+"""
 
-# Step 1 — Script
 st.subheader("📝 Step 1 — Script")
 
 c1, c2 = st.columns([3, 1])
 with c1:
     st.link_button("🌐 Gemini Web", "https://gemini.google.com", use_container_width=True)
 with c2:
-    if st.button("📋 Paste", use_container_width=True):
-        components.html("""
-        <script>
-        navigator.clipboard.readText().then(function(text) {
-            const ta = window.parent.document.querySelector('textarea');
-            if (ta) {
-                const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-                setter.call(ta, text);
-                ta.dispatchEvent(new Event('input', { bubbles: true }));
-                ta.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-        });
-        </script>
-        """, height=0)
-
-# URL Paste Support
-qp = st.query_params
-if "paste" in qp:
-    st.session_state.script = qp["paste"]
-    st.query_params.clear()
+    if st.button("📋 Paste", use_container_width=True, key="paste_btn"):
+        components.html(paste_js + "<script>getPaste();</script>", height=0)
 
 if "script" not in st.session_state: st.session_state.script = ""
 script = st.text_area("Script", value=st.session_state.script, height=180,
@@ -391,13 +451,11 @@ with c2:
         st.session_state.script = ""; st.rerun()
 st.divider()
 
-# Step 2 — Video
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# Step 3 — Subtitle (Box Width Slider ဖျက်)
 st.subheader("📝 Step 3 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
@@ -422,11 +480,18 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-# Step 4 — Generate
 st.subheader("🚀 Step 4 — Generate")
 
-edge_voice = st.radio("🎤 Voice", ["female", "male"],
-    format_func=lambda x: "👩 နီလာ" if x == "female" else "👨 သီဟ", horizontal=True)
+ref = st.file_uploader("🎤 Ref Audio (VoxCPM2) — Optional", type=["wav","mp3","m4a"], key="ref_up")
+if ref:
+    with open("ref.wav", "wb") as f: f.write(ref.read())
+    st.session_state.ref = "ref.wav"
+    st.success("✅ Ref Audio")
+else:
+    st.session_state.ref = None
+
+st.info("👨 Edge TTS Fallback — သီဟ (Thiha) — ပုံသေ")
+st.caption("🎙️ VoxCPM2 အရင်စမ်း — Fail/Busy ရင် — Edge TTS သီဟ Auto")
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
     if not script.strip(): st.error("Script paste"); st.stop()
@@ -437,30 +502,29 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    # Whisper Cut
     t0 = time.time()
     with st.spinner("✂️ Cut..."):
         try:
-            result = silence_cut_v2("input.mp4", "input_cut.mp4")
+            silence_cut_v2("input.mp4", "input_cut.mp4")
             shutil.move("input_cut.mp4", "input.mp4")
             _, _, vdur = vid_info("input.mp4")
         except Exception as e:
             st.error(f"❌ Cut: {e}"); st.stop()
     step_times["✂️ Cut"] = time.time() - t0
 
-    # Edge TTS
     t0 = time.time()
     pb = st.progress(0); txt = st.empty()
     def cb(i, tot, c): pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}]")
-    try: tts_all(script, "voice.mp3", voice=edge_voice, cb=cb)
-    except Exception as e: st.error(f"TTS: {e}"); st.stop()
+    try:
+        tts_all(script, "voice.mp3", ref=st.session_state.get("ref"), cb=cb)
+    except Exception as e:
+        st.error(f"TTS: {e}"); st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
 
     adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
     tempo = max(0.5, min(2.0, adur/vdur))
     sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
 
-    # Render
     t0 = time.time()
     with st.spinner("🎬 Render..."):
         vi = ffmpeg.input("input.mp4")
