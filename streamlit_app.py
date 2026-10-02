@@ -4,19 +4,14 @@ import concurrent.futures
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
-from gradio_client import Client, handle_file
+import streamlit.components.v1 as components
 
 os.environ["HF_HOME"] = "/tmp/hf_cache"
-
-SPACES = [
-    {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
-    {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
-]
 
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-FS, BH, BA = 30, 100, 200
+FS, BH, BA = 30, 100, 100
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
@@ -24,10 +19,7 @@ TTS_CHUNK = 600
 TTS_WORKERS = 3
 PNG_WORKERS = 4
 
-WHISPER_MODEL = "tiny"
-WHISPER_LANG = "my"
-
-BOX_WIDTH_RATIO = 0.9
+BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
 CORNER_RADIUS = 20
 
@@ -84,12 +76,6 @@ if not st.session_state.auth:
             else:
                 st.error("Password မှား")
     st.stop()
-
-
-def fmt_time(sec):
-    m = int(sec // 60); s = sec - m * 60
-    if m > 0: return f"{m}m {s:.1f}s", f"{sec:.2f}s"
-    return f"{s:.1f}s", f"{sec:.2f}s"
 
 
 def vid_info(p):
@@ -253,39 +239,6 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-def tts_demo(chunks, ref, space, cb=None):
-    cl = Client(space); files = []; rf = handle_file(ref) if ref else None
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
-        res = cl.predict(
-            text_input=c,
-            control_instruction="A warm young woman, calm and expressive",
-            reference_wav_path_input=rf,
-            use_prompt_text=False, prompt_text_input="",
-            cfg_value_input=2.0, do_normalize=True, denoise=False,
-            api_name="/generate"
-        )
-        p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
-    return files
-
-
-def tts_burmese(chunks, ref, space, cb=None):
-    cl = Client(space); files = []
-    if not ref: raise Exception("Reference Audio needed")
-    rf = handle_file(ref)
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
-        res = cl.predict(
-            target_text=c, ref_audio=rf,
-            ref_text="မြန်မာ အသံနမူနာ", cfg_value=2.0,
-            inference_timesteps=10, api_name="/tts"
-        )
-        p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
-    return files
-
-
 async def _edge_tts_async(text, out_file, voice):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_file)
@@ -320,44 +273,13 @@ def edge_tts_run(chunks, out_path, voice="female", cb=None, workers=TTS_WORKERS)
     return out_path
 
 
-def tts_all(text, out, ref=None, voice="female", cb=None):
+def tts_all(text, out, voice="female", cb=None):
     chunks = split_scr(text, TTS_CHUNK)
-    files = None
-    last_error = None
-
-    for s in SPACES:
-        try:
-            st.info(f"🎙️ VoxCPM2 — {s['space']} — စမ်းနေသည်...")
-            if s["type"] == "demo":
-                files = tts_demo(chunks, ref, s["space"], cb)
-            else:
-                files = tts_burmese(chunks, ref, s["space"], cb)
-            st.success(f"✅ VoxCPM2 — {s['space']} — အောင်မြင်")
-            break
-        except Exception as e:
-            last_error = str(e)
-            st.warning(f"⚠️ VoxCPM2 — Fail: {last_error[:120]}")
-            files = None
-            continue
-
-    if files is None:
-        st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS ကို ပြောင်းသုံးမယ်")
-        try:
-            edge_tts_run(chunks, out, voice=voice, cb=cb)
-            st.success(f"✅ Edge TTS — {EDGE_VOICES[voice]} — အောင်မြင်")
-            return out
-        except Exception as e:
-            raise Exception(f"VoxCPM2 + Edge TTS — Fail: {e}")
-
-    with open("concat.txt", "w", encoding="utf-8") as f:
-        for a in files: f.write(f"file '{a}'\n")
-    ffmpeg.input("concat.txt", format="concat", safe=0).output(
-        out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
+    edge_tts_run(chunks, out, voice=voice, cb=cb)
     return out
 
 
-def whisper_fast(video_path, optimize=True):
+def whisper_fast(video_path):
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
         "-ar", "16000", "-ac", "1",
@@ -367,24 +289,19 @@ def whisper_fast(video_path, optimize=True):
     speech_segments = []
     try:
         from faster_whisper import WhisperModel
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        if optimize:
-            segments, _ = model.transcribe(
-                "whisper_audio.wav", language=WHISPER_LANG,
-                vad_filter=False, beam_size=1,
-                condition_on_previous_text=False, temperature=0
-            )
-        else:
-            segments, _ = model.transcribe(
-                "whisper_audio.wav", language=WHISPER_LANG, vad_filter=True
-            )
+        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(
+            "whisper_audio.wav", language="my",
+            vad_filter=False, beam_size=1,
+            condition_on_previous_text=False, temperature=0
+        )
         for seg in segments:
             speech_segments.append((seg.start, seg.end))
     except Exception:
         import whisper
-        model = whisper.load_model(WHISPER_MODEL)
+        model = whisper.load_model("tiny")
         result = model.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
+            "whisper_audio.wav", language="my",
             condition_on_previous_text=False, beam_size=1, temperature=0
         )
         for seg in result["segments"]:
@@ -394,7 +311,7 @@ def whisper_fast(video_path, optimize=True):
 
 def silence_cut_v2(input_video, output_video="input_cut.mp4"):
     t0 = time.time()
-    speech_segments = whisper_fast(input_video, optimize=True)
+    speech_segments = whisper_fast(input_video)
     whisper_time = time.time() - t0
 
     if not speech_segments: raise Exception("Speech မတွေ့")
@@ -414,19 +331,59 @@ def silence_cut_v2(input_video, output_video="input_cut.mp4"):
     return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
 
 
+# ===== UI =====
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → မြန်မာ Script → VoxCPM2 / Edge TTS → Recap</div>", unsafe_allow_html=True)
-st.caption("⚡ Whisper Optimized  •  🎙️ VoxCPM2 + Edge TTS Fallback")
+st.markdown("<div class='main-sub'>Video → Script → Edge TTS → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
+# ===== Paste Button =====
+components.html("""
+<script>
+function pasteToStreamlit() {
+    navigator.clipboard.readText().then(function(text) {
+        const url = new URL(window.parent.location.href);
+        const base = window.parent.location.href.split('?')[0];
+        window.parent.location.href = base + '?paste=' + encodeURIComponent(text);
+    }).catch(function(err) {
+        alert('Clipboard Access မရဘူး — Manual Paste ပါ');
+    });
+}
+</script>
+""", height=0)
+
+# Step 1 — Script
 st.subheader("📝 Step 1 — Script")
-st.link_button("🌐 Gemini Web", "https://gemini.google.com", use_container_width=True)
-with st.expander("📋 Prompt"):
-    st.code("Watch this video carefully and write a clear, continuous movie recap script in Myanmar language...", language="text")
+
+c1, c2 = st.columns([3, 1])
+with c1:
+    st.link_button("🌐 Gemini Web", "https://gemini.google.com", use_container_width=True)
+with c2:
+    if st.button("📋 Paste", use_container_width=True):
+        components.html("""
+        <script>
+        navigator.clipboard.readText().then(function(text) {
+            const ta = window.parent.document.querySelector('textarea');
+            if (ta) {
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+                setter.call(ta, text);
+                ta.dispatchEvent(new Event('input', { bubbles: true }));
+                ta.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        });
+        </script>
+        """, height=0)
+
+# URL Paste Support
+qp = st.query_params
+if "paste" in qp:
+    st.session_state.script = qp["paste"]
+    st.query_params.clear()
 
 if "script" not in st.session_state: st.session_state.script = ""
-script = st.text_area("Script", value=st.session_state.script, height=180, label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
+script = st.text_area("Script", value=st.session_state.script, height=180,
+                       label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
 st.session_state.script = script
+
 c1, c2 = st.columns([3, 1])
 with c1: st.caption(f"📝 {len(script):,}")
 with c2:
@@ -434,20 +391,19 @@ with c2:
         st.session_state.script = ""; st.rerun()
 st.divider()
 
+# Step 2 — Video
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
+# Step 3 — Subtitle (Box Width Slider ဖျက်)
 st.subheader("📝 Step 3 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
-box_width_ratio = BOX_WIDTH_RATIO
 
 if use_sub:
     pos_y = st.slider("📍 Position", 0, 100, 100, 1)
-    box_width_ratio = st.slider("📏 Box Width", 0.5, 1.0, BOX_WIDTH_RATIO, 0.05)
-    st.caption(f"📍 {pos_y}%  •  📏 Box {int(box_width_ratio*100)}%")
 
 if vid and use_sub:
     st.markdown("**🖼️ Preview**")
@@ -456,7 +412,7 @@ if vid and use_sub:
         with open("preview.mp4", "wb") as f: f.write(vid.read())
         W, H, _ = vid_info("preview.mp4")
         render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA,
-                   box_width_ratio=box_width_ratio)
+                   box_width_ratio=BOX_WIDTH_RATIO)
         cap = cv2.VideoCapture("preview.mp4"); ok, fr = cap.read(); cap.release()
         if ok:
             bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
@@ -466,29 +422,11 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-st.subheader("⚡ Step 4 — Whisper Optimize Cut")
-dubbing_mode = st.toggle("✂️ Whisper Optimize Cut", value=False)
-if dubbing_mode:
-    st.info("⚡ Whisper — VAD Off + Beam 1 + Context Off + Temp 0 — 3-6s")
-st.divider()
+# Step 4 — Generate
+st.subheader("🚀 Step 4 — Generate")
 
-st.subheader("🚀 Step 5 — Generate")
-
-c1, c2 = st.columns(2)
-with c1:
-    ref = st.file_uploader("🎤 Ref Audio (VoxCPM2)", type=["wav","mp3","m4a"], key="ref_up")
-    if ref:
-        with open("ref.wav", "wb") as f: f.write(ref.read())
-        st.session_state.ref = "ref.wav"
-        st.success("✅ Ref Audio")
-    else:
-        st.session_state.ref = None
-
-with c2:
-    edge_voice = st.radio("🎤 Edge TTS Fallback", ["female", "male"],
-        format_func=lambda x: "👩 နီလာ" if x == "female" else "👨 သီဟ")
-
-st.caption("🎙️ VoxCPM2 ကို အရင် စမ်း — Fail/Busy ရင် — Edge TTS Auto")
+edge_voice = st.radio("🎤 Voice", ["female", "male"],
+    format_func=lambda x: "👩 နီလာ" if x == "female" else "👨 သီဟ", horizontal=True)
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
     if not script.strip(): st.error("Script paste"); st.stop()
@@ -499,34 +437,32 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    if dubbing_mode:
-        t0 = time.time()
-        with st.spinner("⚡ Whisper Optimized Cut..."):
-            try:
-                result = silence_cut_v2("input.mp4", "input_cut.mp4")
-                shutil.move("input_cut.mp4", "input.mp4")
-                _, _, vdur = vid_info("input.mp4")
-                st.success(f"✅ Cut — {result['segments']} ခန်း • {result['duration']:.1f}s "
-                           f"• Whisper {result['whisper_time']:.1f}s")
-            except Exception as e:
-                st.error(f"❌ {e}"); st.stop()
-        step_times["⚡ Whisper Cut"] = time.time() - t0
+    # Whisper Cut
+    t0 = time.time()
+    with st.spinner("✂️ Cut..."):
+        try:
+            result = silence_cut_v2("input.mp4", "input_cut.mp4")
+            shutil.move("input_cut.mp4", "input.mp4")
+            _, _, vdur = vid_info("input.mp4")
+        except Exception as e:
+            st.error(f"❌ Cut: {e}"); st.stop()
+    step_times["✂️ Cut"] = time.time() - t0
 
+    # Edge TTS
     t0 = time.time()
     pb = st.progress(0); txt = st.empty()
     def cb(i, tot, c): pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}]")
-    try:
-        tts_all(script, "voice.mp3", ref=st.session_state.get("ref"), voice=edge_voice, cb=cb)
-    except Exception as e:
-        st.error(f"TTS: {e}"); st.stop()
+    try: tts_all(script, "voice.mp3", voice=edge_voice, cb=cb)
+    except Exception as e: st.error(f"TTS: {e}"); st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
 
     adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
     tempo = max(0.5, min(2.0, adur/vdur))
     sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
 
+    # Render
     t0 = time.time()
-    with st.spinner("🎬 Rendering..."):
+    with st.spinner("🎬 Render..."):
         vi = ffmpeg.input("input.mp4")
         va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
         ffmpeg.output(vi.video, va, "temp.mp4",
@@ -535,7 +471,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             shortest=None, threads=0).run(overwrite_output=True)
         if use_sub and sp:
             overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA,
-                    box_width_ratio=box_width_ratio)
+                    box_width_ratio=BOX_WIDTH_RATIO)
         else:
             shutil.copy("temp.mp4", "final.mp4")
     step_times["🎬 Render"] = time.time() - t0
