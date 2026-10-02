@@ -4,7 +4,6 @@ import concurrent.futures
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
-import streamlit.components.v1 as components
 from gradio_client import Client, handle_file
 
 os.environ["HF_HOME"] = "/tmp/hf_cache"
@@ -35,9 +34,9 @@ CORNER_RADIUS = 20
 # 👨 Edge TTS — သီဟ (Male) — ပုံသေ
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
-    "male":   "my-MM-ThihaNeural",   # ⬅️ ဒါ — ပုံသေ သုံး
+    "male":   "my-MM-ThihaNeural",
 }
-EDGE_VOICE_FIXED = "male"   # 👨 သီဟ — ပုံသေ
+EDGE_VOICE_FIXED = "male"
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
@@ -318,9 +317,18 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     return out_path
 
 
-def tts_all(text, out, ref=None, cb=None):
-    """VoxCPM2 → Fail/Busy ရင် — Edge TTS သီဟ (Male) Auto"""
+def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
+    """VoxCPM2 သုံး/မသုံး — User ရွေး"""
     chunks = split_scr(text, TTS_CHUNK)
+
+    # ⚡ VoxCPM2 Off — Edge TTS သီဟ ပဲ
+    if not use_voxcpm:
+        st.info("⚡ Edge TTS သီဟ — VoxCPM2 Off")
+        edge_tts_run(chunks, out, cb=cb)
+        st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
+        return out
+
+    # 🎙️ VoxCPM2 On
     files = None
     last_error = None
 
@@ -407,37 +415,13 @@ def silence_cut_v2(input_video, output_video="input_cut.mp4"):
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
-st.caption("🎙️ VoxCPM2 + 👨 Edge TTS သီဟ Fallback  •  📋 Paste  •  🎨 Box 100%")
+st.caption("🎙️ VoxCPM2 Toggle  •  👨 Edge TTS သီဟ Fallback  •  🎨 Box 100%")
 st.divider()
 
-paste_js = """
-<script>
-function getPaste() {
-    navigator.clipboard.readText().then(function(text) {
-        const ta = window.parent.document.querySelectorAll('textarea');
-        if (ta.length > 0) {
-            const t = ta[0];
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-            setter.call(t, text);
-            t.dispatchEvent(new Event('input', { bubbles: true }));
-            t.dispatchEvent(new Event('change', { bubbles: true }));
-            t.blur();
-        }
-    }).catch(function(e) {
-        alert('Clipboard မရဘူး — Manual Paste ပါ');
-    });
-}
-</script>
-"""
-
 st.subheader("📝 Step 1 — Script")
-
-c1, c2 = st.columns([3, 1])
-with c1:
-    st.link_button("🌐 Gemini Web", "https://gemini.google.com", use_container_width=True)
-with c2:
-    if st.button("📋 Paste", use_container_width=True, key="paste_btn"):
-        components.html(paste_js + "<script>getPaste();</script>", height=0)
+st.link_button("🌐 Gemini Web", "https://gemini.google.com", use_container_width=True)
+with st.expander("📋 Prompt"):
+    st.code("Watch this video carefully and write a clear, continuous movie recap script in Myanmar language...", language="text")
 
 if "script" not in st.session_state: st.session_state.script = ""
 script = st.text_area("Script", value=st.session_state.script, height=180,
@@ -482,16 +466,23 @@ st.divider()
 
 st.subheader("🚀 Step 4 — Generate")
 
-ref = st.file_uploader("🎤 Ref Audio (VoxCPM2) — Optional", type=["wav","mp3","m4a"], key="ref_up")
-if ref:
-    with open("ref.wav", "wb") as f: f.write(ref.read())
-    st.session_state.ref = "ref.wav"
-    st.success("✅ Ref Audio")
-else:
-    st.session_state.ref = None
+# 🎙️ VoxCPM2 Toggle
+use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True,
+                        help="Off ထားရင် — Edge TTS သီဟ ပဲ သုံးမယ်")
 
-st.info("👨 Edge TTS Fallback — သီဟ (Thiha) — ပုံသေ")
-st.caption("🎙️ VoxCPM2 အရင်စမ်း — Fail/Busy ရင် — Edge TTS သီဟ Auto")
+if use_voxcpm:
+    st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS သီဟ Auto")
+    ref = st.file_uploader("🎤 Ref Audio (VoxCPM2) — Optional",
+                            type=["wav","mp3","m4a"], key="ref_up")
+    if ref:
+        with open("ref.wav", "wb") as f: f.write(ref.read())
+        st.session_state.ref = "ref.wav"
+        st.success("✅ Ref Audio")
+    else:
+        st.session_state.ref = None
+else:
+    st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
+    st.session_state.ref = None
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
     if not script.strip(): st.error("Script paste"); st.stop()
@@ -516,7 +507,8 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     pb = st.progress(0); txt = st.empty()
     def cb(i, tot, c): pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}]")
     try:
-        tts_all(script, "voice.mp3", ref=st.session_state.get("ref"), cb=cb)
+        tts_all(script, "voice.mp3", ref=st.session_state.get("ref"),
+                cb=cb, use_voxcpm=use_voxcpm)
     except Exception as e:
         st.error(f"TTS: {e}"); st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
