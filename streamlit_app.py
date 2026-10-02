@@ -31,7 +31,6 @@ BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
 CORNER_RADIUS = 20
 
-# 👨 Edge TTS — သီဟ (Male) — ပုံသေ
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
     "male":   "my-MM-ThihaNeural",
@@ -288,7 +287,6 @@ async def _edge_tts_async(text, out_file, voice):
 
 
 def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
-    """Edge TTS — သီဟ (Male) — ပုံသေ"""
     voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
 
     def tts_one(args):
@@ -318,17 +316,14 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
 
 def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
-    """VoxCPM2 သုံး/မသုံး — User ရွေး"""
     chunks = split_scr(text, TTS_CHUNK)
 
-    # ⚡ VoxCPM2 Off — Edge TTS သီဟ ပဲ
     if not use_voxcpm:
         st.info("⚡ Edge TTS သီဟ — VoxCPM2 Off")
         edge_tts_run(chunks, out, cb=cb)
         st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
         return out
 
-    # 🎙️ VoxCPM2 On
     files = None
     last_error = None
 
@@ -415,14 +410,9 @@ def silence_cut_v2(input_video, output_video="input_cut.mp4"):
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
-st.caption("🎙️ VoxCPM2 Toggle  •  👨 Edge TTS သီဟ Fallback  •  🎨 Box 100%")
 st.divider()
 
-st.subheader("📝 Step 1 — Script")
-st.link_button("🌐 Gemini Web", "https://gemini.google.com", use_container_width=True)
-with st.expander("📋 Prompt"):
-    st.code("Watch this video carefully and write a clear, continuous movie recap script in Myanmar language...", language="text")
-
+# ===== Step 1 — Script (ဖျက်ပြီး) =====
 if "script" not in st.session_state: st.session_state.script = ""
 script = st.text_area("Script", value=st.session_state.script, height=180,
                        label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
@@ -435,11 +425,13 @@ with c2:
         st.session_state.script = ""; st.rerun()
 st.divider()
 
+# ===== Step 2 — Video =====
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
+# ===== Step 3 — Subtitle =====
 st.subheader("📝 Step 3 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
@@ -464,9 +456,9 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
+# ===== Step 4 — Generate =====
 st.subheader("🚀 Step 4 — Generate")
 
-# 🎙️ VoxCPM2 Toggle
 use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True,
                         help="Off ထားရင် — Edge TTS သီဟ ပဲ သုံးမယ်")
 
