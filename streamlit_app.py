@@ -248,59 +248,40 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-# ===== 🛡️ Copyright Bypass — Filters (2/3/4/5/6/7/8) =====
 def copyright_bypass(input_video, output_video="bypass.mp4",
-                     zoom=1.05,            # ၂။ Subtle Zoom
-                     crop_ratio=0.98,      # ၃။ Crop
-                     target_w=0,           # ၄။ Resize
-                     brightness=0.02,      # ၅။ Color Adjust
-                     saturation=1.05,
-                     contrast=1.02,
-                     mirror=False,         # ၆။ Mirror ⬅️ ပါဝင်
-                     sharpen=0.5,          # ၇။ Sharpen
-                     fade_in=0.5,          # ၈။ Fade In
-                     fade_out=0.5):
-    """Copyright Bypass — Filters (2/3/4/5/6/7/8)"""
+                     zoom=1.05, crop_ratio=0.98, target_w=0,
+                     brightness=0.02, saturation=1.05, contrast=1.02,
+                     mirror=False, sharpen=0.5,
+                     fade_in=0.5, fade_out=0.5):
     W, H, dur = vid_info(input_video)
     filters = []
 
-    # ၂။ Subtle Zoom
     if zoom != 1.0:
         filters.append(f"scale=iw*{zoom}:ih*{zoom}")
         filters.append(f"crop={W}:{H}")
 
-    # ၃။ Crop
     if crop_ratio != 1.0:
-        cw = int(W * crop_ratio)
-        ch = int(H * crop_ratio)
+        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
         if cw % 2 != 0: cw -= 1
         if ch % 2 != 0: ch -= 1
-        cx = (W - cw) // 2
-        cy = (H - ch) // 2
+        cx = (W - cw) // 2; cy = (H - ch) // 2
         filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
         filters.append(f"scale={W}:{H}")
 
-    # ၄။ Resize
     if target_w > 0 and target_w != W:
         target_h = int(H * target_w / W)
         if target_h % 2 != 0: target_h += 1
         filters.append(f"scale={target_w}:{target_h}")
 
-    # ၅။ Color Adjust
     if brightness != 0 or saturation != 1.0 or contrast != 1.0:
-        filters.append(f"eq=brightness={brightness}:"
-                       f"saturation={saturation}:"
-                       f"contrast={contrast}")
+        filters.append(f"eq=brightness={brightness}:saturation={saturation}:contrast={contrast}")
 
-    # ၆။ Mirror — ဘယ်/ညာ လှန်
     if mirror:
         filters.append("hflip")
 
-    # ၇။ Sharpen
     if sharpen > 0:
         filters.append(f"unsharp=5:5:{sharpen}:5:5:0")
 
-    # ၈။ Fade In / Out
     if fade_in > 0:
         filters.append(f"fade=t=in:st=0:d={fade_in}")
     if fade_out > 0:
@@ -309,22 +290,18 @@ def copyright_bypass(input_video, output_video="bypass.mp4",
     vf = ",".join(filters) if filters else "null"
 
     af_parts = []
-    if fade_in > 0:
-        af_parts.append(f"afade=t=in:st=0:d={fade_in}")
-    if fade_out > 0:
-        af_parts.append(f"afade=t=out:st={dur-fade_out}:d={fade_out}")
+    if fade_in > 0: af_parts.append(f"afade=t=in:st=0:d={fade_in}")
+    if fade_out > 0: af_parts.append(f"afade=t=out:st={dur-fade_out}:d={fade_out}")
     af = ",".join(af_parts) if af_parts else "anull"
 
     cmd = [
         "ffmpeg", "-y", "-i", input_video,
-        "-vf", vf,
-        "-af", af,
+        "-vf", vf, "-af", af,
         "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
         "-c:a", "aac", "-b:a", "128k",
         output_video
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="ignore")
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if r.returncode != 0:
         raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
     return output_video
@@ -554,7 +531,6 @@ else:
     st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
     st.session_state.ref = None
 
-# 🛡️ Copyright Bypass — Filters (2/3/4/5/6/7/8)
 use_bypass = st.toggle("🛡️ Copyright Bypass", value=False,
                         help="Zoom + Crop + Resize + Color + Mirror + Sharpen + Fade")
 
@@ -635,7 +611,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             shutil.copy("temp.mp4", "render.mp4")
     step_times["🎬 Render"] = time.time() - t0
 
-    # 🛡️ Copyright Bypass — Filters (2/3/4/5/6/7/8)
     if use_bypass:
         t0 = time.time()
         with st.spinner("🛡️ Copyright Bypass..."):
@@ -668,17 +643,9 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     """, unsafe_allow_html=True)
 
     for name, t in step_times.items():
-        st.markdown(f"""
-<div class="timer-box">
-    <div class="timer-title">⏱️ TOTAL TIME</div>
-    <div class="timer-value">{total_elapsed:.1f}<span class="timer-unit">sec</span></div>
-</div>
-""", unsafe_allow_html=True)
+        st.markdown(f"<div class='step-timer'>{name} — <b>{t:.1f}s</b></div>", unsafe_allow_html=True)
 
-for name, t in step_times.items():
-    st.markdown(f"<div class='step-timer'>{name} — <b>{t:.1f}s</b></div>", unsafe_allow_html=True)
-
-st.success(f"✅ Done — ⏱️ {total_elapsed:.1f}s")
-st.video("final.mp4")
-with open("final.mp4", "rb") as f:
-    st.download_button("📥 Download", f, file_name="recap.mp4")
+    st.success(f"✅ Done — ⏱️ {total_elapsed:.1f}s")
+    st.video("final.mp4")
+    with open("final.mp4", "rb") as f:
+        st.download_button("📥 Download", f, file_name="recap.mp4")
