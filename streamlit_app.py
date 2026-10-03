@@ -16,7 +16,7 @@ SPACES = [
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-FS, BH, BA = 30, 100, 100
+FS, BH, BA = 30, 100, 200
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
@@ -248,15 +248,15 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-# ===== 🛡️ Copyright Bypass — Mirror + Crop ပဲ =====
+# ===== 🛡️ Copyright Bypass — Mirror + Crop Auto =====
 def video_bypass(input_video, output_video="bypass.mp4",
                  crop_ratio=0.90,
                  mirror=True):
-    """Video Filter — Mirror + Crop ပဲ"""
+    """Video Filter — Mirror + Crop"""
     W, H, dur = vid_info(input_video)
     filters = []
 
-    # ၃။ Crop — 10% ဖြတ်
+    # Crop — 10% ဖြတ်
     if crop_ratio != 1.0:
         cw = int(W * crop_ratio); ch = int(H * crop_ratio)
         if cw % 2 != 0: cw -= 1
@@ -265,7 +265,7 @@ def video_bypass(input_video, output_video="bypass.mp4",
         filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
         filters.append(f"scale={W}:{H}")
 
-    # ၆။ Mirror
+    # Mirror
     if mirror:
         filters.append("hflip")
 
@@ -282,38 +282,6 @@ def video_bypass(input_video, output_video="bypass.mp4",
     if r.returncode != 0:
         raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
     return output_video
-
-
-# ===== 🖼️ Filter Preview — Mirror + Crop ပဲ =====
-def preview_filter(video_path, filter_mode="all",
-                    crop_ratio=0.90, mirror=True):
-    """Filter Preview — Mirror + Crop"""
-    W, H, _ = vid_info(video_path)
-
-    cap = cv2.VideoCapture(video_path)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 30)
-    ok, frame = cap.read()
-    cap.release()
-    if not ok:
-        return None
-
-    img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
-
-    # Crop
-    if filter_mode in ["crop", "all"]:
-        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
-        x = (W - cw) // 2; y = (H - ch) // 2
-        img = img.crop((x, y, x + cw, y + ch)).resize((W, H), Image.LANCZOS)
-
-    # Mirror
-    if filter_mode in ["mirror", "all"]:
-        img = img.transpose(Image.FLIP_LEFT_RIGHT)
-
-    pw = 720
-    ph = int(H * (pw / W))
-    out = f"preview_{filter_mode}.png"
-    img.convert("RGB").resize((pw, ph), Image.LANCZOS).save(out)
-    return out
 
 
 def tts_demo(chunks, ref, space, cb=None):
@@ -540,47 +508,7 @@ else:
     st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
     st.session_state.ref = None
 
-use_bypass = st.toggle("🛡️ Copyright Bypass", value=False,
-                        help="Mirror + Crop — Filter ရွေးပြီး Preview ကြည့်နိုင်")
-
-if use_bypass:
-    st.markdown("**🎨 Filter ရွေးပါ**")
-    bypass_filter = st.radio(
-        "Filter",
-        options=["all", "crop", "mirror"],
-        format_func=lambda x: {
-            "all":    "⚡ Mirror + Crop",
-            "crop":   "✂️ Crop ပဲ",
-            "mirror": "↔️ Mirror ပဲ",
-        }[x],
-        horizontal=True,
-        index=0,
-        label_visibility="collapsed"
-    )
-    
-    # Auto Value — Mirror + Crop
-    bypass_crop = 0.90
-    bypass_mirror = True
-    
-    # Preview
-    if vid:
-        with st.spinner("🖼️ Preview..."):
-            try:
-                vid.seek(0)
-                with open("preview_filter.mp4", "wb") as f: f.write(vid.read())
-                vid.seek(0)
-                prev_img = preview_filter(
-                    "preview_filter.mp4", filter_mode=bypass_filter,
-                    crop_ratio=bypass_crop, mirror=bypass_mirror
-                )
-                if prev_img:
-                    st.image(prev_img, caption=f"Preview — {bypass_filter}", use_container_width=True)
-            except Exception as e:
-                st.warning(f"⚠️ Preview Fail: {e}")
-else:
-    bypass_filter = "none"
-    bypass_crop = 1.0
-    bypass_mirror = False
+# 🛡️ Copyright Bypass — Auto (Mirror + Crop) — UI မပြ
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
     if not script.strip(): st.error("Script paste"); st.stop()
@@ -627,25 +555,15 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             shortest=None, threads=0).run(overwrite_output=True)
     step_times["🎬 Render"] = time.time() - t0
 
-    # ၄။ Bypass — Mirror + Crop
+    # ၄။ Bypass — Mirror + Crop — Auto (မဖျောက်ဘဲ Run)
     t0 = time.time()
-    with st.spinner(f"🛡️ Bypass — {bypass_filter}..."):
-        if use_bypass:
-            if bypass_filter == "crop":
-                v_crop, v_mir = bypass_crop, False
-            elif bypass_filter == "mirror":
-                v_crop, v_mir = 1.0, True
-            else:  # all — Mirror + Crop
-                v_crop, v_mir = bypass_crop, True
-            
-            try:
-                video_bypass("temp.mp4", "bypass.mp4",
-                             crop_ratio=v_crop,
-                             mirror=v_mir)
-            except Exception as e:
-                st.warning(f"⚠️ Bypass Fail: {e}")
-                shutil.copy("temp.mp4", "bypass.mp4")
-        else:
+    with st.spinner("🛡️ Bypass — Mirror + Crop..."):
+        try:
+            video_bypass("temp.mp4", "bypass.mp4",
+                         crop_ratio=0.90,
+                         mirror=True)
+        except Exception as e:
+            st.warning(f"⚠️ Bypass Fail: {e}")
             shutil.copy("temp.mp4", "bypass.mp4")
     step_times["🛡️ Bypass"] = time.time() - t0
 
