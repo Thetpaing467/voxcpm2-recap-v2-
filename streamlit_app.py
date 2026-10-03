@@ -248,18 +248,22 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-def copyright_bypass(input_video, output_video="bypass.mp4",
-                     zoom=1.05, crop_ratio=0.98, target_w=0,
-                     brightness=0.02, saturation=1.05, contrast=1.02,
-                     mirror=False, sharpen=0.5,
-                     fade_in=0.5, fade_out=0.5):
+# ===== 🛡️ Copyright Bypass — Video Only (Subtitle မပါသေး) =====
+def video_bypass(input_video, output_video="bypass.mp4",
+                 zoom=1.05, crop_ratio=0.98,
+                 brightness=0.02, saturation=1.05, contrast=1.02,
+                 mirror=True, sharpen=0.5,
+                 fade_in=0.5, fade_out=0.5):
+    """Video Filter — Subtitle မပါသေး"""
     W, H, dur = vid_info(input_video)
     filters = []
 
+    # ၂။ Subtle Zoom
     if zoom != 1.0:
         filters.append(f"scale=iw*{zoom}:ih*{zoom}")
         filters.append(f"crop={W}:{H}")
 
+    # ၃။ Crop
     if crop_ratio != 1.0:
         cw = int(W * crop_ratio); ch = int(H * crop_ratio)
         if cw % 2 != 0: cw -= 1
@@ -268,20 +272,19 @@ def copyright_bypass(input_video, output_video="bypass.mp4",
         filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
         filters.append(f"scale={W}:{H}")
 
-    if target_w > 0 and target_w != W:
-        target_h = int(H * target_w / W)
-        if target_h % 2 != 0: target_h += 1
-        filters.append(f"scale={target_w}:{target_h}")
-
+    # ၅။ Color Adjust
     if brightness != 0 or saturation != 1.0 or contrast != 1.0:
         filters.append(f"eq=brightness={brightness}:saturation={saturation}:contrast={contrast}")
 
+    # ၆။ Mirror
     if mirror:
         filters.append("hflip")
 
+    # ၇။ Sharpen
     if sharpen > 0:
         filters.append(f"unsharp=5:5:{sharpen}:5:5:0")
 
+    # ၈။ Fade In / Out
     if fade_in > 0:
         filters.append(f"fade=t=in:st=0:d={fade_in}")
     if fade_out > 0:
@@ -297,8 +300,8 @@ def copyright_bypass(input_video, output_video="bypass.mp4",
     cmd = [
         "ffmpeg", "-y", "-i", input_video,
         "-vf", vf, "-af", af,
-        "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c:v", "libx264", "-crf", str(ENC_CRF), "-preset", "ultrafast",
+        "-c:a", "aac", "-b:a", AUDIO_BITRATE,
         output_video
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
@@ -531,27 +534,20 @@ else:
     st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
     st.session_state.ref = None
 
-use_bypass = st.toggle("🛡️ Copyright Bypass", value=False,
-                        help="Zoom + Crop + Resize + Color + Mirror + Sharpen + Fade")
+use_bypass = st.toggle("🛡️ Copyright Bypass (Auto)", value=False,
+                        help="Auto: Zoom 1.05 + Crop 0.98 + Mirror + Color + Sharpen + Fade")
 
 if use_bypass:
-    c1, c2 = st.columns(2)
-    with c1:
-        bypass_zoom = st.slider("🔍 Zoom", 1.0, 1.15, 1.05, 0.01)
-        bypass_crop = st.slider("✂️ Crop Ratio", 0.90, 1.0, 0.98, 0.01)
-        bypass_resize = st.slider("📏 Resize Width", 0, 1920, 1280, 40,
-                                   help="0 = မပြောင်း")
-    with c2:
-        bypass_bright = st.slider("☀️ Brightness", -0.1, 0.1, 0.02, 0.01)
-        bypass_sat = st.slider("🎨 Saturation", 0.9, 1.2, 1.05, 0.01)
-        bypass_sharpen = st.slider("✨ Sharpen", 0.0, 2.0, 0.5, 0.1)
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        bypass_fade_in = st.slider("🌅 Fade In (s)", 0.0, 2.0, 0.5, 0.1)
-        bypass_mirror = st.toggle("↔️ Mirror (ဘယ်/ညာ လှန်)", value=False)
-    with c2:
-        bypass_fade_out = st.slider("🌇 Fade Out (s)", 0.0, 2.0, 0.5, 0.1)
+    st.caption("⚡ Auto Settings — Subtitle မလှန် (Video ပဲ လှန်)")
+    bypass_zoom = 1.05
+    bypass_crop = 0.98
+    bypass_resize = 1280
+    bypass_bright = 0.02
+    bypass_sat = 1.05
+    bypass_sharpen = 0.5
+    bypass_fade_in = 0.5
+    bypass_fade_out = 0.5
+    bypass_mirror = True
 else:
     bypass_zoom = 1.0
     bypass_crop = 1.0
@@ -572,6 +568,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
+    # ၁။ Cut
     t0 = time.time()
     with st.spinner("✂️ Cut..."):
         try:
@@ -582,6 +579,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             st.error(f"❌ Cut: {e}"); st.stop()
     step_times["✂️ Cut"] = time.time() - t0
 
+    # ၂။ TTS
     t0 = time.time()
     pb = st.progress(0); txt = st.empty()
     def cb(i, tot, c): pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}]")
@@ -594,44 +592,46 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
     tempo = max(0.5, min(2.0, adur/vdur))
-    sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
 
+    # ၃။ Video + Audio → temp.mp4 (Subtitle မပါသေး)
     t0 = time.time()
-    with st.spinner("🎬 Render..."):
+    with st.spinner("🎬 Render Base..."):
         vi = ffmpeg.input("input.mp4")
         va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
         ffmpeg.output(vi.video, va, "temp.mp4",
             vcodec='libx264', crf=ENC_CRF, preset='ultrafast', tune='fastdecode',
-            movflags='+faststart', acodec='aac', audio_bitrate=AUDIO_BITRATE,
+            acodec='aac', audio_bitrate=AUDIO_BITRATE,
             shortest=None, threads=0).run(overwrite_output=True)
-        if use_sub and sp:
-            overlay("temp.mp4", sp, "render.mp4", FONT_FILE, FS, pos_y, BH, BA,
-                    box_width_ratio=BOX_WIDTH_RATIO)
-        else:
-            shutil.copy("temp.mp4", "render.mp4")
     step_times["🎬 Render"] = time.time() - t0
 
-    if use_bypass:
-        t0 = time.time()
-        with st.spinner("🛡️ Copyright Bypass..."):
+    # ၄။ Video Bypass (Mirror + Zoom + ...) — Subtitle မပါသေး
+    t0 = time.time()
+    with st.spinner("🛡️ Bypass..."):
+        if use_bypass:
             try:
-                copyright_bypass("render.mp4", "final.mp4",
-                                 zoom=bypass_zoom,
-                                 crop_ratio=bypass_crop,
-                                 target_w=bypass_resize,
-                                 brightness=bypass_bright,
-                                 saturation=bypass_sat,
-                                 contrast=1.02,
-                                 mirror=bypass_mirror,
-                                 sharpen=bypass_sharpen,
-                                 fade_in=bypass_fade_in,
-                                 fade_out=bypass_fade_out)
+                video_bypass("temp.mp4", "bypass.mp4",
+                             zoom=bypass_zoom, crop_ratio=bypass_crop,
+                             brightness=bypass_bright, saturation=bypass_sat,
+                             contrast=1.02, mirror=bypass_mirror,
+                             sharpen=bypass_sharpen,
+                             fade_in=bypass_fade_in, fade_out=bypass_fade_out)
             except Exception as e:
                 st.warning(f"⚠️ Bypass Fail: {e}")
-                shutil.copy("render.mp4", "final.mp4")
-        step_times["🛡️ Bypass"] = time.time() - t0
-    else:
-        shutil.copy("render.mp4", "final.mp4")
+                shutil.copy("temp.mp4", "bypass.mp4")
+        else:
+            shutil.copy("temp.mp4", "bypass.mp4")
+    step_times["🛡️ Bypass"] = time.time() - t0
+
+    # ၅။ Subtitle Overlay — နောက်ဆုံး (Bypass ပြီးမှ)
+    t0 = time.time()
+    with st.spinner("📝 Subtitle Overlay..."):
+        if use_sub:
+            sp = scr_to_srt(script, vdur, "sub.srt")
+            overlay("bypass.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA,
+                    box_width_ratio=BOX_WIDTH_RATIO)
+        else:
+            shutil.copy("bypass.mp4", "final.mp4")
+    step_times["📝 Subtitle"] = time.time() - t0
 
     total_elapsed = time.time() - total_start
 
