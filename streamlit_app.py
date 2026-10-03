@@ -248,18 +248,19 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-# ===== 🛡️ Copyright Bypass — 5 Filters (2/3/4/5/7/8) =====
+# ===== 🛡️ Copyright Bypass — Filters (2/3/4/5/6/7/8) =====
 def copyright_bypass(input_video, output_video="bypass.mp4",
-                     zoom=1.05,
-                     crop_ratio=0.98,
-                     target_w=0,
-                     brightness=0.02,
+                     zoom=1.05,            # ၂။ Subtle Zoom
+                     crop_ratio=0.98,      # ၃။ Crop
+                     target_w=0,           # ၄။ Resize
+                     brightness=0.02,      # ၅။ Color Adjust
                      saturation=1.05,
                      contrast=1.02,
-                     sharpen=0.5,
-                     fade_in=0.5,
+                     mirror=False,         # ၆။ Mirror ⬅️ ပါဝင်
+                     sharpen=0.5,          # ၇။ Sharpen
+                     fade_in=0.5,          # ၈။ Fade In
                      fade_out=0.5):
-    """Copyright Bypass — 5 Filters"""
+    """Copyright Bypass — Filters (2/3/4/5/6/7/8)"""
     W, H, dur = vid_info(input_video)
     filters = []
 
@@ -291,7 +292,11 @@ def copyright_bypass(input_video, output_video="bypass.mp4",
                        f"saturation={saturation}:"
                        f"contrast={contrast}")
 
-    # ၇။ Filter / Effect — Sharpen
+    # ၆။ Mirror — ဘယ်/ညာ လှန်
+    if mirror:
+        filters.append("hflip")
+
+    # ၇။ Sharpen
     if sharpen > 0:
         filters.append(f"unsharp=5:5:{sharpen}:5:5:0")
 
@@ -549,9 +554,9 @@ else:
     st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
     st.session_state.ref = None
 
-# 🛡️ Copyright Bypass — 5 Filters
+# 🛡️ Copyright Bypass — Filters (2/3/4/5/6/7/8)
 use_bypass = st.toggle("🛡️ Copyright Bypass", value=False,
-                        help="Zoom + Crop + Resize + Color + Sharpen + Fade")
+                        help="Zoom + Crop + Resize + Color + Mirror + Sharpen + Fade")
 
 if use_bypass:
     c1, c2 = st.columns(2)
@@ -568,6 +573,7 @@ if use_bypass:
     c1, c2 = st.columns(2)
     with c1:
         bypass_fade_in = st.slider("🌅 Fade In (s)", 0.0, 2.0, 0.5, 0.1)
+        bypass_mirror = st.toggle("↔️ Mirror (ဘယ်/ညာ လှန်)", value=False)
     with c2:
         bypass_fade_out = st.slider("🌇 Fade Out (s)", 0.0, 2.0, 0.5, 0.1)
 else:
@@ -579,6 +585,7 @@ else:
     bypass_sharpen = 0.0
     bypass_fade_in = 0.0
     bypass_fade_out = 0.0
+    bypass_mirror = False
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
     if not script.strip(): st.error("Script paste"); st.stop()
@@ -628,7 +635,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             shutil.copy("temp.mp4", "render.mp4")
     step_times["🎬 Render"] = time.time() - t0
 
-    # 🛡️ Copyright Bypass
+    # 🛡️ Copyright Bypass — Filters (2/3/4/5/6/7/8)
     if use_bypass:
         t0 = time.time()
         with st.spinner("🛡️ Copyright Bypass..."):
@@ -640,6 +647,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
                                  brightness=bypass_bright,
                                  saturation=bypass_sat,
                                  contrast=1.02,
+                                 mirror=bypass_mirror,
                                  sharpen=bypass_sharpen,
                                  fade_in=bypass_fade_in,
                                  fade_out=bypass_fade_out)
@@ -660,9 +668,4 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     """, unsafe_allow_html=True)
 
     for name, t in step_times.items():
-        st.markdown(f"<div class='step-timer'>{name} — <b>{t:.1f}s</b></div>", unsafe_allow_html=True)
-
-    st.success(f"✅ Done — ⏱️ {total_elapsed:.1f}s")
-    st.video("final.mp4")
-    with open("final.mp4", "rb") as f:
-        st.download_button("📥 Download", f, file_name="recap.mp4")
+        st.markdown(f"
