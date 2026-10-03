@@ -668,4 +668,17 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     """, unsafe_allow_html=True)
 
     for name, t in step_times.items():
-        st.markdown(f"
+        st.markdown(f"""
+<div class="timer-box">
+    <div class="timer-title">⏱️ TOTAL TIME</div>
+    <div class="timer-value">{total_elapsed:.1f}<span class="timer-unit">sec</span></div>
+</div>
+""", unsafe_allow_html=True)
+
+for name, t in step_times.items():
+    st.markdown(f"<div class='step-timer'>{name} — <b>{t:.1f}s</b></div>", unsafe_allow_html=True)
+
+st.success(f"✅ Done — ⏱️ {total_elapsed:.1f}s")
+st.video("final.mp4")
+with open("final.mp4", "rb") as f:
+    st.download_button("📥 Download", f, file_name="recap.mp4")
