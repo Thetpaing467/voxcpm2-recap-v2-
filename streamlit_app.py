@@ -16,7 +16,7 @@ SPACES = [
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-FS, BH, BA = 30, 100, 200
+FS, BH, BA = 30, 100, 100
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
@@ -248,6 +248,83 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
+# ===== 🛡️ Copyright Bypass — 5 Filters (2/3/4/5/7/8) =====
+def copyright_bypass(input_video, output_video="bypass.mp4",
+                     zoom=1.05,
+                     crop_ratio=0.98,
+                     target_w=0,
+                     brightness=0.02,
+                     saturation=1.05,
+                     contrast=1.02,
+                     sharpen=0.5,
+                     fade_in=0.5,
+                     fade_out=0.5):
+    """Copyright Bypass — 5 Filters"""
+    W, H, dur = vid_info(input_video)
+    filters = []
+
+    # ၂။ Subtle Zoom
+    if zoom != 1.0:
+        filters.append(f"scale=iw*{zoom}:ih*{zoom}")
+        filters.append(f"crop={W}:{H}")
+
+    # ၃။ Crop
+    if crop_ratio != 1.0:
+        cw = int(W * crop_ratio)
+        ch = int(H * crop_ratio)
+        if cw % 2 != 0: cw -= 1
+        if ch % 2 != 0: ch -= 1
+        cx = (W - cw) // 2
+        cy = (H - ch) // 2
+        filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
+        filters.append(f"scale={W}:{H}")
+
+    # ၄။ Resize
+    if target_w > 0 and target_w != W:
+        target_h = int(H * target_w / W)
+        if target_h % 2 != 0: target_h += 1
+        filters.append(f"scale={target_w}:{target_h}")
+
+    # ၅။ Color Adjust
+    if brightness != 0 or saturation != 1.0 or contrast != 1.0:
+        filters.append(f"eq=brightness={brightness}:"
+                       f"saturation={saturation}:"
+                       f"contrast={contrast}")
+
+    # ၇။ Filter / Effect — Sharpen
+    if sharpen > 0:
+        filters.append(f"unsharp=5:5:{sharpen}:5:5:0")
+
+    # ၈။ Fade In / Out
+    if fade_in > 0:
+        filters.append(f"fade=t=in:st=0:d={fade_in}")
+    if fade_out > 0:
+        filters.append(f"fade=t=out:st={dur-fade_out}:d={fade_out}")
+
+    vf = ",".join(filters) if filters else "null"
+
+    af_parts = []
+    if fade_in > 0:
+        af_parts.append(f"afade=t=in:st=0:d={fade_in}")
+    if fade_out > 0:
+        af_parts.append(f"afade=t=out:st={dur-fade_out}:d={fade_out}")
+    af = ",".join(af_parts) if af_parts else "anull"
+
+    cmd = [
+        "ffmpeg", "-y", "-i", input_video,
+        "-vf", vf,
+        "-af", af,
+        "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
+        "-c:a", "aac", "-b:a", "128k",
+        output_video
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       encoding="utf-8", errors="ignore")
+    if r.returncode != 0:
+        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+    return output_video
+
+
 def tts_demo(chunks, ref, space, cb=None):
     cl = Client(space); files = []; rf = handle_file(ref) if ref else None
     for i, c in enumerate(chunks):
@@ -412,7 +489,6 @@ st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow
 st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
-# ===== Step 1 — Script (ဖျက်ပြီး) =====
 if "script" not in st.session_state: st.session_state.script = ""
 script = st.text_area("Script", value=st.session_state.script, height=180,
                        label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
@@ -425,13 +501,11 @@ with c2:
         st.session_state.script = ""; st.rerun()
 st.divider()
 
-# ===== Step 2 — Video =====
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# ===== Step 3 — Subtitle =====
 st.subheader("📝 Step 3 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
@@ -456,7 +530,6 @@ if vid and use_sub:
             st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-# ===== Step 4 — Generate =====
 st.subheader("🚀 Step 4 — Generate")
 
 use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True,
@@ -475,6 +548,37 @@ if use_voxcpm:
 else:
     st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
     st.session_state.ref = None
+
+# 🛡️ Copyright Bypass — 5 Filters
+use_bypass = st.toggle("🛡️ Copyright Bypass", value=False,
+                        help="Zoom + Crop + Resize + Color + Sharpen + Fade")
+
+if use_bypass:
+    c1, c2 = st.columns(2)
+    with c1:
+        bypass_zoom = st.slider("🔍 Zoom", 1.0, 1.15, 1.05, 0.01)
+        bypass_crop = st.slider("✂️ Crop Ratio", 0.90, 1.0, 0.98, 0.01)
+        bypass_resize = st.slider("📏 Resize Width", 0, 1920, 1280, 40,
+                                   help="0 = မပြောင်း")
+    with c2:
+        bypass_bright = st.slider("☀️ Brightness", -0.1, 0.1, 0.02, 0.01)
+        bypass_sat = st.slider("🎨 Saturation", 0.9, 1.2, 1.05, 0.01)
+        bypass_sharpen = st.slider("✨ Sharpen", 0.0, 2.0, 0.5, 0.1)
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        bypass_fade_in = st.slider("🌅 Fade In (s)", 0.0, 2.0, 0.5, 0.1)
+    with c2:
+        bypass_fade_out = st.slider("🌇 Fade Out (s)", 0.0, 2.0, 0.5, 0.1)
+else:
+    bypass_zoom = 1.0
+    bypass_crop = 1.0
+    bypass_resize = 0
+    bypass_bright = 0.0
+    bypass_sat = 1.0
+    bypass_sharpen = 0.0
+    bypass_fade_in = 0.0
+    bypass_fade_out = 0.0
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
     if not script.strip(): st.error("Script paste"); st.stop()
@@ -518,11 +622,33 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             movflags='+faststart', acodec='aac', audio_bitrate=AUDIO_BITRATE,
             shortest=None, threads=0).run(overwrite_output=True)
         if use_sub and sp:
-            overlay("temp.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA,
+            overlay("temp.mp4", sp, "render.mp4", FONT_FILE, FS, pos_y, BH, BA,
                     box_width_ratio=BOX_WIDTH_RATIO)
         else:
-            shutil.copy("temp.mp4", "final.mp4")
+            shutil.copy("temp.mp4", "render.mp4")
     step_times["🎬 Render"] = time.time() - t0
+
+    # 🛡️ Copyright Bypass
+    if use_bypass:
+        t0 = time.time()
+        with st.spinner("🛡️ Copyright Bypass..."):
+            try:
+                copyright_bypass("render.mp4", "final.mp4",
+                                 zoom=bypass_zoom,
+                                 crop_ratio=bypass_crop,
+                                 target_w=bypass_resize,
+                                 brightness=bypass_bright,
+                                 saturation=bypass_sat,
+                                 contrast=1.02,
+                                 sharpen=bypass_sharpen,
+                                 fade_in=bypass_fade_in,
+                                 fade_out=bypass_fade_out)
+            except Exception as e:
+                st.warning(f"⚠️ Bypass Fail: {e}")
+                shutil.copy("render.mp4", "final.mp4")
+        step_times["🛡️ Bypass"] = time.time() - t0
+    else:
+        shutil.copy("render.mp4", "final.mp4")
 
     total_elapsed = time.time() - total_start
 
