@@ -16,7 +16,7 @@ SPACES = [
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-FS, BH, BA = 30, 100, 200
+FS, BH, BA = 30, 100, 100
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
@@ -248,20 +248,42 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-# ===== 🛡️ Copyright Bypass — Video Only (Subtitle မပါသေး) =====
+# ===== 🛡️ Copyright Bypass — Video Only =====
 def video_bypass(input_video, output_video="bypass.mp4",
                  zoom=1.05, crop_ratio=0.98,
                  brightness=0.02, saturation=1.05, contrast=1.02,
                  mirror=True, sharpen=0.5,
-                 fade_in=0.5, fade_out=0.5):
-    """Video Filter — Subtitle မပါသေး"""
+                 fade_in=0.5, fade_out=0.5,
+                 zoom_mode="in"):
+    """Video Filter — Zoom In/Out/InOut + Crop + Mirror + Color + Sharpen + Fade"""
     W, H, dur = vid_info(input_video)
     filters = []
 
-    # ၂။ Subtle Zoom
-    if zoom != 1.0:
-        filters.append(f"scale=iw*{zoom}:ih*{zoom}")
-        filters.append(f"crop={W}:{H}")
+    # ၂။ Zoom — Mode အလိုက်
+    if zoom_mode == "in":
+        frames = max(1, int(dur * 25))
+        filters.append(
+            f"zoompan=z='min(zoom+0.0015,{zoom})':"
+            f"d={frames}:s={W}x{H}:fps=25"
+        )
+    elif zoom_mode == "out":
+        frames = max(1, int(dur * 25))
+        filters.append(
+            f"zoompan=z='if(lte(zoom,1.0),{zoom},max(1.001,zoom-0.0015))':"
+            f"d={frames}:s={W}x{H}:fps=25"
+        )
+    elif zoom_mode == "inout":
+        frames = max(1, int(dur * 25))
+        half = frames // 2
+        filters.append(
+            f"zoompan=z='if(lte(on,{half}),min(zoom+0.0015,{zoom}),"
+            f"max(1.001,zoom-0.0015))':"
+            f"d={frames}:s={W}x{H}:fps=25"
+        )
+    else:
+        if zoom != 1.0:
+            filters.append(f"scale=iw*{zoom}:ih*{zoom}")
+            filters.append(f"crop={W}:{H}")
 
     # ၃။ Crop
     if crop_ratio != 1.0:
@@ -272,7 +294,7 @@ def video_bypass(input_video, output_video="bypass.mp4",
         filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
         filters.append(f"scale={W}:{H}")
 
-    # ၅။ Color Adjust
+    # ၅။ Color
     if brightness != 0 or saturation != 1.0 or contrast != 1.0:
         filters.append(f"eq=brightness={brightness}:saturation={saturation}:contrast={contrast}")
 
@@ -284,7 +306,7 @@ def video_bypass(input_video, output_video="bypass.mp4",
     if sharpen > 0:
         filters.append(f"unsharp=5:5:{sharpen}:5:5:0")
 
-    # ၈။ Fade In / Out
+    # ၈။ Fade
     if fade_in > 0:
         filters.append(f"fade=t=in:st=0:d={fade_in}")
     if fade_out > 0:
@@ -534,10 +556,22 @@ else:
     st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
     st.session_state.ref = None
 
-use_bypass = st.toggle("🛡️ Copyright Bypass (Auto)", value=False,
-                        help="Auto: Zoom 1.05 + Crop 0.98 + Mirror + Color + Sharpen + Fade")
+use_bypass = st.toggle("🛡️ Copyright Bypass", value=False,
+                        help="Auto: Zoom + Crop + Mirror + Color + Sharpen + Fade")
 
 if use_bypass:
+    bypass_zoom_mode = st.radio(
+        "🎥 Zoom Mode",
+        options=["static", "in", "out", "inout"],
+        format_func=lambda x: {
+            "static": "📌 Static",
+            "in":     "🔍 Zoom In",
+            "out":    "🔎 Zoom Out",
+            "inout":  "🔄 In → Out",
+        }[x],
+        horizontal=True,
+        index=1
+    )
     st.caption("⚡ Auto Settings — Subtitle မလှန် (Video ပဲ လှန်)")
     bypass_zoom = 1.05
     bypass_crop = 0.98
@@ -549,6 +583,7 @@ if use_bypass:
     bypass_fade_out = 0.5
     bypass_mirror = True
 else:
+    bypass_zoom_mode = "static"
     bypass_zoom = 1.0
     bypass_crop = 1.0
     bypass_resize = 0
@@ -593,7 +628,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
     tempo = max(0.5, min(2.0, adur/vdur))
 
-    # ၃။ Video + Audio → temp.mp4 (Subtitle မပါသေး)
+    # ၃။ Video + Audio
     t0 = time.time()
     with st.spinner("🎬 Render Base..."):
         vi = ffmpeg.input("input.mp4")
@@ -604,7 +639,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             shortest=None, threads=0).run(overwrite_output=True)
     step_times["🎬 Render"] = time.time() - t0
 
-    # ၄။ Video Bypass (Mirror + Zoom + ...) — Subtitle မပါသေး
+    # ၄။ Video Bypass
     t0 = time.time()
     with st.spinner("🛡️ Bypass..."):
         if use_bypass:
@@ -614,7 +649,8 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
                              brightness=bypass_bright, saturation=bypass_sat,
                              contrast=1.02, mirror=bypass_mirror,
                              sharpen=bypass_sharpen,
-                             fade_in=bypass_fade_in, fade_out=bypass_fade_out)
+                             fade_in=bypass_fade_in, fade_out=bypass_fade_out,
+                             zoom_mode=bypass_zoom_mode)
             except Exception as e:
                 st.warning(f"⚠️ Bypass Fail: {e}")
                 shutil.copy("temp.mp4", "bypass.mp4")
@@ -622,7 +658,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             shutil.copy("temp.mp4", "bypass.mp4")
     step_times["🛡️ Bypass"] = time.time() - t0
 
-    # ၅။ Subtitle Overlay — နောက်ဆုံး (Bypass ပြီးမှ)
+    # ၅။ Subtitle Overlay — နောက်ဆုံး
     t0 = time.time()
     with st.spinner("📝 Subtitle Overlay..."):
         if use_sub:
