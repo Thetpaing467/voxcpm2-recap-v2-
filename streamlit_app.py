@@ -2,7 +2,7 @@ import streamlit as st
 import os, re, ffmpeg, shutil, subprocess, asyncio, time
 import concurrent.futures
 import edge_tts
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 import cv2
 from gradio_client import Client, handle_file
 
@@ -16,7 +16,7 @@ SPACES = [
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-FS, BH, BA = 30, 100, 100
+FS, BH, BA = 30, 100, 200
 ENC_PRESET = "ultrafast"
 ENC_CRF = 23
 AUDIO_BITRATE = "128k"
@@ -250,42 +250,18 @@ def split_scr(t, mc=TTS_CHUNK):
 
 # ===== 🛡️ Copyright Bypass — Video Only =====
 def video_bypass(input_video, output_video="bypass.mp4",
-                 zoom=1.05, crop_ratio=0.98,
-                 brightness=0.02, saturation=1.05, contrast=1.02,
-                 mirror=True, sharpen=0.5,
-                 fade_in=0.5, fade_out=0.5,
-                 zoom_mode="in"):
-    """Video Filter — Zoom In/Out/InOut + Crop + Mirror + Color + Sharpen + Fade"""
+                 zoom=1.15, crop_ratio=0.90,
+                 brightness=0.05, saturation=1.15, contrast=1.10,
+                 mirror=True, sharpen=1.0,
+                 fade_in=1.0, fade_out=1.0):
+    """Video Filter — Strong Values"""
     W, H, dur = vid_info(input_video)
     filters = []
 
-    # ၂။ Zoom — Mode အလိုက်
-    if zoom_mode == "in":
-        frames = max(1, int(dur * 25))
-        filters.append(
-            f"zoompan=z='min(zoom+0.0015,{zoom})':"
-            f"d={frames}:s={W}x{H}:fps=25"
-        )
-    elif zoom_mode == "out":
-        frames = max(1, int(dur * 25))
-        filters.append(
-            f"zoompan=z='if(lte(zoom,1.0),{zoom},max(1.001,zoom-0.0015))':"
-            f"d={frames}:s={W}x{H}:fps=25"
-        )
-    elif zoom_mode == "inout":
-        frames = max(1, int(dur * 25))
-        half = frames // 2
-        filters.append(
-            f"zoompan=z='if(lte(on,{half}),min(zoom+0.0015,{zoom}),"
-            f"max(1.001,zoom-0.0015))':"
-            f"d={frames}:s={W}x{H}:fps=25"
-        )
-    else:
-        if zoom != 1.0:
-            filters.append(f"scale=iw*{zoom}:ih*{zoom}")
-            filters.append(f"crop={W}:{H}")
+    if zoom != 1.0:
+        filters.append(f"scale=iw*{zoom}:ih*{zoom}")
+        filters.append(f"crop={W}:{H}")
 
-    # ၃။ Crop
     if crop_ratio != 1.0:
         cw = int(W * crop_ratio); ch = int(H * crop_ratio)
         if cw % 2 != 0: cw -= 1
@@ -294,19 +270,15 @@ def video_bypass(input_video, output_video="bypass.mp4",
         filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
         filters.append(f"scale={W}:{H}")
 
-    # ၅။ Color
     if brightness != 0 or saturation != 1.0 or contrast != 1.0:
         filters.append(f"eq=brightness={brightness}:saturation={saturation}:contrast={contrast}")
 
-    # ၆။ Mirror
     if mirror:
         filters.append("hflip")
 
-    # ၇။ Sharpen
     if sharpen > 0:
         filters.append(f"unsharp=5:5:{sharpen}:5:5:0")
 
-    # ၈။ Fade
     if fade_in > 0:
         filters.append(f"fade=t=in:st=0:d={fade_in}")
     if fade_out > 0:
@@ -330,6 +302,59 @@ def video_bypass(input_video, output_video="bypass.mp4",
     if r.returncode != 0:
         raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
     return output_video
+
+
+# ===== 🖼️ Filter Preview =====
+def preview_filter(video_path, filter_mode="none",
+                    zoom=1.15, crop_ratio=0.90,
+                    brightness=0.05, saturation=1.15,
+                    mirror=True, sharpen=1.0):
+    """Filter ၁ ခု — Preview PNG"""
+    W, H, _ = vid_info(video_path)
+
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 30)
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        return None
+
+    img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
+
+    if filter_mode == "zoom":
+        cw = int(W / zoom); ch = int(H / zoom)
+        x = (W - cw) // 2; y = (H - ch) // 2
+        img = img.crop((x, y, x + cw, y + ch)).resize((W, H), Image.LANCZOS)
+
+    elif filter_mode == "crop":
+        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
+        x = (W - cw) // 2; y = (H - ch) // 2
+        img = img.crop((x, y, x + cw, y + ch)).resize((W, H), Image.LANCZOS)
+
+    elif filter_mode == "mirror":
+        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+
+    elif filter_mode == "color":
+        img = ImageEnhance.Brightness(img).enhance(1 + brightness * 2)
+        img = ImageEnhance.Color(img).enhance(saturation)
+
+    elif filter_mode == "sharpen":
+        img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=int(sharpen * 100), threshold=3))
+
+    elif filter_mode == "all":
+        cw = int(W / zoom); ch = int(H / zoom)
+        x = (W - cw) // 2; y = (H - ch) // 2
+        img = img.crop((x, y, x + cw, y + ch)).resize((W, H), Image.LANCZOS)
+        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        img = ImageEnhance.Brightness(img).enhance(1 + brightness * 2)
+        img = ImageEnhance.Color(img).enhance(saturation)
+        img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=int(sharpen * 100), threshold=3))
+
+    pw = 720
+    ph = int(H * (pw / W))
+    out = f"preview_{filter_mode}.png"
+    img.convert("RGB").resize((pw, ph), Image.LANCZOS).save(out)
+    return out
 
 
 def tts_demo(chunks, ref, space, cb=None):
@@ -557,33 +582,56 @@ else:
     st.session_state.ref = None
 
 use_bypass = st.toggle("🛡️ Copyright Bypass", value=False,
-                        help="Auto: Zoom + Crop + Mirror + Color + Sharpen + Fade")
+                        help="Filter ရွေးပြီး — Preview ကြည့်နိုင်")
 
 if use_bypass:
-    bypass_zoom_mode = st.radio(
-        "🎥 Zoom Mode",
-        options=["static", "in", "out", "inout"],
+    st.markdown("**🎨 Filter ရွေးပါ**")
+    bypass_filter = st.radio(
+        "Filter",
+        options=["all", "zoom", "crop", "mirror", "color", "sharpen"],
         format_func=lambda x: {
-            "static": "📌 Static",
-            "in":     "🔍 Zoom In",
-            "out":    "🔎 Zoom Out",
-            "inout":  "🔄 In → Out",
+            "all":     "⚡ All",
+            "zoom":    "🔍 Zoom",
+            "crop":    "✂️ Crop",
+            "mirror":  "↔️ Mirror",
+            "color":   "🎨 Color",
+            "sharpen": "✨ Sharpen",
         }[x],
         horizontal=True,
-        index=1
+        index=0,
+        label_visibility="collapsed"
     )
-    st.caption("⚡ Auto Settings — Subtitle မလှန် (Video ပဲ လှန်)")
-    bypass_zoom = 1.05
-    bypass_crop = 0.98
+    
+    # Auto Value — ပြင်းထန်
+    bypass_zoom = 1.15
+    bypass_crop = 0.90
     bypass_resize = 1280
-    bypass_bright = 0.02
-    bypass_sat = 1.05
-    bypass_sharpen = 0.5
-    bypass_fade_in = 0.5
-    bypass_fade_out = 0.5
+    bypass_bright = 0.05
+    bypass_sat = 1.15
+    bypass_sharpen = 1.0
+    bypass_fade_in = 1.0
+    bypass_fade_out = 1.0
     bypass_mirror = True
+    
+    # Preview
+    if vid:
+        with st.spinner("🖼️ Preview..."):
+            try:
+                vid.seek(0)
+                with open("preview_filter.mp4", "wb") as f: f.write(vid.read())
+                vid.seek(0)
+                prev_img = preview_filter(
+                    "preview_filter.mp4", filter_mode=bypass_filter,
+                    zoom=bypass_zoom, crop_ratio=bypass_crop,
+                    brightness=bypass_bright, saturation=bypass_sat,
+                    mirror=bypass_mirror, sharpen=bypass_sharpen
+                )
+                if prev_img:
+                    st.image(prev_img, caption=f"Preview — {bypass_filter}", use_container_width=True)
+            except Exception as e:
+                st.warning(f"⚠️ Preview Fail: {e}")
 else:
-    bypass_zoom_mode = "static"
+    bypass_filter = "none"
     bypass_zoom = 1.0
     bypass_crop = 1.0
     bypass_resize = 0
@@ -639,18 +687,36 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             shortest=None, threads=0).run(overwrite_output=True)
     step_times["🎬 Render"] = time.time() - t0
 
-    # ၄။ Video Bypass
+    # ၄။ Bypass — Filter အလိုက်
     t0 = time.time()
-    with st.spinner("🛡️ Bypass..."):
+    with st.spinner(f"🛡️ Bypass — {bypass_filter}..."):
         if use_bypass:
+            if bypass_filter == "zoom":
+                v_zoom, v_crop, v_mir, v_sharp = bypass_zoom, 1.0, False, 0
+                v_bright, v_sat = 0, 1.0
+            elif bypass_filter == "crop":
+                v_zoom, v_crop, v_mir, v_sharp = 1.0, bypass_crop, False, 0
+                v_bright, v_sat = 0, 1.0
+            elif bypass_filter == "mirror":
+                v_zoom, v_crop, v_mir, v_sharp = 1.0, 1.0, True, 0
+                v_bright, v_sat = 0, 1.0
+            elif bypass_filter == "color":
+                v_zoom, v_crop, v_mir, v_sharp = 1.0, 1.0, False, 0
+                v_bright, v_sat = bypass_bright, bypass_sat
+            elif bypass_filter == "sharpen":
+                v_zoom, v_crop, v_mir, v_sharp = 1.0, 1.0, False, bypass_sharpen
+                v_bright, v_sat = 0, 1.0
+            else:  # all
+                v_zoom, v_crop, v_mir, v_sharp = bypass_zoom, bypass_crop, True, bypass_sharpen
+                v_bright, v_sat = bypass_bright, bypass_sat
+            
             try:
                 video_bypass("temp.mp4", "bypass.mp4",
-                             zoom=bypass_zoom, crop_ratio=bypass_crop,
-                             brightness=bypass_bright, saturation=bypass_sat,
-                             contrast=1.02, mirror=bypass_mirror,
-                             sharpen=bypass_sharpen,
-                             fade_in=bypass_fade_in, fade_out=bypass_fade_out,
-                             zoom_mode=bypass_zoom_mode)
+                             zoom=v_zoom, crop_ratio=v_crop,
+                             brightness=v_bright, saturation=v_sat,
+                             contrast=1.10, mirror=v_mir,
+                             sharpen=v_sharp,
+                             fade_in=bypass_fade_in, fade_out=bypass_fade_out)
             except Exception as e:
                 st.warning(f"⚠️ Bypass Fail: {e}")
                 shutil.copy("temp.mp4", "bypass.mp4")
@@ -658,7 +724,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             shutil.copy("temp.mp4", "bypass.mp4")
     step_times["🛡️ Bypass"] = time.time() - t0
 
-    # ၅။ Subtitle Overlay — နောက်ဆုံး
+    # ၅။ Subtitle Overlay
     t0 = time.time()
     with st.spinner("📝 Subtitle Overlay..."):
         if use_sub:
