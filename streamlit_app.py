@@ -607,18 +607,11 @@ vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility=
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# Step 3 — TikTok Neon Border
-st.subheader("✨ Step 3 — TikTok Neon Border")
-use_neon = st.toggle("✨ TikTok Neon Border ထည့်မလား?", value=True)
-if use_neon:
-    neon_thickness = st.slider("📏 Border အထူ", 15, 60, 30, 1)
-    neon_animated = st.toggle("🎬 Animated (အလင်းတန်း ပတ်ပြေး)", value=True)
-    neon_speed = st.slider("⚡ ပတ်နှုန်း", 0.3, 3.0, 1.0, 0.1)
-else:
-    neon_thickness = 30
-    neon_speed = 1.0
-    neon_animated = False
-st.divider()
+# TikTok Neon Border — UI မပြဘဲ နောက်ကွယ်မှာ Auto (ပုံသေ)
+use_neon = True
+neon_animated = True
+neon_thickness = 15
+neon_speed = 0.4
 
 # Step 4 — Subtitle
 st.subheader("📝 Step 4 — Subtitle")
