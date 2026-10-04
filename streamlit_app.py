@@ -17,8 +17,8 @@ PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
 FS, BH, BA = 30, 100, 200
-ENC_PRESET = "fast"
-ENC_CRF = 18
+ENC_PRESET = "ultrafast"
+ENC_CRF = 23
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 TTS_WORKERS = 3
@@ -30,10 +30,6 @@ WHISPER_LANG = "my"
 BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
 CORNER_RADIUS = 20
-
-TIKTOK_CYAN = "#25F4EE"
-TIKTOK_MAGENTA = "#FE2C55"
-TIKTOK_BLACK = "#000000"
 
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
@@ -90,21 +86,16 @@ if not st.session_state.auth:
                 st.error("Password မှား")
     st.stop()
 
-
-# ==================== Utility Functions ====================
-
 def vid_info(p):
     pr = ffmpeg.probe(p)
     v = next(s for s in pr['streams'] if s['codec_type'] == 'video')
     return int(v['width']), int(v['height']), float(pr['format']['duration'])
-
 
 def t2s(s):
     ms = int(round((s - int(s)) * 1000)); tot = int(s)
     if ms >= 1000: tot += 1; ms = 0
     h, r = divmod(tot, 3600); m, sec = divmod(r, 60)
     return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
-
 
 def s2t(ts):
     ts = ts.strip()
@@ -113,7 +104,6 @@ def s2t(ts):
         h, mi, se, ms = m.groups()
         return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3,'0'))/1000
     return None
-
 
 def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
                 box_width_ratio=BOX_WIDTH_RATIO,
@@ -161,7 +151,6 @@ def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
     img.save(out, "PNG")
     return out
 
-
 def scr_to_srt(scr, dur, path, mc=30):
     sents = [s.strip()+"။" for s in scr.replace("။","။|").split("|") if s.strip()]
     if not sents: return None
@@ -185,7 +174,6 @@ def scr_to_srt(scr, dur, path, mc=30):
             f.write(f"{i}\n{t2s(cur)} --> {t2s(cur+d)}\n{p}\n\n"); cur += d
     return path
 
-
 def parse_srt(path):
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read().replace("\r\n","\n").replace("\r","\n")
@@ -202,7 +190,6 @@ def parse_srt(path):
         idx = ls.index(ts); txt = " ".join(ls[idx+1:]).strip()
         if txt: segs.append({"start": a, "end": b, "text": txt})
     return segs
-
 
 def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100,
             box_width_ratio=BOX_WIDTH_RATIO):
@@ -238,7 +225,6 @@ def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100,
         except: pass
     return op
 
-
 def split_scr(t, mc=TTS_CHUNK):
     sents = [s.strip()+"။" for s in t.replace("။","။|").split("|") if s.strip()]
     out, cur = [], ""
@@ -253,9 +239,9 @@ def split_scr(t, mc=TTS_CHUNK):
     if cur: out.append(cur)
     return out
 
-
 def video_bypass(input_video, output_video="bypass.mp4",
-                 crop_ratio=0.95, mirror=True):
+                 crop_ratio=0.88, mirror=True):
+    """Video Filter — Mirror + Crop (ဘေးဘောင်ညှပ်ပြီး လည်အောင်လုပ်ရန်)"""
     W, H, dur = vid_info(input_video)
     filters = []
 
@@ -265,6 +251,7 @@ def video_bypass(input_video, output_video="bypass.mp4",
         if ch % 2 != 0: ch -= 1
         cx = (W - cw) // 2; cy = (H - ch) // 2
         filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
+        filters.append(f"scale={W}:{H}")
 
     if mirror:
         filters.append("hflip")
@@ -274,188 +261,14 @@ def video_bypass(input_video, output_video="bypass.mp4",
     cmd = [
         "ffmpeg", "-y", "-i", input_video,
         "-vf", vf,
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-        "-c:a", "copy", output_video
+        "-c:v", "libx264", "-crf", str(ENC_CRF), "-preset", "ultrafast",
+        "-c:a", "copy",
+        output_video
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if r.returncode != 0:
         raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
     return output_video
-
-
-# ==================== TikTok Neon Border ====================
-
-def bypass_and_neon(input_video, output_video,
-                    crop_ratio=0.95, mirror=True, thickness=30):
-    """Bypass + Static Neon Border — ၃ လွှာ"""
-    W, H, dur = vid_info(input_video)
-    pad = thickness
-    filters = []
-
-    if crop_ratio != 1.0:
-        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
-        if cw % 2 != 0: cw -= 1
-        if ch % 2 != 0: ch -= 1
-        cx = (W - cw) // 2; cy = (H - ch) // 2
-        filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
-
-    if mirror:
-        filters.append("hflip")
-
-    filters.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
-    filters.append(f"drawbox=x=0:y=0:w={W}:h={H}:color={TIKTOK_BLACK}@1.0:t={pad}:replace=0")
-    filters.append(f"drawbox=x=0:y=0:w={W}:h={H}:color={TIKTOK_CYAN}@1.0:t={max(3, pad//3)}:replace=0")
-    filters.append(f"drawbox=x={pad}:y={pad}:w={W-2*pad}:h={H-2*pad}:color={TIKTOK_MAGENTA}@1.0:t={max(3, pad//3)}:replace=0")
-
-    vf = ",".join(filters)
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_video,
-        "-vf", vf,
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-        "-c:a", "copy", output_video
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
-    return output_video
-
-
-def bypass_and_neon_running_dot(input_video, output_video,
-                                crop_ratio=0.95, mirror=True,
-                                thickness=30, speed=1.0,
-                                dot_size=50):
-    """
-    Running Dot — မျှားဦး ဘောင်အတိုင်း ပတ်ချာလည် လည်ပတ်
-    - Cyan မျှားဦး (clockwise)
-    - Magenta မျှားဦး (counter-clockwise)
-    """
-    W, H, dur = vid_info(input_video)
-    pad = thickness
-    pre_filters = []
-
-    if crop_ratio != 1.0:
-        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
-        if cw % 2 != 0: cw -= 1
-        if ch % 2 != 0: ch -= 1
-        cx = (W - cw) // 2; cy = (H - ch) // 2
-        pre_filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
-
-    if mirror:
-        pre_filters.append("hflip")
-
-    pre_filters.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
-    vf = ",".join(pre_filters)
-
-    # 🎯 မျှားဦး လည်ပတ်မှု — ၄ ခြမ်း
-    # Phase 0-1: Top    (x: 0→W,  y: 0)
-    # Phase 1-2: Right  (x: W,    y: 0→H)
-    # Phase 2-3: Bottom (x: W→0,  y: H)
-    # Phase 3-4: Left   (x: 0,    y: H→0)
-
-    period = 4.0  # ၄ စက္ကန့် ၁ ပတ်
-
-    # x coordinate
-    x_expr = (
-        f"if(lt(mod(t*{speed},{period}),1),"
-        f"mod(t*{speed},{period})*({W}-{dot_size}),"
-        f"if(lt(mod(t*{speed},{period}),2),{W}-{dot_size},"
-        f"if(lt(mod(t*{speed},{period}),3),"
-        f"({W}-{dot_size})*(3-mod(t*{speed},{period})),"
-        f"0)))"
-    )
-
-    # y coordinate
-    y_expr = (
-        f"if(lt(mod(t*{speed},{period}),1),0,"
-        f"if(lt(mod(t*{speed},{period}),2),"
-        f"({H}-{dot_size})*(mod(t*{speed},{period})-1),"
-        f"if(lt(mod(t*{speed},{period}),3),{H}-{dot_size},"
-        f"({H}-{dot_size})*(4-mod(t*{speed},{period}))))"
-    )
-
-    # ✅ Filter chain
-    fc = (
-        f"[0:v]{vf}[v0];"
-
-        # အနက်ရောင် border
-        f"[v0]drawbox=x=0:y=0:w={W}:h={H}:"
-        f"color={TIKTOK_BLACK}@1.0:t={pad}:replace=0[v1];"
-
-        # Cyan border — အပြင်ဘက်
-        f"[v1]drawbox=x=0:y=0:w={W}:h={H}:"
-        f"color={TIKTOK_CYAN}@0.6:t={max(3, pad//3)}:replace=0[v2];"
-
-        # Magenta border — အတွင်းဘက်
-        f"[v2]drawbox=x={pad}:y={pad}:w={W-2*pad}:h={H-2*pad}:"
-        f"color={TIKTOK_MAGENTA}@0.6:t={max(3, pad//3)}:replace=0[v3];"
-
-        # ✅ Cyan မျှားဦး — clockwise
-        f"[v3]drawbox=x='{x_expr}':y='{y_expr}':"
-        f"w={dot_size}:h={dot_size}:"
-        f"color={TIKTOK_CYAN}@1.0:t=fill:replace=0[v4];"
-
-        # ✅ Magenta မျှားဦး — counter-clockwise
-        f"[v4]drawbox=x='{W}-{dot_size}-({x_expr})':"
-        f"y='{H}-{dot_size}-({y_expr})':"
-        f"w={dot_size}:h={dot_size}:"
-        f"color={TIKTOK_MAGENTA}@1.0:t=fill:replace=0[outv]"
-    )
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_video,
-        "-filter_complex", fc,
-        "-map", "[outv]", "-map", "0:a?",
-        "-c:v", "libx264", "-crf", "18",
-        "-preset", "fast", "-tune", "fastdecode",
-        "-c:a", "copy", output_video
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise Exception(f"Running Dot: {(r.stderr or '')[-500:]}")
-    return output_video
-
-
-# ==================== Preview ====================
-
-def draw_tiktok_border_preview(img, thickness=30, dot_size=50, phase=0.0):
-    """Preview frame ပေါ်မှာ TikTok Border + မျှားဦး ဆွဲ"""
-    d = ImageDraw.Draw(img, "RGBA")
-    W, H = img.size
-    inner_c = max(3, thickness // 3)
-
-    # 1. Black border
-    d.rectangle([0, 0, W - 1, H - 1],
-                outline=(0, 0, 0, 255), width=thickness)
-
-    # 2. Cyan border
-    d.rectangle([0, 0, W - 1, H - 1],
-                outline=(37, 244, 238, 255), width=inner_c)
-
-    # 3. Magenta border
-    offset = thickness
-    d.rectangle([offset, offset, W - 1 - offset, H - 1 - offset],
-                outline=(254, 44, 85, 255), width=inner_c)
-
-    # 4. မျှားဦး (Preview မှာ phase နဲ့ ပြ)
-    import math
-    # Cyan မျှားဦး
-    cx_p = int((math.sin(phase * math.pi * 2) * 0.5 + 0.5) * (W - dot_size))
-    cy_p = int((math.cos(phase * math.pi * 2) * 0.5 + 0.5) * (H - dot_size))
-    d.rectangle([cx_p, cy_p, cx_p + dot_size, cy_p + dot_size],
-                fill=(37, 244, 238, 255))
-
-    # Magenta မျှားဦး (ဆန့်ကျင်ဘက်)
-    mx_p = W - dot_size - cx_p
-    my_p = H - dot_size - cy_p
-    d.rectangle([mx_p, my_p, mx_p + dot_size, my_p + dot_size],
-                fill=(254, 44, 85, 255))
-
-    return img
-
-
-# ==================== TTS Functions ====================
 
 def tts_demo(chunks, ref, space, cb=None):
     cl = Client(space); files = []; rf = handle_file(ref) if ref else None
@@ -473,7 +286,6 @@ def tts_demo(chunks, ref, space, cb=None):
         dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
     return files
 
-
 def tts_burmese(chunks, ref, space, cb=None):
     cl = Client(space); files = []
     if not ref: raise Exception("Reference Audio needed")
@@ -489,11 +301,9 @@ def tts_burmese(chunks, ref, space, cb=None):
         dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
     return files
 
-
 async def _edge_tts_async(text, out_file, voice):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_file)
-
 
 def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
@@ -523,7 +333,6 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     ).run(overwrite_output=True)
     return out_path
 
-
 def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
     chunks = split_scr(text, TTS_CHUNK)
 
@@ -534,6 +343,8 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
         return out
 
     files = None
+    last_error = None
+
     for s in SPACES:
         try:
             st.info(f"🎙️ VoxCPM2 — {s['space']} — စမ်းနေသည်...")
@@ -544,7 +355,8 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
             st.success("✅ VoxCPM2 — အောင်မြင်")
             break
         except Exception as e:
-            st.warning(f"⚠️ VoxCPM2 — Fail: {str(e)[:80]}")
+            last_error = str(e)
+            st.warning(f"⚠️ VoxCPM2 — Fail: {last_error[:80]}")
             files = None
             continue
 
@@ -560,7 +372,6 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
         out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
     ).run(overwrite_output=True)
     return out
-
 
 def whisper_fast(video_path):
     subprocess.run([
@@ -591,7 +402,6 @@ def whisper_fast(video_path):
             speech_segments.append((seg["start"], seg["end"]))
     return speech_segments
 
-
 def silence_cut_v2(input_video, output_video="input_cut.mp4"):
     t0 = time.time()
     speech_segments = whisper_fast(input_video)
@@ -612,9 +422,6 @@ def silence_cut_v2(input_video, output_video="input_cut.mp4"):
 
     total = sum(e - s for s, e in speech_segments)
     return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
-
-
-# ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
@@ -637,62 +444,34 @@ vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility=
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# Step 3 — TikTok Neon Border
-st.subheader("✨ Step 3 — TikTok Neon Border")
-use_neon = st.toggle("✨ TikTok Neon Border ထည့်မလား?", value=True)
-if use_neon:
-    neon_thickness = st.slider("📏 Border အထူ", 15, 60, 30, 1)
-    neon_speed = st.slider("⚡ လည်ပတ်နှုန်း", 0.3, 3.0, 1.0, 0.1)
-    dot_size = st.slider("🔵 မျှားဦး အရွယ်", 20, 100, 50, 5)
-else:
-    neon_thickness = 30
-    neon_speed = 1.0
-    dot_size = 50
-st.divider()
-
-# Step 4 — Subtitle
-st.subheader("📝 Step 4 — Subtitle")
+st.subheader("📝 Step 3 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
+
 if use_sub:
     pos_y = st.slider("📍 Position", 0, 100, 100, 1)
-st.divider()
 
-# Step 5 — Preview
-if vid:
-    st.subheader("🖼️ Step 5 — Preview")
+if vid and use_sub:
+    st.markdown("**🖼️ Preview**")
     with st.spinner("Preview..."):
         vid.seek(0)
         with open("preview.mp4", "wb") as f: f.write(vid.read())
         W, H, _ = vid_info("preview.mp4")
-
         render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA,
                    box_width_ratio=BOX_WIDTH_RATIO)
-
-        cap = cv2.VideoCapture("preview.mp4")
-        ok, fr = cap.read()
-        cap.release()
-
+        cap = cv2.VideoCapture("preview.mp4"); ok, fr = cap.read(); cap.release()
         if ok:
             bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
             fg = Image.open("prev.png").convert("RGBA")
-            comp = Image.alpha_composite(bg, fg)
-
-            if use_neon:
-                comp = draw_tiktok_border_preview(comp, thickness=neon_thickness,
-                                                   dot_size=dot_size, phase=0.25)
-
-            pw = 720
-            comp.resize((pw, int(H * (pw / W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
+            comp = Image.alpha_composite(bg, fg); pw = 720
+            comp.resize((pw, int(H*(pw/W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
             st.image("prev_out.png", use_container_width=True)
-            if use_neon:
-                st.caption("🎬 Output Video မှာ မျှားဦး ပတ်ချာလည် လည်ပတ်နေမည်")
 st.divider()
 
-# Step 6 — Generate
-st.subheader("🚀 Step 6 — Generate")
+st.subheader("🚀 Step 4 — Generate")
 
-use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True)
+use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True,
+                        help="Off ထားရင် — Edge TTS သီဟ ပဲ သုံးမယ်")
 
 if use_voxcpm:
     st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS သီဟ Auto")
@@ -748,31 +527,21 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         vi = ffmpeg.input("input.mp4")
         va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
         ffmpeg.output(vi.video, va, "temp.mp4",
-            vcodec='libx264', crf=ENC_CRF, preset='fast', tune='fastdecode',
+            vcodec='libx264', crf=ENC_CRF, preset='ultrafast', tune='fastdecode',
             acodec='aac', audio_bitrate=AUDIO_BITRATE,
             shortest=None, threads=0).run(overwrite_output=True)
     step_times["🎬 Render"] = time.time() - t0
 
-    # ၄။ Bypass + Neon Border
+    # ၄။ Bypass — Mirror + Crop — Auto
     t0 = time.time()
-    with st.spinner("🛡️ Bypass + ✨ Running Dot..."):
+    with st.spinner("🛡️ Bypass — Mirror + Crop..."):
         try:
-            if use_neon:
-                bypass_and_neon_running_dot(
-                    "temp.mp4", "bypass.mp4",
-                    crop_ratio=0.95, mirror=True,
-                    thickness=neon_thickness,
-                    speed=neon_speed,
-                    dot_size=dot_size
-                )
-                st.success("✅ Running Dot ထည့်ပြီး")
-            else:
-                video_bypass("temp.mp4", "bypass.mp4",
-                             crop_ratio=0.95, mirror=True)
+            video_bypass("temp.mp4", "bypass.mp4",
+                         crop_ratio=0.88, mirror=True)
         except Exception as e:
-            st.warning(f"⚠️ Fail: {e}")
+            st.warning(f"⚠️ Bypass Fail: {e}")
             shutil.copy("temp.mp4", "bypass.mp4")
-    step_times["🛡️ Bypass+Dot"] = time.time() - t0
+    step_times["🛡️ Bypass"] = time.time() - t0
 
     # ၅။ Subtitle Overlay
     t0 = time.time()
