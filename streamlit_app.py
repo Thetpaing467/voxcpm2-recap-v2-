@@ -20,6 +20,9 @@ FONT_FILE = "MyanmarPadaung.ttf"
 FS, BH, BA = 30, 100, 200
 ENC_PRESET = "fast"
 ENC_CRF = 18
+FINAL_PRESET = "ultrafast"
+FINAL_CRF = 20
+USE_FAST_VAD = True   # Whisper မသုံးဘဲ VAD နဲ့ speech ရှာ (အမြန်ဆုံး)
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 TTS_WORKERS = 5
@@ -500,13 +503,16 @@ def final_render(video_in, audio_in, output_video, tempo,
         "ffmpeg", "-y",
         "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
-        "-i", audio_in, "-af", f"atempo={tempo}",
-        "-map", "0:v", "-map", "1:a",
-        "-c:v", "libx264", "-crf", str(ENC_CRF), "-preset", "veryfast",
-        "-pix_fmt", "yuv420p", "-threads", "0",
-        "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest",
-        output_video
     ]
+    if audio_in:
+        cmd += ["-i", audio_in, "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a"]
+    else:
+        cmd += ["-an"]
+    cmd += ["-c:v", "libx264", "-crf", str(FINAL_CRF), "-preset", FINAL_PRESET,
+            "-pix_fmt", "yuv420p", "-threads", "0"]
+    if audio_in:
+        cmd += ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest"]
+    cmd += [output_video]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -547,6 +553,38 @@ def final_render(video_in, audio_in, output_video, tempo,
     if proc.returncode != 0:
         raise Exception("Final render: ffmpeg fail")
     return output_video
+
+
+def mux_audio(video_in, audio_in, output_video, tempo):
+    """Video ကို ပြန် encode မလုပ်ဘဲ အသံပေါင်းပေး (copy)"""
+    cmd = ["ffmpeg", "-y", "-i", video_in, "-i", audio_in,
+           "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a",
+           "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE,
+           "-shortest", output_video]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0:
+        raise Exception(f"Mux: {(r.stderr or '')[-300:]}")
+    return output_video
+
+
+def prepare_video_job(video_in, script_text, use_sub, fw_model,
+                      pos_y, use_neon, thickness, speed):
+    """Background: Speech ရှာ → Subtitle → အသံမပါ Video render (TTS နဲ့ တပြိုင်တည်း)"""
+    segments = whisper_fast(video_in, fw_model)
+    if not segments: raise Exception("Speech မတွေ့")
+    kept, vfps = keep_count(video_in, segments)
+    if kept == 0: raise Exception("Speech မတွေ့")
+    vdur = kept / vfps
+    render_err = None
+    try:
+        sp = scr_to_srt(script_text, vdur, "sub.srt") if use_sub else None
+        final_render(video_in, None, "video_only.mp4", 1.0,
+                     srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
+                     bh=BH, ba=BA, use_neon=use_neon,
+                     thickness=thickness, speed=speed, segments=segments)
+    except Exception as e:
+        render_err = str(e)
+    return {"segments": segments, "vdur": vdur, "render_err": render_err}
 
 
 # ==================== Preview ====================
@@ -703,6 +741,19 @@ def whisper_fast(video_path, model=None):
         "-c:a", "pcm_s16le", "whisper_audio.wav"
     ], capture_output=True, check=True)
 
+    if USE_FAST_VAD:
+        try:
+            from faster_whisper.audio import decode_audio
+            from faster_whisper.vad import get_speech_timestamps, VadOptions
+            audio = decode_audio("whisper_audio.wav", sampling_rate=16000)
+            ts = get_speech_timestamps(
+                audio, VadOptions(min_silence_duration_ms=700, speech_pad_ms=200))
+            segs_vad = [(t["start"] / 16000.0, t["end"] / 16000.0) for t in ts]
+            if segs_vad:
+                return segs_vad
+        except Exception:
+            pass   # VAD မရရင် Whisper နဲ့ ဆက်သွား
+
     speech_segments = []
     try:
         model = model or get_fw_model()
@@ -847,12 +898,14 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    # ၁။ Cut (Whisper) ကို TTS နဲ့ တပြိုင်တည်း run — Video ကို ပြန် encode မလုပ်တော့
+    # ၁။ Cut + Render ကို Background မှာ — TTS နဲ့ တပြိုင်တည်း (အသံမပါ Video အရင်ထုတ်)
     fw_model = None
-    try: fw_model = get_fw_model()
-    except Exception: pass
-    cut_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    cut_future = cut_pool.submit(whisper_fast, "input.mp4", fw_model)
+    if not USE_FAST_VAD:
+        try: fw_model = get_fw_model()
+        except Exception: pass
+    job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    job = job_pool.submit(prepare_video_job, "input.mp4", script, use_sub, fw_model,
+                          pos_y, use_neon, neon_thickness, neon_speed)
 
     # ၂။ TTS
     t0 = time.time()
@@ -865,36 +918,26 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         st.error(f"TTS: {e}"); st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
 
-    # Cut ရလဒ် စောင့် (TTS နဲ့ အပြိုင်ပြီးသားဖြစ်နိုင်)
+    # ၃။ Background job စောင့် + အသံပေါင်း
     t0 = time.time()
     try:
-        segments = cut_future.result()
-        if not segments: raise Exception("Speech မတွေ့")
-        kept, vfps = keep_count("input.mp4", segments)
-        if kept == 0: raise Exception("Speech မတွေ့")
-        vdur = kept / vfps
+        info = job.result()
     except Exception as e:
         st.error(f"❌ Cut: {e}"); st.stop()
-    cut_pool.shutdown(wait=False)
-    step_times["✂️ Cut (စောင့်ချိန်)"] = time.time() - t0
+    job_pool.shutdown(wait=False)
+    segments, vdur = info["segments"], info["vdur"]
 
     adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
     tempo = max(0.5, min(2.0, adur/vdur))
 
-    # ၃။ Render — Bypass + Neon + Subtitle + Audio (encode တစ်ခါတည်း)
-    t0 = time.time()
-    with st.spinner("🎬 Render (Bypass + ✨ Neon + 📝 Subtitle)..."):
+    with st.spinner("🎬 Finalizing..."):
         try:
-            sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
-            final_render("input.mp4", "voice.mp3", "final.mp4", tempo,
-                         srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
-                         bh=BH, ba=BA, use_neon=use_neon,
-                         thickness=neon_thickness, speed=neon_speed,
-                         segments=segments)
+            if info["render_err"]: raise Exception(info["render_err"])
+            mux_audio("video_only.mp4", "voice.mp3", "final.mp4", tempo)
         except Exception as e:
             st.warning(f"⚠️ Fail: {e}")
             simple_merge("input.mp4", "voice.mp3", "final.mp4", tempo, segments)
-    step_times["🎬 Render"] = time.time() - t0
+    step_times["🎬 Render (စောင့်ချိန်)"] = time.time() - t0
 
     total_elapsed = time.time() - total_start
 
