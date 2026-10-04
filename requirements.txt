@@ -2,18 +2,9 @@ streamlit
 ffmpeg-python
 opencv-python-headless
 Pillow
+numpy
 edge-tts
 openai-whisper
-gradio_client
-streamlit
-ffmpeg-python
-edge-tts
-pillow
-opencv-python-headless
-numpy
-gradio_client
 faster-whisper
+gradio_client
 gemini-webapi
-# BuzzASR/burmese (မြန်မာ fine-tune) သုံးမယ်ဆိုရင်သာ အောက်ကနှစ်ကြောင်း ဖွင့်ပါ (RAM များ)
-# torch
-# transformers
