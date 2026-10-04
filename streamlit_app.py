@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import os, re, ffmpeg, shutil, subprocess, asyncio, time
 import concurrent.futures
 import numpy as np
@@ -29,8 +28,7 @@ TTS_CHUNK = 600
 TTS_WORKERS = 5
 PNG_WORKERS = 4
 
-CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"   # မင်းရဲ့ Gemini Canvas
-HF_BURMESE_MODEL = "BuzzASR/burmese"   # whisper-large-v3 ကို မြန်မာအတွက် fine-tune ထားတာ
+CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"   # Gemini Canvas
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
 
@@ -590,115 +588,6 @@ def prepare_video_job(video_in, script_text, use_sub, fw_model,
     return {"segments": segments, "vdur": vdur, "render_err": render_err}
 
 
-@st.cache_resource(show_spinner=False)
-def get_tr_model(size):
-    from faster_whisper import WhisperModel
-    return WhisperModel(size, device="cpu", compute_type="int8",
-                        cpu_threads=os.cpu_count() or 4)
-
-
-@st.cache_resource(show_spinner=False)
-def get_ow_model(size):
-    import whisper
-    return whisper.load_model(size)
-
-
-def transcribe_video(video_path, size="medium", progress_cb=None):
-    """Video → မြန်မာ transcript (Local · Free · API key မလို)"""
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path, "-vn",
-        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "tr_audio.wav"
-    ], capture_output=True, check=True)
-    try:
-        model = get_tr_model(size)
-    except ImportError:
-        # faster-whisper မရှိရင် openai-whisper နဲ့ အစားထိုး
-        res = get_ow_model(size).transcribe(
-            "tr_audio.wav", language="my",
-            condition_on_previous_text=False, temperature=0)
-        if progress_cb: progress_cb(1.0)
-        return "\n\n".join(x["text"].strip() for x in res["segments"] if x["text"].strip())
-    segments, info = model.transcribe(
-        "tr_audio.wav", language="my", beam_size=5,
-        vad_filter=True, condition_on_previous_text=False, temperature=0
-    )
-    lines = []
-    for seg in segments:
-        t = seg.text.strip()
-        if t: lines.append(t)
-        if progress_cb and info.duration:
-            progress_cb(min(seg.end / info.duration, 1.0))
-    return "\n\n".join(lines)
-
-
-@st.cache_resource(show_spinner=False)
-def get_hf_asr(model_id):
-    import torch
-    from transformers import pipeline
-    return pipeline("automatic-speech-recognition", model=model_id,
-                    torch_dtype=torch.float32, device="cpu")
-
-
-def transcribe_hf(video_path, model_id=HF_BURMESE_MODEL):
-    """Burmese fine-tuned Whisper (Hugging Face · Local · Free · key မလို)"""
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path, "-vn",
-        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "tr_audio.wav"
-    ], capture_output=True, check=True)
-    asr = get_hf_asr(model_id)
-    out = asr("tr_audio.wav", chunk_length_s=30, batch_size=4,
-              generate_kwargs={"num_beams": 1, "no_repeat_ngram_size": 3,
-                               "repetition_penalty": 1.2})
-    text = out["text"].strip()
-    parts = [p.strip() + "။" for p in text.split("။") if p.strip()]
-    return "\n\n".join(parts)
-
-
-def _secret(name):
-    try:
-        v = st.secrets[name]
-        if v: return str(v)
-    except Exception:
-        pass
-    return os.environ.get(name, "")
-
-
-def compress_for_gemini(src, dst="tr_small.mp4"):
-    """Upload မြန်အောင် Video ကို အသေးချုံ့ (အသံပဲ လိုတာမို့ ပုံရိပ်ကို နိမ့်)"""
-    subprocess.run([
-        "ffmpeg", "-y", "-i", src, "-vf", "scale=-2:360", "-r", "12",
-        "-c:v", "libx264", "-crf", "32", "-preset", "veryfast",
-        "-c:a", "aac", "-b:a", "64k", dst
-    ], capture_output=True, check=True)
-    return dst
-
-
-async def _gemini_web_async(psid, psidts, video, prompt):
-    from gemini_webapi import GeminiClient
-    client = GeminiClient(psid, psidts or None)
-    await client.init(timeout=300, auto_close=False, auto_refresh=True)
-    resp = await client.generate_content(prompt, files=[video])
-    return resp.text
-
-
-def gemini_web_transcribe(video_path, psid, psidts):
-    """Gemini Web (cookie · unofficial) — တရုတ် Video → မြန်မာ Dialogue Script"""
-    small = compress_for_gemini(video_path)
-    prompt = ("ဗီဒီယိုထဲက စကားပြောတွေ (တရုတ်ဘာသာ) ကို မြန်မာဘာသာနဲ့ အပြည့်အစုံ ဘာသာပြန်ပြီး "
-              "Dialogue Script အဖြစ် ထုတ်ပေးပါ။ စကားပြောတစ်ခုချင်းကို စာကြောင်းတစ်ကြောင်းစီ ခွဲပြီး၊ "
-              "စာကြောင်းတစ်ခုနဲ့တစ်ခုကြား စာကြောင်းလွတ်တစ်ကြောင်း ခြားပါ။ "
-              "ရှင်းလင်းချက်၊ ခေါင်းစဉ်၊ အချိန်မှတ်တမ်း မထည့်ပါနဲ့။ Script စာသားပဲ ပြန်ပေးပါ။")
-    def run():
-        return asyncio.run(_gemini_web_async(psid, psidts, small, prompt))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        text = ex.submit(run).result()
-    lines = [l.strip().strip('"\u201c\u201d').strip() for l in (text or "").splitlines()]
-    lines = [l for l in lines if l]
-    if not lines:
-        raise Exception("Gemini က စာမပြန်ပါ (cookie သက်တမ်းကုန်/limit ထိ ဖြစ်နိုင်)")
-    return "\n\n".join(lines)
-
-
 # ==================== Preview ====================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
@@ -926,6 +815,8 @@ with c1: st.caption(f"📝 {len(script):,}")
 with c2:
     if st.button("🗑️ Clear", use_container_width=True):
         st.session_state.script = ""; st.rerun()
+st.link_button("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", CANVAS_URL,
+               use_container_width=True)
 st.divider()
 
 st.subheader("📁 Step 2 — Video")
@@ -980,70 +871,6 @@ if vid:
             st.image("prev_out.png", use_container_width=True)
             if use_neon and neon_animated:
                 st.caption("🎬 Animated — Output Video မှာ အလင်းတန်း ပတ်ပြေးနေမည်")
-st.divider()
-
-# Transcript ထုတ်ယူ
-st.subheader("📄 Transcript ထုတ်ယူ")
-tr_choice = st.selectbox(
-    "Engine",
-    ["Gemini Canvas (Split · Paste)", "Gemini Web (Auto · Cookie)", "small", "medium", "large-v3",
-     "BuzzASR/burmese (မြန်မာ fine-tune)"], index=0)
-
-is_canvas = tr_choice.startswith("Gemini Canvas")
-if is_canvas:
-    canvas_url = st.text_input("🔗 Gemini Canvas Share Link", value=CANVAS_URL,
-                               key="canvas_url")
-    if canvas_url:
-        st.link_button("↗️ Tab အသစ်မှာ ဖွင့်", canvas_url, use_container_width=True)
-        cl, cr = st.columns(2)
-        with cl:
-            components.iframe(canvas_url, height=700, scrolling=True)
-            st.caption("⚠️ အလွတ်ပဲ ပြရင် Google က iframe ကို ပိတ်ထားတာ — ↗️ Tab အသစ်ကို သုံးပါ")
-        with cr:
-            st.text_area("Script (Canvas ကနေ Copy → ဒီမှာ Paste)", key="tr_edit", height=650)
-            if st.button("➡️ Script ထဲ ထည့်မယ်", key="canvas_use", use_container_width=True):
-                lines = [l.strip().strip('"\u201c\u201d').strip()
-                         for l in st.session_state.get("tr_edit", "").splitlines()]
-                st.session_state.script = "\n\n".join(l for l in lines if l)
-                st.rerun()
-    else:
-        st.caption("Canvas ရဲ့ Share link ကို ထည့်ပါ")
-
-gem_psid = gem_psidts = ""
-if tr_choice.startswith("Gemini Web"):
-    gem_psid, gem_psidts = _secret("GEMINI_PSID"), _secret("GEMINI_PSIDTS")
-    if not gem_psid:
-        st.caption("🔑 gemini.google.com ကို login ဝင်ပြီး Cookie နှစ်ခု ထည့်ပါ (Secrets ထဲ ထားရင် ပိုကောင်း)")
-        gem_psid = st.text_input("__Secure-1PSID", type="password")
-        gem_psidts = st.text_input("__Secure-1PSIDTS", type="password")
-
-if not is_canvas and st.button("📄 Video ထဲက Transcript ထုတ်မယ်", use_container_width=True):
-    if vid is None:
-        st.error("Video Upload အရင်လုပ်ပါ")
-    elif tr_choice.startswith("Gemini Web") and not gem_psid:
-        st.error("Gemini Cookie ထည့်ပါ")
-    else:
-        vid.seek(0)
-        with open("tr_input.mp4", "wb") as f: f.write(vid.read())
-        with st.spinner("📄 Transcribe လုပ်နေသည်..."):
-            try:
-                if tr_choice.startswith("Gemini Web"):
-                    st.session_state["tr_edit"] = gemini_web_transcribe(
-                        "tr_input.mp4", gem_psid, gem_psidts)
-                elif tr_choice.startswith("BuzzASR"):
-                    st.session_state["tr_edit"] = transcribe_hf("tr_input.mp4")
-                else:
-                    pb_tr = st.progress(0)
-                    st.session_state["tr_edit"] = transcribe_video(
-                        "tr_input.mp4", tr_choice, lambda p: pb_tr.progress(p))
-                    pb_tr.progress(1.0)
-            except Exception as e:
-                st.error(f"❌ Transcript: {e}")
-if not is_canvas and st.session_state.get("tr_edit"):
-    st.text_area("Transcript (ပြင်လို့ရ)", key="tr_edit", height=250)
-    if st.button("➡️ Script ထဲ ထည့်မယ်", use_container_width=True):
-        st.session_state.script = st.session_state["tr_edit"]
-        st.rerun()
 st.divider()
 
 # Step 6 — Generate
