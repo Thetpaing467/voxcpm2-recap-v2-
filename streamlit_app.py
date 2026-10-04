@@ -31,7 +31,7 @@ BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
 CORNER_RADIUS = 20
 
-# TikTok Logo Colors (တိကျသော တန်ဖိုးများ)
+# TikTok Logo Colors
 TIKTOK_CYAN = "#25F4EE"
 TIKTOK_MAGENTA = "#FE2C55"
 TIKTOK_BLACK = "#000000"
@@ -289,7 +289,7 @@ def video_bypass(input_video, output_video="bypass.mp4",
 # ==================== TikTok Neon Border Effect (3-Layer) ====================
 
 def tiktok_neon_border(video_path, output_path,
-                       thickness=25,
+                       thickness=30,
                        cyan=TIKTOK_CYAN, magenta=TIKTOK_MAGENTA,
                        black=TIKTOK_BLACK):
     """
@@ -301,7 +301,6 @@ def tiktok_neon_border(video_path, output_path,
     W, H, dur = vid_info(video_path)
     pad = thickness
 
-    # ၃ လွှာ border — အရောင် သီးသန့်
     fc = (
         # 1. Video ကို သေးငယ်ပြီး pad ထည့် (border နေရာ)
         f"[0:v]scale={W-2*pad}:{H-2*pad},"
@@ -311,7 +310,7 @@ def tiktok_neon_border(video_path, output_path,
         f"[v0]drawbox=x=0:y=0:w={W}:h={H}:"
         f"color={black}@1.0:t={pad}:replace=0[v1];"
 
-        # 3. Cyan border — အပြင်ဘက် (အနက်ရောင် ပေါ်)
+        # 3. Cyan border — အပြင်ဘက်
         f"[v1]drawbox=x=0:y=0:w={W}:h={H}:"
         f"color={cyan}@1.0:t={max(3, pad//3)}:replace=0[v2];"
 
@@ -337,13 +336,12 @@ def tiktok_neon_border(video_path, output_path,
 
 
 def bypass_and_neon(input_video, output_video,
-                    crop_ratio=0.95, mirror=True, thickness=25):
+                    crop_ratio=0.95, mirror=True, thickness=30):
     """Bypass + Neon Border — တစ်ခါတည်း (Quality မကျ)"""
     W, H, dur = vid_info(input_video)
     pad = thickness
     filters = []
 
-    # 1. Crop
     if crop_ratio != 1.0:
         cw = int(W * crop_ratio); ch = int(H * crop_ratio)
         if cw % 2 != 0: cw -= 1
@@ -351,26 +349,21 @@ def bypass_and_neon(input_video, output_video,
         cx = (W - cw) // 2; cy = (H - ch) // 2
         filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
 
-    # 2. Mirror
     if mirror:
         filters.append("hflip")
 
-    # 3. Pad for border
     filters.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
 
-    # 4. အနက်ရောင် border — အောက်ခံ
     filters.append(
         f"drawbox=x=0:y=0:w={W}:h={H}:"
         f"color={TIKTOK_BLACK}@1.0:t={pad}:replace=0"
     )
 
-    # 5. Cyan border — အပြင်ဘက်
     filters.append(
         f"drawbox=x=0:y=0:w={W}:h={H}:"
         f"color={TIKTOK_CYAN}@1.0:t={max(3, pad//3)}:replace=0"
     )
 
-    # 6. Magenta border — အတွင်းဘက်
     filters.append(
         f"drawbox=x={pad}:y={pad}:w={W-2*pad}:h={H-2*pad}:"
         f"color={TIKTOK_MAGENTA}@1.0:t={max(3, pad//3)}:replace=0"
@@ -388,6 +381,39 @@ def bypass_and_neon(input_video, output_video,
     if r.returncode != 0:
         raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
     return output_video
+
+
+# ==================== Preview with Neon Border ====================
+
+def draw_tiktok_border_preview(img, thickness=30):
+    """Preview frame ပေါ်မှာ TikTok 3-layer border ဆွဲ"""
+    d = ImageDraw.Draw(img, "RGBA")
+    W, H = img.size
+
+    # 1. အနက်ရောင် border — အောက်ခံ
+    d.rectangle(
+        [0, 0, W - 1, H - 1],
+        outline=(0, 0, 0, 255),
+        width=thickness
+    )
+
+    # 2. Cyan border — အပြင်ဘက်
+    inner_c = max(3, thickness // 3)
+    d.rectangle(
+        [0, 0, W - 1, H - 1],
+        outline=(37, 244, 238, 255),
+        width=inner_c
+    )
+
+    # 3. Magenta border — အတွင်းဘက်
+    offset = thickness
+    d.rectangle(
+        [offset, offset, W - 1 - offset, H - 1 - offset],
+        outline=(254, 44, 85, 255),
+        width=inner_c
+    )
+
+    return img
 
 
 # ==================== TTS Functions ====================
@@ -575,31 +601,8 @@ vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility=
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-st.subheader("📝 Step 3 — Subtitle")
-use_sub = st.toggle("Burn-in", value=True)
-pos_y = 100
-
-if use_sub:
-    pos_y = st.slider("📍 Position", 0, 100, 100, 1)
-
-if vid and use_sub:
-    st.markdown("**🖼️ Preview**")
-    with st.spinner("Preview..."):
-        vid.seek(0)
-        with open("preview.mp4", "wb") as f: f.write(vid.read())
-        W, H, _ = vid_info("preview.mp4")
-        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA,
-                   box_width_ratio=BOX_WIDTH_RATIO)
-        cap = cv2.VideoCapture("preview.mp4"); ok, fr = cap.read(); cap.release()
-        if ok:
-            bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-            fg = Image.open("prev.png").convert("RGBA")
-            comp = Image.alpha_composite(bg, fg); pw = 720
-            comp.resize((pw, int(H*(pw/W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
-            st.image("prev_out.png", use_container_width=True)
-st.divider()
-
-st.subheader("✨ Step 4 — TikTok Neon Border")
+# Step 3 — TikTok Neon Border (အရင်)
+st.subheader("✨ Step 3 — TikTok Neon Border")
 use_neon = st.toggle("✨ TikTok Neon Border ထည့်မလား?", value=True,
                      help="3-layer border: Black + Cyan + Magenta")
 if use_neon:
@@ -608,7 +611,46 @@ else:
     neon_thickness = 30
 st.divider()
 
-st.subheader("🚀 Step 5 — Generate")
+# Step 4 — Subtitle
+st.subheader("📝 Step 4 — Subtitle")
+use_sub = st.toggle("Burn-in", value=True)
+pos_y = 100
+if use_sub:
+    pos_y = st.slider("📍 Position", 0, 100, 100, 1)
+st.divider()
+
+# Step 5 — Preview (Neon + Subtitle ပေါင်း)
+if vid:
+    st.subheader("🖼️ Step 5 — Preview")
+    with st.spinner("Preview..."):
+        vid.seek(0)
+        with open("preview.mp4", "wb") as f: f.write(vid.read())
+        W, H, _ = vid_info("preview.mp4")
+
+        # Subtitle PNG ဆောက်
+        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA,
+                   box_width_ratio=BOX_WIDTH_RATIO)
+
+        cap = cv2.VideoCapture("preview.mp4")
+        ok, fr = cap.read()
+        cap.release()
+
+        if ok:
+            bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+            fg = Image.open("prev.png").convert("RGBA")
+            comp = Image.alpha_composite(bg, fg)
+
+            # ✨ Neon Border ကို Preview မှာ ဆွဲ
+            if use_neon:
+                comp = draw_tiktok_border_preview(comp, thickness=neon_thickness)
+
+            pw = 720
+            comp.resize((pw, int(H * (pw / W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
+            st.image("prev_out.png", use_container_width=True)
+st.divider()
+
+# Step 6 — Generate
+st.subheader("🚀 Step 6 — Generate")
 
 use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True,
                         help="Off ထားရင် — Edge TTS သီဟ ပဲ သုံးမယ်")
