@@ -1,572 +1,2138 @@
+# ============================================================
+# 🇲🇲 Myanmar TTS Recap Studio
+# TikTok Neon Border + Moving Arrow
+# Full Streamlit App
+# ============================================================
+
+# ============================================================
+# 1. INSTALL
+# ============================================================
+
+import subprocess
+import sys
+import os
+import io
+import re
+import math
+import time
+import json
+import uuid
+import shutil
+import asyncio
+import tempfile
+from pathlib import Path
+
+def install_package(package):
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q", package]
+        )
+    except Exception:
+        pass
+
+# Required packages
+for pkg in [
+    "streamlit",
+    "Pillow",
+    "numpy",
+    "pydub",
+    "edge-tts",
+    "openai-whisper",
+    "gradio_client",
+    "ffmpeg-python",
+]:
+    install_package(pkg)
+
+# ============================================================
+# 2. IMPORTS
+# ============================================================
+
 import streamlit as st
-import os, re, ffmpeg, shutil, subprocess, asyncio, time
-import concurrent.futures
-import edge_tts
-from PIL import Image, ImageDraw, ImageFont
-import cv2
-from gradio_client import Client, handle_file
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
+from pydub import AudioSegment
 
-os.environ["HF_HOME"] = "/tmp/hf_cache"
+# ============================================================
+# 3. FFMPEG
+# ============================================================
 
-SPACES = [
-    {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
-    {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
-]
+def ensure_ffmpeg():
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        return
+
+    try:
+        subprocess.run(
+            ["apt-get", "update", "-qq"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        subprocess.run(
+            ["apt-get", "install", "-y", "-qq", "ffmpeg"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        pass
+
+ensure_ffmpeg()
+
+# ============================================================
+# 4. PAGE CONFIG
+# ============================================================
+
+st.set_page_config(
+    page_title="Myanmar TTS Recap Studio",
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ============================================================
+# 5. CSS
+# ============================================================
+
+st.markdown(
+    """
+<style>
+
+.stApp {
+    background:
+        radial-gradient(circle at 20% 10%, #15152b 0%, transparent 35%),
+        radial-gradient(circle at 80% 90%, #111b30 0%, transparent 35%),
+        #080810;
+}
+
+.main-title {
+    text-align:center;
+    font-size:42px;
+    font-weight:900;
+    margin-top:10px;
+    margin-bottom:4px;
+    background:linear-gradient(
+        90deg,
+        #00f5ff,
+        #7a5cff,
+        #ff00d4,
+        #00f5ff
+    );
+    -webkit-background-clip:text;
+    -webkit-text-fill-color:transparent;
+}
+
+.sub-title {
+    text-align:center;
+    color:#9da3b8;
+    font-size:15px;
+    margin-bottom:25px;
+}
+
+.section {
+    border:1px solid rgba(255,255,255,0.08);
+    border-radius:18px;
+    padding:20px;
+    background:rgba(255,255,255,0.025);
+    margin-bottom:18px;
+}
+
+.neon-info {
+    border:1px solid rgba(0,245,255,0.35);
+    box-shadow:
+        0 0 12px rgba(0,245,255,0.12),
+        inset 0 0 12px rgba(0,245,255,0.03);
+    border-radius:15px;
+    padding:15px;
+}
+
+.small {
+    color:#9298aa;
+    font-size:13px;
+}
+
+.stButton > button {
+    border-radius:12px;
+    font-weight:700;
+}
+
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ============================================================
+# 6. PASSWORD
+# ============================================================
 
 PASSWORD = "voxcpm2026"
-FONT_FILE = "MyanmarPadaung.ttf"
 
-FS, BH, BA = 30, 100, 200
-ENC_PRESET = "ultrafast"
-ENC_CRF = 23
-AUDIO_BITRATE = "128k"
-TTS_CHUNK = 600
-TTS_WORKERS = 3
-PNG_WORKERS = 4
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
 
-WHISPER_MODEL = "tiny"
-WHISPER_LANG = "my"
+if not st.session_state.authenticated:
 
-BOX_WIDTH_RATIO = 1.0
-PADDING_Y = 15
-CORNER_RADIUS = 20
-
-EDGE_VOICES = {
-    "female": "my-MM-NilarNeural",
-    "male":   "my-MM-ThihaNeural",
-}
-EDGE_VOICE_FIXED = "male"
-
-st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
-
-st.markdown("""
-<style>
-.stApp{background:linear-gradient(160deg,#0f0f23,#1a1a35,#0f0f23);color:#e8e8f0}
-#MainMenu,footer,header{visibility:hidden}
-.main-title{text-align:center;font-size:2.2rem;font-weight:900;
- background:linear-gradient(90deg,#ff6b9d,#c66bff,#6ba8ff);
- -webkit-background-clip:text;-webkit-text-fill-color:transparent;
- background-clip:text;margin-bottom:4px}
-.main-sub{text-align:center;color:#8888aa;font-size:.9rem;margin-bottom:20px}
-.stButton>button{background:linear-gradient(135deg,#667eea,#764ba2)!important;
- color:#fff!important;border:none!important;border-radius:10px!important;
- padding:12px 20px!important;font-weight:600!important;
- box-shadow:0 4px 15px rgba(102,126,234,.3)!important}
-.stTextArea textarea{background:rgba(255,255,255,.04)!important;
- border:1px solid rgba(255,255,255,.1)!important;color:#fff!important;
- border-radius:10px!important}
-.stFileUploader{background:rgba(255,255,255,.02);border-radius:10px;padding:8px}
-.stAlert{border-radius:10px!important;border:none!important}
-hr{border-color:rgba(255,255,255,.08);margin:24px 0}
-.timer-box{background:linear-gradient(135deg,#667eea,#764ba2);
- border-radius:16px;padding:24px;text-align:center;margin:15px 0;
- box-shadow:0 8px 30px rgba(102,126,234,.4)}
-.timer-title{color:#fff;font-size:.9rem;font-weight:600;letter-spacing:1px;margin-bottom:8px}
-.timer-value{color:#fff;font-size:3.2rem;font-weight:900;line-height:1}
-.timer-unit{font-size:1.5rem;font-weight:700;margin-left:8px}
-.step-timer{background:rgba(255,255,255,.05);border-left:4px solid #667eea;
- border-radius:10px;padding:12px 18px;margin:8px 0;color:#e8e8f0;font-size:.95rem}
-.step-timer b{color:#6ba8ff;font-size:1.05rem}
-</style>
-""", unsafe_allow_html=True)
-
-if "auth" not in st.session_state:
-    st.session_state.auth = False
-
-if not st.session_state.auth:
-    st.markdown("<div class='main-title'>🔐 Private App</div>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1, 2, 1])
-    with c2:
-        pwd = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Password")
-        if st.button("Login", use_container_width=True):
-            if pwd == PASSWORD:
-                st.session_state.auth = True
-                st.rerun()
-            else:
-                st.error("Password မှား")
-    st.stop()
-
-def vid_info(p):
-    pr = ffmpeg.probe(p)
-    v = next(s for s in pr['streams'] if s['codec_type'] == 'video')
-    return int(v['width']), int(v['height']), float(pr['format']['duration'])
-
-def t2s(s):
-    ms = int(round((s - int(s)) * 1000)); tot = int(s)
-    if ms >= 1000: tot += 1; ms = 0
-    h, r = divmod(tot, 3600); m, sec = divmod(r, 60)
-    return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
-
-def s2t(ts):
-    ts = ts.strip()
-    m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$', ts)
-    if m:
-        h, mi, se, ms = m.groups()
-        return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3,'0'))/1000
-    return None
-
-def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
-                box_width_ratio=BOX_WIDTH_RATIO,
-                padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
-    img = Image.new("RGBA", (W, H), (0,0,0,0))
-    d = ImageDraw.Draw(img)
-    try: f = ImageFont.truetype(fp, fs)
-    except: f = ImageFont.load_default()
-
-    mc = max(15, int(W/(fs*0.9)))
-    lines, cur = [], ""
-    for w in text.split():
-        if len(cur)+len(w)+1 <= mc: cur = cur+" "+w if cur else w
-        else:
-            if cur: lines.append(cur)
-            cur = w
-    if cur: lines.append(cur)
-    if not lines: return out
-
-    lh = int(fs * 1.3)
-    text_h = len(lines) * lh
-    box_w = int(W * box_width_ratio)
-    box_h = text_h + padding_y * 2
-    box_x = (W - box_w) // 2
-    max_y = H - box_h
-    box_y = int((pos_y / 100) * max_y)
-    box_y = max(0, min(box_y, max_y))
-
-    d.rounded_rectangle(
-        [box_x, box_y, box_x + box_w, box_y + box_h],
-        radius=corner_radius, fill=(0, 0, 0, ba)
+    st.markdown(
+        '<div class="main-title">🎬 Myanmar TTS Recap Studio</div>',
+        unsafe_allow_html=True,
     )
 
-    ty = box_y + padding_y
-    for ln in lines:
-        bb = d.textbbox((0, 0), ln, font=f)
-        lw = bb[2] - bb[0]
-        lx = box_x + (box_w - lw) // 2
-        for dx in [-2,-1,0,1,2]:
-            for dy in [-2,-1,0,1,2]:
-                d.text((lx+dx, ty+dy), ln, font=f, fill=(0,0,0,255))
-        d.text((lx, ty), ln, font=f, fill=(255,255,255,255))
-        ty += lh
+    st.markdown(
+        '<div class="sub-title">Private Movie Recap Generator</div>',
+        unsafe_allow_html=True,
+    )
 
-    img.save(out, "PNG")
-    return out
+    c1, c2, c3 = st.columns([1, 2, 1])
 
-def scr_to_srt(scr, dur, path, mc=30):
-    sents = [s.strip()+"။" for s in scr.replace("။","။|").split("|") if s.strip()]
-    if not sents: return None
-    parts = []
-    for s in sents:
-        s = s.replace("။။","။")
-        if len(s) <= mc: parts.append(s)
-        else:
-            cur = ""
-            for w in s.split():
-                if len(cur)+len(w)+1 <= mc: cur = cur+" "+w if cur else w
-                else:
-                    if cur: parts.append(cur.strip())
-                    cur = w
-            if cur: parts.append(cur.strip())
-    if not parts: return None
-    tot = sum(len(p) for p in parts); cur = 0.0
-    with open(path, "w", encoding="utf-8") as f:
-        for i, p in enumerate(parts, 1):
-            d = (len(p)/tot)*dur
-            f.write(f"{i}\n{t2s(cur)} --> {t2s(cur+d)}\n{p}\n\n"); cur += d
+    with c2:
+        password = st.text_input(
+            "🔐 Password",
+            type="password",
+            placeholder="Enter password",
+        )
+
+        if st.button(
+            "🚀 ENTER",
+            use_container_width=True,
+        ):
+            if password == PASSWORD:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("❌ Password မှားနေပါတယ်")
+
+    st.stop()
+
+# ============================================================
+# 7. CONSTANTS
+# ============================================================
+
+FONT_PATH = "MyanmarPadaung.ttf"
+
+VOXCPM_SPACE = "openbmb/VoxCPM-Demo"
+BURMESE_VOX_SPACE = "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts"
+
+DEFAULT_VOICE_FEMALE = "my-MM-NilarNeural"
+DEFAULT_VOICE_MALE = "my-MM-ThihaNeural"
+
+# ============================================================
+# 8. UTILITY
+# ============================================================
+
+def run_cmd(cmd):
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr[-4000:]
+        )
+
+    return result.stdout
+
+
+def get_video_duration(path):
+    try:
+        output = run_cmd(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                path,
+            ]
+        )
+
+        return float(output.strip())
+
+    except Exception:
+        return 0.0
+
+
+def safe_filename(name):
+    name = re.sub(
+        r"[^a-zA-Z0-9._-]+",
+        "_",
+        name,
+    )
+    return name
+
+
+def make_temp_dir():
+    path = tempfile.mkdtemp(
+        prefix="mm_tts_"
+    )
     return path
 
-def parse_srt(path):
-    with open(path, "r", encoding="utf-8") as f:
-        raw = f.read().replace("\r\n","\n").replace("\r","\n")
-    segs = []
-    for ck in re.split(r"\n\s*\n", raw.strip()):
-        ls = [l for l in ck.split("\n") if l.strip()]
-        if len(ls) < 3: continue
-        ts = next((l for l in ls if "-->" in l), None)
-        if not ts: continue
-        p = re.split(r"\s*-->\s*", ts)
-        if len(p) != 2: continue
-        a, b = s2t(p[0]), s2t(p[1])
-        if a is None or b is None: continue
-        idx = ls.index(ts); txt = " ".join(ls[idx+1:]).strip()
-        if txt: segs.append({"start": a, "end": b, "text": txt})
-    return segs
 
-def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100,
-            box_width_ratio=BOX_WIDTH_RATIO):
-    W, H, _ = vid_info(vp); segs = parse_srt(sp)
-    if not segs: raise Exception("SRT empty")
-    os.makedirs("subtitle_pngs", exist_ok=True)
+# ============================================================
+# 9. SRT HELPERS
+# ============================================================
 
-    def render_one(args):
-        i, s = args
-        p = f"subtitle_pngs/s_{i:04d}.png"
-        render_png(s["text"], p, fp, W, H, fs, pos_y, bh, ba,
-                   box_width_ratio=box_width_ratio)
-        return i, {"p": p, "a": s["start"], "b": s["end"]}
+def format_srt_time(seconds):
 
-    pngs = [None] * len(segs)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=PNG_WORKERS) as ex:
-        for idx, item in ex.map(render_one, enumerate(segs)):
-            pngs[idx] = item
+    seconds = max(
+        0,
+        float(seconds)
+    )
 
-    cmd = ["ffmpeg","-y","-i",vp] + sum([["-i",x["p"]] for x in pngs], [])
-    flt, cur = [], "[0:v]"
-    for i, x in enumerate(pngs):
-        lbl = f"[v{i}]"
-        flt.append(f"{cur}[{i+1}:v]overlay=0:0:enable='between(t,{x['a']:.3f},{x['b']:.3f})'{lbl}")
-        cur = lbl
-    cmd += ["-filter_complex",";".join(flt),"-map",cur,"-map","0:a?",
-            "-c:v","libx264","-crf",str(ENC_CRF),"-preset",ENC_PRESET,
-            "-tune","fastdecode","-c:a","copy",op]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-500:]}")
-    for x in pngs:
-        try: os.remove(x["p"])
-        except: pass
-    return op
+    h = int(seconds // 3600)
 
-def split_scr(t, mc=TTS_CHUNK):
-    sents = [s.strip()+"။" for s in t.replace("။","။|").split("|") if s.strip()]
-    out, cur = [], ""
-    for s in sents:
-        if len(cur)+len(s) <= mc: cur += s
-        else:
-            if cur: out.append(cur)
-            if len(s) > mc:
-                for i in range(0, len(s), mc): out.append(s[i:i+mc])
-                cur = ""
-            else: cur = s
-    if cur: out.append(cur)
-    return out
+    m = int(
+        (seconds % 3600) // 60
+    )
 
-def video_bypass(input_video, output_video="bypass.mp4",
-                 crop_ratio=0.88, mirror=True):
-    """Video Filter — Mirror + Crop (ဘေးဘောင်ညှပ်ပြီး လည်အောင်လုပ်ရန်)"""
-    W, H, dur = vid_info(input_video)
-    filters = []
+    s = int(
+        seconds % 60
+    )
 
-    if crop_ratio != 1.0:
-        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
-        if cw % 2 != 0: cw -= 1
-        if ch % 2 != 0: ch -= 1
-        cx = (W - cw) // 2; cy = (H - ch) // 2
-        filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
-        filters.append(f"scale={W}:{H}")
-
-    if mirror:
-        filters.append("hflip")
-
-    vf = ",".join(filters) if filters else "null"
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_video,
-        "-vf", vf,
-        "-c:v", "libx264", "-crf", str(ENC_CRF), "-preset", "ultrafast",
-        "-c:a", "copy",
-        output_video
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
-    return output_video
-
-def tts_demo(chunks, ref, space, cb=None):
-    cl = Client(space); files = []; rf = handle_file(ref) if ref else None
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
-        res = cl.predict(
-            text_input=c,
-            control_instruction="A warm young woman, calm and expressive",
-            reference_wav_path_input=rf,
-            use_prompt_text=False, prompt_text_input="",
-            cfg_value_input=2.0, do_normalize=True, denoise=False,
-            api_name="/generate"
+    ms = int(
+        round(
+            (seconds - int(seconds))
+            * 1000
         )
-        p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
-    return files
+    )
 
-def tts_burmese(chunks, ref, space, cb=None):
-    cl = Client(space); files = []
-    if not ref: raise Exception("Reference Audio needed")
-    rf = handle_file(ref)
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
-        res = cl.predict(
-            target_text=c, ref_audio=rf,
-            ref_text="မြန်မာ အသံနမူနာ", cfg_value=2.0,
-            inference_timesteps=10, api_name="/tts"
+    if ms >= 1000:
+        ms = 0
+        s += 1
+
+    if s >= 60:
+        s = 0
+        m += 1
+
+    if m >= 60:
+        m = 0
+        h += 1
+
+    return (
+        f"{h:02d}:{m:02d}:{s:02d},"
+        f"{ms:03d}"
+    )
+
+
+def create_srt(items):
+
+    lines = []
+
+    for i, item in enumerate(
+        items,
+        start=1
+    ):
+
+        start = item["start"]
+        end = item["end"]
+        text = item["text"].strip()
+
+        lines.append(
+            str(i)
         )
-        p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
-    return files
 
-async def _edge_tts_async(text, out_file, voice):
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(out_file)
+        lines.append(
+            f"{format_srt_time(start)} --> "
+            f"{format_srt_time(end)}"
+        )
 
-def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
-    voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
+        lines.append(text)
+        lines.append("")
 
-    def tts_one(args):
-        i, c = args
-        dst = f"edge_chunk_{i}.mp3"
-        try: asyncio.run(_edge_tts_async(c, dst, voice_id))
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(_edge_tts_async(c, dst, voice_id))
-            loop.close()
-        return (i, dst)
+    return "\n".join(lines)
 
-    results = [None] * len(chunks); done = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        for idx, dst in ex.map(tts_one, enumerate(chunks)):
-            results[idx] = dst; done += 1
-            if cb: cb(done - 1, len(chunks), chunks[idx])
 
-    with open("edge_concat.txt", "w", encoding="utf-8") as f:
-        for a in results: f.write(f"file '{a}'\n")
+def parse_srt(srt_text):
 
-    ffmpeg.input("edge_concat.txt", format="concat", safe=0).output(
-        out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
-    return out_path
+    blocks = re.split(
+        r"\n\s*\n",
+        srt_text.strip()
+    )
 
-def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
-    chunks = split_scr(text, TTS_CHUNK)
+    results = []
 
-    if not use_voxcpm:
-        st.info("⚡ Edge TTS သီဟ — VoxCPM2 Off")
-        edge_tts_run(chunks, out, cb=cb)
-        st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
-        return out
+    for block in blocks:
 
-    files = None
-    last_error = None
+        lines = block.splitlines()
 
-    for s in SPACES:
-        try:
-            st.info(f"🎙️ VoxCPM2 — {s['space']} — စမ်းနေသည်...")
-            if s["type"] == "demo":
-                files = tts_demo(chunks, ref, s["space"], cb)
-            else:
-                files = tts_burmese(chunks, ref, s["space"], cb)
-            st.success("✅ VoxCPM2 — အောင်မြင်")
-            break
-        except Exception as e:
-            last_error = str(e)
-            st.warning(f"⚠️ VoxCPM2 — Fail: {last_error[:80]}")
-            files = None
+        if len(lines) < 3:
             continue
 
-    if files is None:
-        st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS သီဟ Auto")
-        edge_tts_run(chunks, out, cb=cb)
-        st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
-        return out
+        timing = lines[1]
 
-    with open("concat.txt", "w", encoding="utf-8") as f:
-        for a in files: f.write(f"file '{a}'\n")
-    ffmpeg.input("concat.txt", format="concat", safe=0).output(
-        out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
-    return out
-
-def whisper_fast(video_path):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", "whisper_audio.wav"
-    ], capture_output=True, check=True)
-
-    speech_segments = []
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
-            vad_filter=False, beam_size=1,
-            condition_on_previous_text=False, temperature=0
+        match = re.search(
+            r"(\d+:\d+:\d+,\d+)\s*-->\s*"
+            r"(\d+:\d+:\d+,\d+)",
+            timing,
         )
-        for seg in segments:
-            speech_segments.append((seg.start, seg.end))
-    except Exception:
-        import whisper
-        model = whisper.load_model(WHISPER_MODEL)
-        result = model.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
-            condition_on_previous_text=False, beam_size=1, temperature=0
+
+        if not match:
+            continue
+
+        def parse_time(t):
+
+            h, m, rest = t.split(":")
+            s, ms = rest.split(",")
+
+            return (
+                int(h) * 3600
+                + int(m) * 60
+                + int(s)
+                + int(ms) / 1000
+            )
+
+        start = parse_time(
+            match.group(1)
         )
-        for seg in result["segments"]:
-            speech_segments.append((seg["start"], seg["end"]))
-    return speech_segments
 
-def silence_cut_v2(input_video, output_video="input_cut.mp4"):
-    t0 = time.time()
-    speech_segments = whisper_fast(input_video)
-    whisper_time = time.time() - t0
+        end = parse_time(
+            match.group(2)
+        )
 
-    if not speech_segments: raise Exception("Speech မတွေ့")
+        text = "\n".join(
+            lines[2:]
+        ).strip()
 
-    select_exprs = [f"between(t,{s:.3f},{e:.3f})" for s, e in speech_segments]
-    select_str = "+".join(select_exprs)
+        results.append(
+            {
+                "start": start,
+                "end": end,
+                "text": text,
+            }
+        )
 
-    cmd = ["ffmpeg", "-y", "-i", input_video,
-           "-vf", f"select='{select_str}',setpts=N/FRAME_RATE/TB",
-           "-af", f"aselect='{select_str}',asetpts=N/SR/TB",
-           "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
-           "-c:a", "aac", "-b:a", "128k", output_video]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+    return results
 
-    total = sum(e - s for s, e in speech_segments)
-    return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
 
-st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
-st.divider()
+# ============================================================
+# 10. SUBTITLE PNG
+# ============================================================
 
-if "script" not in st.session_state: st.session_state.script = ""
-script = st.text_area("Script", value=st.session_state.script, height=180,
-                       label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
-st.session_state.script = script
+def create_subtitle_png(
+    text,
+    output_path,
+    width=1080,
+    font_size=55,
+    text_color=(255, 255, 255, 255),
+    stroke_color=(0, 0, 0, 255),
+    stroke_width=5,
+):
 
-c1, c2 = st.columns([3, 1])
-with c1: st.caption(f"📝 {len(script):,}")
-with c2:
-    if st.button("🗑️ Clear", use_container_width=True):
-        st.session_state.script = ""; st.rerun()
-st.divider()
-
-st.subheader("📁 Step 2 — Video")
-vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
-if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
-st.divider()
-
-st.subheader("📝 Step 3 — Subtitle")
-use_sub = st.toggle("Burn-in", value=True)
-pos_y = 100
-
-if use_sub:
-    pos_y = st.slider("📍 Position", 0, 100, 100, 1)
-
-if vid and use_sub:
-    st.markdown("**🖼️ Preview**")
-    with st.spinner("Preview..."):
-        vid.seek(0)
-        with open("preview.mp4", "wb") as f: f.write(vid.read())
-        W, H, _ = vid_info("preview.mp4")
-        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA,
-                   box_width_ratio=BOX_WIDTH_RATIO)
-        cap = cv2.VideoCapture("preview.mp4"); ok, fr = cap.read(); cap.release()
-        if ok:
-            bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-            fg = Image.open("prev.png").convert("RGBA")
-            comp = Image.alpha_composite(bg, fg); pw = 720
-            comp.resize((pw, int(H*(pw/W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
-            st.image("prev_out.png", use_container_width=True)
-st.divider()
-
-st.subheader("🚀 Step 4 — Generate")
-
-use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True,
-                        help="Off ထားရင် — Edge TTS သီဟ ပဲ သုံးမယ်")
-
-if use_voxcpm:
-    st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS သီဟ Auto")
-    ref = st.file_uploader("🎤 Ref Audio (VoxCPM2) — Optional",
-                            type=["wav","mp3","m4a"], key="ref_up")
-    if ref:
-        with open("ref.wav", "wb") as f: f.write(ref.read())
-        st.session_state.ref = "ref.wav"
-        st.success("✅ Ref Audio")
-    else:
-        st.session_state.ref = None
-else:
-    st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
-    st.session_state.ref = None
-
-if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
-    if not script.strip(): st.error("Script paste"); st.stop()
-    if vid is None: st.error("Video Upload"); st.stop()
-
-    total_start = time.time(); step_times = {}
-    vid.seek(0)
-    with open("input.mp4", "wb") as f: f.write(vid.read())
-    _, _, vdur = vid_info("input.mp4")
-
-    # ၁။ Cut
-    t0 = time.time()
-    with st.spinner("✂️ Cut..."):
-        try:
-            silence_cut_v2("input.mp4", "input_cut.mp4")
-            shutil.move("input_cut.mp4", "input.mp4")
-            _, _, vdur = vid_info("input.mp4")
-        except Exception as e:
-            st.error(f"❌ Cut: {e}"); st.stop()
-    step_times["✂️ Cut"] = time.time() - t0
-
-    # ၂။ TTS
-    t0 = time.time()
-    pb = st.progress(0); txt = st.empty()
-    def cb(i, tot, c): pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}]")
     try:
-        tts_all(script, "voice.mp3", ref=st.session_state.get("ref"),
-                cb=cb, use_voxcpm=use_voxcpm)
-    except Exception as e:
-        st.error(f"TTS: {e}"); st.stop()
-    step_times["🎙️ TTS"] = time.time() - t0
+        from PIL import ImageFont
 
-    adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
-    tempo = max(0.5, min(2.0, adur/vdur))
-
-    # ၃။ Video + Audio
-    t0 = time.time()
-    with st.spinner("🎬 Render Base..."):
-        vi = ffmpeg.input("input.mp4")
-        va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
-        ffmpeg.output(vi.video, va, "temp.mp4",
-            vcodec='libx264', crf=ENC_CRF, preset='ultrafast', tune='fastdecode',
-            acodec='aac', audio_bitrate=AUDIO_BITRATE,
-            shortest=None, threads=0).run(overwrite_output=True)
-    step_times["🎬 Render"] = time.time() - t0
-
-    # ၄။ Bypass — Mirror + Crop — Auto
-    t0 = time.time()
-    with st.spinner("🛡️ Bypass — Mirror + Crop..."):
-        try:
-            video_bypass("temp.mp4", "bypass.mp4",
-                         crop_ratio=0.88, mirror=True)
-        except Exception as e:
-            st.warning(f"⚠️ Bypass Fail: {e}")
-            shutil.copy("temp.mp4", "bypass.mp4")
-    step_times["🛡️ Bypass"] = time.time() - t0
-
-    # ၅။ Subtitle Overlay
-    t0 = time.time()
-    with st.spinner("📝 Subtitle Overlay..."):
-        if use_sub:
-            sp = scr_to_srt(script, vdur, "sub.srt")
-            overlay("bypass.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA,
-                    box_width_ratio=BOX_WIDTH_RATIO)
+        if os.path.exists(FONT_PATH):
+            font = ImageFont.truetype(
+                FONT_PATH,
+                font_size,
+            )
         else:
-            shutil.copy("bypass.mp4", "final.mp4")
-    step_times["📝 Subtitle"] = time.time() - t0
+            font = ImageFont.load_default()
 
-    total_elapsed = time.time() - total_start
+    except Exception:
+        font = ImageFont.load_default()
 
-    st.markdown(f"""
-    <div class="timer-box">
-        <div class="timer-title">⏱️ TOTAL TIME</div>
-        <div class="timer-value">{total_elapsed:.1f}<span class="timer-unit">sec</span></div>
-    </div>
-    """, unsafe_allow_html=True)
+    dummy = Image.new(
+        "RGBA",
+        (width, 300),
+        (0, 0, 0, 0),
+    )
 
-    for name, t in step_times.items():
-        st.markdown(f"<div class='step-timer'>{name} — <b>{t:.1f}s</b></div>", unsafe_allow_html=True)
+    draw = ImageDraw.Draw(dummy)
 
-    st.success(f"✅ Done — ⏱️ {total_elapsed:.1f}s")
-    st.video("final.mp4")
-    with open("final.mp4", "rb") as f:
-        st.download_button("📥 Download", f, file_name="recap.mp4")
+    bbox = draw.multiline_textbbox(
+        (0, 0),
+        text,
+        font=font,
+        stroke_width=stroke_width,
+        spacing=10,
+        align="center",
+    )
+
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    img = Image.new(
+        "RGBA",
+        (
+            min(width, text_w + 80),
+            text_h + 60,
+        ),
+        (0, 0, 0, 0),
+    )
+
+    draw = ImageDraw.Draw(img)
+
+    x = (
+        img.width - text_w
+    ) / 2
+
+    y = 25
+
+    draw.multiline_text(
+        (
+            x,
+            y,
+        ),
+        text,
+        font=font,
+        fill=text_color,
+        stroke_width=stroke_width,
+        stroke_fill=stroke_color,
+        spacing=10,
+        align="center",
+    )
+
+    img.save(
+        output_path,
+        "PNG",
+    )
+
+    return output_path
+
+
+# ============================================================
+# 11. CREATE NEON ARROW PNG
+# ============================================================
+
+def create_arrow_png(
+    output_path,
+    direction="right",
+    size=90,
+    neon_color=(0, 255, 255),
+):
+
+    """
+    Creates one glowing arrowhead PNG.
+
+    direction:
+        right
+        down
+        left
+        up
+
+    This avoids Unicode font problems.
+    """
+
+    canvas_size = size * 2
+
+    base = Image.new(
+        "RGBA",
+        (
+            canvas_size,
+            canvas_size,
+        ),
+        (0, 0, 0, 0),
+    )
+
+    # --------------------------------------------------------
+    # Draw right-facing arrow
+    # --------------------------------------------------------
+
+    arrow = Image.new(
+        "RGBA",
+        (
+            canvas_size,
+            canvas_size,
+        ),
+        (0, 0, 0, 0),
+    )
+
+    draw = ImageDraw.Draw(arrow)
+
+    cx = canvas_size // 2
+    cy = canvas_size // 2
+
+    length = int(size * 0.95)
+    thickness = int(size * 0.18)
+    head = int(size * 0.45)
+
+    # Shaft
+    draw.rounded_rectangle(
+        (
+            cx - length // 2,
+            cy - thickness // 2,
+            cx + length // 2,
+            cy + thickness // 2,
+        ),
+        radius=thickness // 2,
+        fill=neon_color + (255,),
+    )
+
+    # Arrow head
+    draw.polygon(
+        [
+            (
+                cx + length // 2 + head // 2,
+                cy,
+            ),
+            (
+                cx + length // 2 - head,
+                cy - head,
+            ),
+            (
+                cx + length // 2 - head // 2,
+                cy,
+            ),
+            (
+                cx + length // 2 - head,
+                cy + head,
+            ),
+        ],
+        fill=neon_color + (255,),
+    )
+
+    # --------------------------------------------------------
+    # Glow
+    # --------------------------------------------------------
+
+    glow1 = arrow.filter(
+        ImageFilter.GaussianBlur(
+            radius=18
+        )
+    )
+
+    glow2 = arrow.filter(
+        ImageFilter.GaussianBlur(
+            radius=8
+        )
+    )
+
+    result = Image.new(
+        "RGBA",
+        arrow.size,
+        (0, 0, 0, 0),
+    )
+
+    result.alpha_composite(
+        glow1
+    )
+
+    result.alpha_composite(
+        glow2
+    )
+
+    result.alpha_composite(
+        arrow
+    )
+
+    # --------------------------------------------------------
+    # Rotate
+    # --------------------------------------------------------
+
+    rotation = {
+        "right": 0,
+        "down": 90,
+        "left": 180,
+        "up": 270,
+    }[direction]
+
+    result = result.rotate(
+        rotation,
+        expand=False,
+        resample=Image.Resampling.BICUBIC,
+    )
+
+    result.save(
+        output_path,
+        "PNG",
+    )
+
+    return output_path
+
+
+# ============================================================
+# 12. CREATE ALL ARROWS
+# ============================================================
+
+def create_arrow_assets(
+    temp_dir,
+    size=90,
+    color=(0, 255, 255),
+):
+
+    arrows = {}
+
+    for direction in [
+        "right",
+        "down",
+        "left",
+        "up",
+    ]:
+
+        path = os.path.join(
+            temp_dir,
+            f"arrow_{direction}.png",
+        )
+
+        create_arrow_png(
+            path,
+            direction,
+            size,
+            color,
+        )
+
+        arrows[direction] = path
+
+    return arrows
+
+
+# ============================================================
+# 13. NEON BORDER
+# ============================================================
+
+def make_neon_border_video(
+    input_video,
+    output_video,
+    speed=1.0,
+    border_width=14,
+    neon_color="0x00ffff",
+    arrow_size=90,
+):
+
+    """
+    ONE arrow continuously travels around the frame.
+
+    Clockwise path:
+
+        ➜ Top
+          ↓ Right
+        ← Bottom
+          ↑ Left
+
+    speed:
+        1.0 = 4 sec / full loop
+        2.0 = 2 sec / full loop
+        0.5 = 8 sec / full loop
+    """
+
+    duration = get_video_duration(
+        input_video
+    )
+
+    if duration <= 0:
+        raise RuntimeError(
+            "Video duration မရပါ"
+        )
+
+    temp_dir = make_temp_dir()
+
+    try:
+
+        # ----------------------------------------------------
+        # Arrow PNG assets
+        # ----------------------------------------------------
+
+        arrows = create_arrow_assets(
+            temp_dir,
+            size=arrow_size,
+            color=(0, 255, 255),
+        )
+
+        # ----------------------------------------------------
+        # Speed
+        # ----------------------------------------------------
+
+        speed = max(
+            0.1,
+            float(speed),
+        )
+
+        loop_duration = (
+            4.0 / speed
+        )
+
+        side_duration = (
+            1.0 / speed
+        )
+
+        # ----------------------------------------------------
+        # Border geometry
+        # ----------------------------------------------------
+
+        bw = int(border_width)
+
+        # Arrow dimensions
+        aw = int(arrow_size * 2)
+        ah = int(arrow_size * 2)
+
+        # ----------------------------------------------------
+        # FFmpeg filter
+        # ----------------------------------------------------
+
+        # Border glow
+        border_filter = (
+            "drawbox="
+            "x=0:"
+            "y=0:"
+            "w=iw:"
+            "h=ih:"
+            f"color={neon_color}@0.95:"
+            f"t={bw},"
+            "drawbox="
+            "x=4:"
+            "y=4:"
+            "w=iw-8:"
+            "h=ih-8:"
+            f"color={neon_color}@0.35:"
+            f"t={max(2, bw//3)}"
+        )
+
+        # ----------------------------------------------------
+        # Arrow path
+        # ----------------------------------------------------
+
+        #
+        # ffmpeg expression:
+        #
+        # p = mod(t, loop_duration)
+        #
+        # top:
+        #   x moves left -> right
+        #
+        # right:
+        #   y moves top -> bottom
+        #
+        # bottom:
+        #   x moves right -> left
+        #
+        # left:
+        #   y moves bottom -> top
+        #
+
+        side = side_duration
+        loop = loop_duration
+
+        # Safe inner path
+        margin = max(
+            bw + 5,
+            10
+        )
+
+        # Input dimensions are W/H.
+        #
+        # The arrow is centered on the border.
+        #
+
+        # ----------------------------------------------------
+        # First draw border
+        # ----------------------------------------------------
+
+        filter_complex = (
+            f"[0:v]{border_filter}[base];"
+        )
+
+        # ----------------------------------------------------
+        # TOP ARROW
+        # ----------------------------------------------------
+
+        filter_complex += (
+            "[1:v]format=rgba[toparrow];"
+            "[base][toparrow]"
+            "overlay="
+            f"x='{margin}+"
+            f"(W-{2*margin}-{aw})*"
+            f"(mod(t,{loop})/{side})':"
+            f"y='{margin/2}-{ah/2}':"
+            f"enable='lt(mod(t,{loop}),{side})'"
+            "[v1];"
+        )
+
+        # ----------------------------------------------------
+        # RIGHT ARROW
+        # ----------------------------------------------------
+
+        filter_complex += (
+            "[2:v]format=rgba[rightarrow];"
+            "[v1][rightarrow]"
+            "overlay="
+            f"x='W-{margin}-{aw/2}':"
+            f"y='{margin}+"
+            f"(H-{2*margin}-{ah})*"
+            f"((mod(t,{loop})-{side})/{side})':"
+            f"enable='between(mod(t,{loop}),{side},{2*side})'"
+            "[v2];"
+        )
+
+        # ----------------------------------------------------
+        # BOTTOM ARROW
+        # ----------------------------------------------------
+
+        filter_complex += (
+            "[3:v]format=rgba[bottomarrow];"
+            "[v2][bottomarrow]"
+            "overlay="
+            f"x='{margin}+"
+            f"(W-{2*margin}-{aw})*"
+            f"(1-((mod(t,{loop})-{2*side})/{side}))':"
+            f"y='H-{margin}-{ah/2}':"
+            f"enable='between(mod(t,{loop}),{2*side},{3*side})'"
+            "[v3];"
+        )
+
+        # ----------------------------------------------------
+        # LEFT ARROW
+        # ----------------------------------------------------
+
+        filter_complex += (
+            "[4:v]format=rgba[leftarrow];"
+            "[v3][leftarrow]"
+            "overlay="
+            f"x='{margin/2}-{aw/2}':"
+            f"y='{margin}+"
+            f"(H-{2*margin}-{ah})*"
+            f"(1-((mod(t,{loop})-{3*side})/{side}))':"
+            f"enable='gte(mod(t,{loop}),{3*side})'"
+            "[v]"
+        )
+
+        # ----------------------------------------------------
+        # FFmpeg command
+        # ----------------------------------------------------
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+
+            "-i",
+            input_video,
+
+            "-loop",
+            "1",
+            "-i",
+            arrows["right"],
+
+            "-loop",
+            "1",
+            "-i",
+            arrows["down"],
+
+            "-loop",
+            "1",
+            "-i",
+            arrows["left"],
+
+            "-loop",
+            "1",
+            "-i",
+            arrows["up"],
+
+            "-filter_complex",
+            filter_complex,
+
+            "-map",
+            "[v]",
+
+            "-map",
+            "0:a?",
+
+            "-c:v",
+            "libx264",
+
+            "-preset",
+            "veryfast",
+
+            "-crf",
+            "20",
+
+            "-pix_fmt",
+            "yuv420p",
+
+            "-c:a",
+            "aac",
+
+            "-b:a",
+            "192k",
+
+            "-shortest",
+
+            output_video,
+        ]
+
+        run_cmd(cmd)
+
+        return output_video
+
+    finally:
+
+        shutil.rmtree(
+            temp_dir,
+            ignore_errors=True,
+        )
+
+
+# ============================================================
+# 14. MIRROR / CROP
+# ============================================================
+
+def process_video_for_tiktok(
+    input_video,
+    output_video,
+    crop_ratio=0.95,
+    mirror=False,
+):
+
+    filters = []
+
+    # --------------------------------------------------------
+    # Crop slightly
+    # --------------------------------------------------------
+
+    filters.append(
+        f"crop="
+        f"iw*{crop_ratio}:"
+        f"ih*{crop_ratio}:"
+        f"(iw-iw*{crop_ratio})/2:"
+        f"(ih-ih*{crop_ratio})/2"
+    )
+
+    # --------------------------------------------------------
+    # Mirror
+    # --------------------------------------------------------
+
+    if mirror:
+        filters.append(
+            "hflip"
+        )
+
+    vf = ",".join(filters)
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_video,
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        output_video,
+    ]
+
+    run_cmd(cmd)
+
+    return output_video
+
+
+# ============================================================
+# 15. AUDIO NORMALIZATION
+# ============================================================
+
+def normalize_audio(
+    input_audio,
+    output_audio,
+):
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_audio,
+        "-af",
+        (
+            "loudnorm="
+            "I=-16:"
+            "TP=-1.5:"
+            "LRA=11"
+        ),
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        output_audio,
+    ]
+
+    run_cmd(cmd)
+
+    return output_audio
+
+
+# ============================================================
+# 16. MUTE ORIGINAL VIDEO
+# ============================================================
+
+def mute_video(
+    input_video,
+    output_video,
+):
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_video,
+        "-c:v",
+        "copy",
+        "-an",
+        output_video,
+    ]
+
+    run_cmd(cmd)
+
+    return output_video
+
+
+# ============================================================
+# 17. MERGE VOICEOVER
+# ============================================================
+
+def merge_voiceover(
+    video,
+    audio,
+    output,
+):
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+
+        "-i",
+        video,
+
+        "-i",
+        audio,
+
+        "-map",
+        "0:v:0",
+
+        "-map",
+        "1:a:0",
+
+        "-c:v",
+        "copy",
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "192k",
+
+        "-shortest",
+
+        output,
+    ]
+
+    run_cmd(cmd)
+
+    return output
+
+
+# ============================================================
+# 18. EDGE TTS
+# ============================================================
+
+async def edge_tts_generate(
+    text,
+    output_file,
+    voice,
+    rate="+0%",
+):
+
+    import edge_tts
+
+    communicate = edge_tts.Communicate(
+        text=text,
+        voice=voice,
+        rate=rate,
+    )
+
+    await communicate.save(
+        output_file
+    )
+
+
+def generate_edge_tts(
+    text,
+    output_file,
+    voice=DEFAULT_VOICE_MALE,
+    rate="+0%",
+):
+
+    asyncio.run(
+        edge_tts_generate(
+            text,
+            output_file,
+            voice,
+            rate,
+        )
+    )
+
+    return output_file
+
+
+# ============================================================
+# 19. TTS SPEED
+# ============================================================
+
+def change_audio_speed(
+    input_audio,
+    output_audio,
+    speed=1.3,
+):
+
+    speed = float(speed)
+
+    # FFmpeg atempo max/min each filter
+    # is approximately 0.5 - 2.0.
+    #
+    # For 1.3 we can use one filter.
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_audio,
+        "-filter:a",
+        f"atempo={speed}",
+        output_audio,
+    ]
+
+    run_cmd(cmd)
+
+    return output_audio
+
+
+# ============================================================
+# 20. WHISPER
+# ============================================================
+
+@st.cache_resource
+def load_whisper_model():
+
+    import whisper
+
+    return whisper.load_model(
+        "tiny"
+    )
+
+
+def transcribe_audio(
+    audio_file,
+):
+
+    model = load_whisper_model()
+
+    result = model.transcribe(
+        audio_file,
+        language="my",
+        task="transcribe",
+        fp16=False,
+    )
+
+    segments = []
+
+    for seg in result.get(
+        "segments",
+        []
+    ):
+
+        segments.append(
+            {
+                "start": float(
+                    seg["start"]
+                ),
+                "end": float(
+                    seg["end"]
+                ),
+                "text": seg["text"].strip(),
+            }
+        )
+
+    return segments
+
+
+# ============================================================
+# 21. SILENCE CUT
+# ============================================================
+
+def remove_silence(
+    input_audio,
+    output_audio,
+    silence_threshold="-40dB",
+):
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_audio,
+        "-af",
+        (
+            "silenceremove="
+            "start_periods=1:"
+            "start_duration=0.1:"
+            f"start_threshold={silence_threshold}:"
+            "stop_periods=1:"
+            "stop_duration=0.1:"
+            f"stop_threshold={silence_threshold}"
+        ),
+        output_audio,
+    ]
+
+    run_cmd(cmd)
+
+    return output_audio
+
+
+# ============================================================
+# 22. CONCAT AUDIO
+# ============================================================
+
+def concat_audio_files(
+    files,
+    output,
+):
+
+    if not files:
+        raise ValueError(
+            "Audio files မရှိပါ"
+        )
+
+    temp_dir = make_temp_dir()
+
+    try:
+
+        list_file = os.path.join(
+            temp_dir,
+            "concat.txt",
+        )
+
+        with open(
+            list_file,
+            "w",
+            encoding="utf-8",
+        ) as f:
+
+            for path in files:
+
+                safe = os.path.abspath(
+                    path
+                ).replace(
+                    "'",
+                    "'\\''"
+                )
+
+                f.write(
+                    f"file '{safe}'\n"
+                )
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            list_file,
+            "-c",
+            "copy",
+            output,
+        ]
+
+        run_cmd(cmd)
+
+        return output
+
+    finally:
+
+        shutil.rmtree(
+            temp_dir,
+            ignore_errors=True,
+        )
+
+
+# ============================================================
+# 23. SUBTITLE OVERLAY
+# ============================================================
+
+def burn_subtitles(
+    input_video,
+    srt_file,
+    output_video,
+    font_size=24,
+):
+
+    # Use subtitles filter.
+    #
+    # If Myanmar font is available, use it.
+    #
+
+    font_name = "Arial"
+
+    if os.path.exists(
+        FONT_PATH
+    ):
+        font_name = "Myanmar Padaung"
+
+    vf = (
+        f"subtitles='{srt_file}':"
+        f"force_style="
+        f"'FontName={font_name},"
+        f"FontSize={font_size},"
+        f"PrimaryColour=&H00FFFFFF,"
+        f"OutlineColour=&H00000000,"
+        f"BorderStyle=1,"
+        f"Outline=3,"
+        f"Shadow=1,"
+        f"Alignment=2,"
+        f"MarginV=70'"
+    )
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_video,
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-c:a",
+        "copy",
+        output_video,
+    ]
+
+    run_cmd(cmd)
+
+    return output_video
+
+
+# ============================================================
+# 24. VIDEO + SUBTITLE + AUDIO
+# ============================================================
+
+def create_final_video(
+    video,
+    audio,
+    output,
+):
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+
+        "-i",
+        video,
+
+        "-i",
+        audio,
+
+        "-map",
+        "0:v:0",
+
+        "-map",
+        "1:a:0",
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "veryfast",
+
+        "-crf",
+        "20",
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "192k",
+
+        "-shortest",
+
+        output,
+    ]
+
+    run_cmd(cmd)
+
+    return output
+
+
+# ============================================================
+# 25. UI HEADER
+# ============================================================
+
+st.markdown(
+    '<div class="main-title">🎬 Myanmar TTS Recap Studio</div>',
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    '<div class="sub-title">'
+    'Movie Recap • Burmese TTS • Subtitle • TikTok Neon Border'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+# ============================================================
+# 26. SESSION STATE
+# ============================================================
+
+if "work_dir" not in st.session_state:
+    st.session_state.work_dir = make_temp_dir()
+
+WORK_DIR = st.session_state.work_dir
+
+# ============================================================
+# 27. STEP 1 — SCRIPT
+# ============================================================
+
+st.markdown(
+    "## 📝 Step 1 — Burmese Script"
+)
+
+script_text = st.text_area(
+    "Burmese Recap Script",
+    height=260,
+    placeholder=(
+        "ဒီနေရာမှာ Burmese recap script "
+        "ထည့်ပါ..."
+    ),
+)
+
+# ============================================================
+# 28. STEP 2 — VIDEO
+# ============================================================
+
+st.markdown(
+    "## 🎬 Step 2 — Upload Video"
+)
+
+uploaded_video = st.file_uploader(
+    "Upload MP4 / MOV / MKV",
+    type=[
+        "mp4",
+        "mov",
+        "mkv",
+        "webm",
+    ],
+)
+
+video_path = None
+
+if uploaded_video:
+
+    video_path = os.path.join(
+        WORK_DIR,
+        safe_filename(
+            uploaded_video.name
+        ),
+    )
+
+    with open(
+        video_path,
+        "wb",
+    ) as f:
+
+        f.write(
+            uploaded_video.getbuffer()
+        )
+
+    st.success(
+        f"✅ Uploaded: {uploaded_video.name}"
+    )
+
+    duration = get_video_duration(
+        video_path
+    )
+
+    if duration:
+        st.caption(
+            f"Duration: {duration:.2f} sec"
+        )
+
+# ============================================================
+# 29. STEP 3 — VOICE
+# ============================================================
+
+st.markdown(
+    "## 🎙️ Step 3 — Burmese Voice"
+)
+
+voice_engine = st.selectbox(
+    "Voice Engine",
+    [
+        "Edge TTS",
+        "VoxCPM",
+    ],
+)
+
+if voice_engine == "Edge TTS":
+
+    voice_gender = st.radio(
+        "Voice",
+        [
+            "Male — Thiha",
+            "Female — Nilar",
+        ],
+        horizontal=True,
+    )
+
+    if voice_gender.startswith(
+        "Male"
+    ):
+        selected_voice = (
+            DEFAULT_VOICE_MALE
+        )
+    else:
+        selected_voice = (
+            DEFAULT_VOICE_FEMALE
+        )
+
+else:
+
+    st.info(
+        "VoxCPM model/API ကို "
+        "သင့် environment အလိုက် configure လုပ်ပါ။"
+    )
+
+    selected_voice = (
+        DEFAULT_VOICE_MALE
+    )
+
+tts_speed = st.slider(
+    "🎚️ Voice Speed",
+    min_value=0.8,
+    max_value=2.0,
+    value=1.3,
+    step=0.05,
+)
+
+# ============================================================
+# 30. STEP 4 — MIRROR / CROP
+# ============================================================
+
+st.markdown(
+    "## 📱 Step 4 — TikTok Video"
+)
+
+c1, c2 = st.columns(2)
+
+with c1:
+
+    mirror_video = st.checkbox(
+        "↔️ Mirror Video",
+        value=False,
+    )
+
+with c2:
+
+    crop_ratio = st.slider(
+        "Crop Ratio",
+        min_value=0.90,
+        max_value=1.0,
+        value=0.95,
+        step=0.01,
+    )
+
+# ============================================================
+# 31. STEP 5 — NEON BORDER
+# ============================================================
+
+st.markdown(
+    "## ⚡ Step 5 — TikTok Neon Border"
+)
+
+enable_neon = st.checkbox(
+    "Enable Neon Border",
+    value=True,
+)
+
+if enable_neon:
+
+    neon_speed = st.slider(
+        "🏹 Arrow Speed",
+        min_value=0.25,
+        max_value=4.0,
+        value=1.0,
+        step=0.25,
+        help=(
+            "1.0 = 4 seconds per full loop. "
+            "2.0 = 2 seconds. "
+            "0.5 = 8 seconds."
+        ),
+    )
+
+    border_width = st.slider(
+        "Neon Border Width",
+        min_value=5,
+        max_value=30,
+        value=14,
+        step=1,
+    )
+
+    arrow_size = st.slider(
+        "Arrow Size",
+        min_value=40,
+        max_value=120,
+        value=70,
+        step=5,
+    )
+
+    st.markdown(
+        f"""
+<div class="neon-info">
+
+<b>🏹 Arrow Path</b><br><br>
+
+➜ TOP — Left → Right<br>
+↓ RIGHT — Top → Bottom<br>
+← BOTTOM — Right → Left<br>
+↑ LEFT — Bottom → Top<br><br>
+
+<b>Speed:</b> {neon_speed}x<br>
+<b>Full loop:</b> {4/neon_speed:.2f} seconds
+
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+# ============================================================
+# 32. STEP 6 — SUBTITLE
+# ============================================================
+
+st.markdown(
+    "## 💬 Step 6 — Subtitle"
+)
+
+enable_subtitle = st.checkbox(
+    "Generate Burmese Subtitle",
+    value=True,
+)
+
+subtitle_font_size = st.slider(
+    "Subtitle Font Size",
+    min_value=18,
+    max_value=60,
+    value=28,
+    step=2,
+)
+
+# ============================================================
+# 33. STEP 7 — GENERATE
+# ============================================================
+
+st.markdown(
+    "## 🚀 Step 7 — Generate"
+)
+
+generate = st.button(
+    "🔥 GENERATE FINAL VIDEO",
+    type="primary",
+    use_container_width=True,
+)
+
+# ============================================================
+# 34. GENERATION
+# ============================================================
+
+if generate:
+
+    if not script_text.strip():
+        st.error(
+            "❌ Burmese script ထည့်ပါ"
+        )
+        st.stop()
+
+    if not video_path:
+        st.error(
+            "❌ Video upload လုပ်ပါ"
+        )
+        st.stop()
+
+    progress = st.progress(
+        0
+    )
+
+    status = st.empty()
+
+    try:
+
+        # ----------------------------------------------------
+        # FILE PATHS
+        # ----------------------------------------------------
+
+        processed_video = os.path.join(
+            WORK_DIR,
+            "01_processed.mp4",
+        )
+
+        muted_video = os.path.join(
+            WORK_DIR,
+            "02_muted.mp4",
+        )
+
+        border_video = os.path.join(
+            WORK_DIR,
+            "03_neon.mp4",
+        )
+
+        voice_raw = os.path.join(
+            WORK_DIR,
+            "04_voice_raw.mp3",
+        )
+
+        voice_fast = os.path.join(
+            WORK_DIR,
+            "05_voice_fast.mp3",
+        )
+
+        voice_clean = os.path.join(
+            WORK_DIR,
+            "06_voice_clean.mp3",
+        )
+
+        final_video = os.path.join(
+            WORK_DIR,
+            "Myanmar_Recap_Final.mp4",
+        )
+
+        srt_file = os.path.join(
+            WORK_DIR,
+            "Myanmar_Recap.srt",
+        )
+
+        # ----------------------------------------------------
+        # 1. VIDEO PROCESS
+        # ----------------------------------------------------
+
+        status.write(
+            "🎬 Video ကို prepare လုပ်နေပါတယ်..."
+        )
+
+        process_video_for_tiktok(
+            video_path,
+            processed_video,
+            crop_ratio,
+            mirror_video,
+        )
+
+        progress.progress(
+            15
+        )
+
+        # ----------------------------------------------------
+        # 2. MUTE ORIGINAL
+        # ----------------------------------------------------
+
+        status.write(
+            "🔇 Original audio ကို mute လုပ်နေပါတယ်..."
+        )
+
+        mute_video(
+            processed_video,
+            muted_video,
+        )
+
+        progress.progress(
+            25
+        )
+
+        # ----------------------------------------------------
+        # 3. NEON BORDER
+        # ----------------------------------------------------
+
+        if enable_neon:
+
+            status.write(
+                "⚡ Neon border + moving arrow..."
+            )
+
+            make_neon_border_video(
+                muted_video,
+                border_video,
+                speed=neon_speed,
+                border_width=border_width,
+                arrow_size=arrow_size,
+            )
+
+        else:
+
+            shutil.copy2(
+                muted_video,
+                border_video,
+            )
+
+        progress.progress(
+            45
+        )
+
+        # ----------------------------------------------------
+        # 4. TTS
+        # ----------------------------------------------------
+
+        status.write(
+            "🎙️ Burmese voice generate လုပ်နေပါတယ်..."
+        )
+
+        if voice_engine == "Edge TTS":
+
+            generate_edge_tts(
+                script_text.strip(),
+                voice_raw,
+                selected_voice,
+                rate="+0%",
+            )
+
+        else:
+
+            st.warning(
+                "VoxCPM integration မထည့်ရသေးတဲ့အတွက် "
+                "Edge TTS ကို fallback အဖြစ်သုံးနေပါတယ်။"
+            )
+
+            generate_edge_tts(
+                script_text.strip(),
+                voice_raw,
+                DEFAULT_VOICE_MALE,
+                rate="+0%",
+            )
+
+        progress.progress(
+            60
+        )
+
+        # ----------------------------------------------------
+        # 5. SPEED
+        # ----------------------------------------------------
+
+        status.write(
+            f"🎚️ Voice {tts_speed}x speed..."
+        )
+
+        change_audio_speed(
+            voice_raw,
+            voice_fast,
+            tts_speed,
+        )
+
+        progress.progress(
+            70
+        )
+
+        # ----------------------------------------------------
+        # 6. REMOVE SILENCE
+        # ----------------------------------------------------
+
+        status.write(
+            "✂️ Silence တွေကို clean လုပ်နေပါတယ်..."
+        )
+
+        try:
+
+            remove_silence(
+                voice_fast,
+                voice_clean,
+            )
+
+        except Exception:
+
+            shutil.copy2(
+                voice_fast,
+                voice_clean,
+            )
+
+        progress.progress(
+            78
+        )
+
+        # ----------------------------------------------------
+        # 7. SUBTITLE
+        # ----------------------------------------------------
+
+        subtitle_video = border_video
+
+        if enable_subtitle:
+
+            status.write(
+                "💬 Burmese subtitle generate လုပ်နေပါတယ်..."
+            )
+
+            # Whisper can transcribe generated voice
+            segments = transcribe_audio(
+                voice_clean
+            )
+
+            if segments:
+
+                srt_text = create_srt(
+                    segments
+                )
+
+                with open(
+                    srt_file,
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+
+                    f.write(
+                        srt_text
+                    )
+
+                subtitle_video = os.path.join(
+                    WORK_DIR,
+                    "07_subtitle.mp4",
+                )
+
+                try:
+
+                    burn_subtitles(
+                        border_video,
+                        srt_file,
+                        subtitle_video,
+                        subtitle_font_size,
+                    )
+
+                except Exception as e:
+
+                    st.warning(
+                        "Subtitle burn မအောင်မြင်ပါ။ "
+                        "Subtitle မပါဘဲ ဆက်လုပ်ပါမယ်။"
+                    )
+
+                    subtitle_video = border_video
+
+            else:
+
+                st.warning(
+                    "Whisper subtitle မထုတ်နိုင်ပါ။"
+                )
+
+        progress.progress(
+            88
+        )
+
+        # ----------------------------------------------------
+        # 8. FINAL MERGE
+        # ----------------------------------------------------
+
+        status.write(
+            "🎬 Final MP4 ပြုလုပ်နေပါတယ်..."
+        )
+
+        create_final_video(
+            subtitle_video,
+            voice_clean,
+            final_video,
+        )
+
+        progress.progress(
+            100
+        )
+
+        status.success(
+            "✅ Final video ready!"
+        )
+
+        # ----------------------------------------------------
+        # 9. PREVIEW
+        # ----------------------------------------------------
+
+        st.markdown(
+            "## 🎥 Preview"
+        )
+
+        st.video(
+            final_video
+        )
+
+        # ----------------------------------------------------
+        # 10. DOWNLOAD
+        # ----------------------------------------------------
+
+        with open(
+            final_video,
+            "rb",
+        ) as f:
+
+            video_bytes = f.read()
+
+        st.download_button(
+            "⬇️ Download Final MP4",
+            data=video_bytes,
+            file_name=(
+                "Myanmar_Recap_Final.mp4"
+            ),
+            mime="video/mp4",
+            use_container_width=True,
+        )
+
+        # ----------------------------------------------------
+        # 11. SRT DOWNLOAD
+        # ----------------------------------------------------
+
+        if os.path.exists(
+            srt_file
+        ):
+
+            with open(
+                srt_file,
+                "rb",
+            ) as f:
+
+                srt_bytes = f.read()
+
+            st.download_button(
+                "⬇️ Download SRT",
+                data=srt_bytes,
+                file_name=(
+                    "Myanmar_Recap.srt"
+                ),
+                mime="application/x-subrip",
+                use_container_width=True,
+            )
+
+    except Exception as e:
+
+        progress.progress(
+            0
+        )
+
+        status.error(
+            "❌ Generation failed"
+        )
+
+        st.exception(e)
+
+# ============================================================
+# 35. FOOTER
+# ============================================================
+
+st.markdown(
+    """
+<hr>
+
+<div style="
+text-align:center;
+color:#656b7a;
+font-size:12px;
+padding:15px;
+">
+
+Myanmar TTS Recap Studio<br>
+🎬 Movie Recap • 🇲🇲 Burmese Voice • ⚡ Neon Border
+
+</div>
+""",
+    unsafe_allow_html=True,
+)
