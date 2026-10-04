@@ -17,8 +17,8 @@ PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
 FS, BH, BA = 30, 100, 200
-ENC_PRESET = "ultrafast"
-ENC_CRF = 23
+ENC_PRESET = "fast"
+ENC_CRF = 18
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 TTS_WORKERS = 3
@@ -31,9 +31,10 @@ BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
 CORNER_RADIUS = 20
 
-# TikTok Logo Colors
+# TikTok Logo Colors (တိကျသော တန်ဖိုးများ)
 TIKTOK_CYAN = "#25F4EE"
 TIKTOK_MAGENTA = "#FE2C55"
+TIKTOK_BLACK = "#000000"
 
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
@@ -255,8 +256,8 @@ def split_scr(t, mc=TTS_CHUNK):
 
 
 def video_bypass(input_video, output_video="bypass.mp4",
-                 crop_ratio=0.90, mirror=True):
-    """Video Filter — Mirror + Crop"""
+                 crop_ratio=0.95, mirror=True):
+    """Video Filter — Mirror + Crop (Quality မကျအောင်)"""
     W, H, dur = vid_info(input_video)
     filters = []
 
@@ -266,7 +267,6 @@ def video_bypass(input_video, output_video="bypass.mp4",
         if ch % 2 != 0: ch -= 1
         cx = (W - cw) // 2; cy = (H - ch) // 2
         filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
-        filters.append(f"scale={W}:{H}")
 
     if mirror:
         filters.append("hflip")
@@ -276,7 +276,7 @@ def video_bypass(input_video, output_video="bypass.mp4",
     cmd = [
         "ffmpeg", "-y", "-i", input_video,
         "-vf", vf,
-        "-c:v", "libx264", "-crf", str(ENC_CRF), "-preset", "ultrafast",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
         "-c:a", "copy",
         output_video
     ]
@@ -286,45 +286,47 @@ def video_bypass(input_video, output_video="bypass.mp4",
     return output_video
 
 
-# ==================== TikTok Neon Border Effect (FIXED) ====================
+# ==================== TikTok Neon Border Effect (3-Layer) ====================
 
 def tiktok_neon_border(video_path, output_path,
                        thickness=25,
-                       cyan=TIKTOK_CYAN, magenta=TIKTOK_MAGENTA):
+                       cyan=TIKTOK_CYAN, magenta=TIKTOK_MAGENTA,
+                       black=TIKTOK_BLACK):
     """
-    TikTok Neon Border — Video ကို မဖုံးဘဲ ဘေးဘောင်မှာ အလင်းတန်း
-    - Cyan + Magenta ၂ လွှာ
-    - Glow effect
+    TikTok Neon Border — ပုံထဲကအတိုင်း ၃ လွှာ
+    - အနက်ရောင် (အောက်ခံ)
+    - Cyan (အပြင်ဘက်)
+    - Magenta (အတွင်းဘက်)
     """
     W, H, dur = vid_info(video_path)
     pad = thickness
 
-    # Border ကို ဘောင်ပဲ ဖြစ်အောင် drawbox ကို တိုက်ရိုက်သုံး
-    # replace=0 က မူရင်း အပေါ်မှာ ထပ်ဆွဲ
+    # ၃ လွှာ border — အရောင် သီးသန့်
     fc = (
         # 1. Video ကို သေးငယ်ပြီး pad ထည့် (border နေရာ)
         f"[0:v]scale={W-2*pad}:{H-2*pad},"
         f"pad={W}:{H}:{pad}:{pad}:color=black@0[v0];"
 
-        # 2. Cyan border — ဘောင်ပဲ
+        # 2. အနက်ရောင် border — အောက်ခံ အထူဆုံး
         f"[v0]drawbox=x=0:y=0:w={W}:h={H}:"
-        f"color={cyan}@0.9:t={pad}:replace=0[v1];"
+        f"color={black}@1.0:t={pad}:replace=0[v1];"
 
-        # 3. Magenta border — အတွင်းဘက် ထပ်ထည့် (ပိုပါးတဲ့)
-        f"[v1]drawbox=x={pad//2}:y={pad//2}:"
-        f"w={W-pad}:h={H-pad}:"
-        f"color={magenta}@0.7:t={max(2,pad//3)}:replace=0[v2];"
+        # 3. Cyan border — အပြင်ဘက် (အနက်ရောင် ပေါ်)
+        f"[v1]drawbox=x=0:y=0:w={W}:h={H}:"
+        f"color={cyan}@1.0:t={max(3, pad//3)}:replace=0[v2];"
 
-        # 4. Glow အတွက် gblur
-        f"[v2]gblur=sigma=3[outv]"
+        # 4. Magenta border — အတွင်းဘက်
+        f"[v2]drawbox=x={pad}:y={pad}:"
+        f"w={W-2*pad}:h={H-2*pad}:"
+        f"color={magenta}@1.0:t={max(3, pad//3)}:replace=0[outv]"
     )
 
     cmd = [
         "ffmpeg", "-y", "-i", video_path,
         "-filter_complex", fc,
         "-map", "[outv]", "-map", "0:a?",
-        "-c:v", "libx264", "-crf", str(ENC_CRF),
-        "-preset", "ultrafast", "-tune", "fastdecode",
+        "-c:v", "libx264", "-crf", "18",
+        "-preset", "fast", "-tune", "fastdecode",
         "-c:a", "copy", output_path
     ]
     r = subprocess.run(cmd, capture_output=True, text=True,
@@ -332,6 +334,60 @@ def tiktok_neon_border(video_path, output_path,
     if r.returncode != 0:
         raise Exception(f"Neon: {(r.stderr or '')[-500:]}")
     return output_path
+
+
+def bypass_and_neon(input_video, output_video,
+                    crop_ratio=0.95, mirror=True, thickness=25):
+    """Bypass + Neon Border — တစ်ခါတည်း (Quality မကျ)"""
+    W, H, dur = vid_info(input_video)
+    pad = thickness
+    filters = []
+
+    # 1. Crop
+    if crop_ratio != 1.0:
+        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
+        if cw % 2 != 0: cw -= 1
+        if ch % 2 != 0: ch -= 1
+        cx = (W - cw) // 2; cy = (H - ch) // 2
+        filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
+
+    # 2. Mirror
+    if mirror:
+        filters.append("hflip")
+
+    # 3. Pad for border
+    filters.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
+
+    # 4. အနက်ရောင် border — အောက်ခံ
+    filters.append(
+        f"drawbox=x=0:y=0:w={W}:h={H}:"
+        f"color={TIKTOK_BLACK}@1.0:t={pad}:replace=0"
+    )
+
+    # 5. Cyan border — အပြင်ဘက်
+    filters.append(
+        f"drawbox=x=0:y=0:w={W}:h={H}:"
+        f"color={TIKTOK_CYAN}@1.0:t={max(3, pad//3)}:replace=0"
+    )
+
+    # 6. Magenta border — အတွင်းဘက်
+    filters.append(
+        f"drawbox=x={pad}:y={pad}:w={W-2*pad}:h={H-2*pad}:"
+        f"color={TIKTOK_MAGENTA}@1.0:t={max(3, pad//3)}:replace=0"
+    )
+
+    vf = ",".join(filters)
+
+    cmd = [
+        "ffmpeg", "-y", "-i", input_video,
+        "-vf", vf,
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "copy", output_video
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0:
+        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+    return output_video
 
 
 # ==================== TTS Functions ====================
@@ -545,11 +601,11 @@ st.divider()
 
 st.subheader("✨ Step 4 — TikTok Neon Border")
 use_neon = st.toggle("✨ TikTok Neon Border ထည့်မလား?", value=True,
-                     help="Cyan + Magenta အရောင် border effect")
+                     help="3-layer border: Black + Cyan + Magenta")
 if use_neon:
-    neon_thickness = st.slider("📏 Border အထူ", 10, 50, 25, 1)
+    neon_thickness = st.slider("📏 Border အထူ", 15, 60, 30, 1)
 else:
-    neon_thickness = 25
+    neon_thickness = 30
 st.divider()
 
 st.subheader("🚀 Step 5 — Generate")
@@ -611,38 +667,27 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         vi = ffmpeg.input("input.mp4")
         va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
         ffmpeg.output(vi.video, va, "temp.mp4",
-            vcodec='libx264', crf=ENC_CRF, preset='ultrafast', tune='fastdecode',
+            vcodec='libx264', crf=ENC_CRF, preset='fast', tune='fastdecode',
             acodec='aac', audio_bitrate=AUDIO_BITRATE,
             shortest=None, threads=0).run(overwrite_output=True)
     step_times["🎬 Render"] = time.time() - t0
 
-    # ၄။ Bypass — Mirror + Crop — Auto
+    # ၄။ Bypass + Neon Border — တစ်ခါတည်း
     t0 = time.time()
-    with st.spinner("🛡️ Bypass — Mirror + Crop..."):
+    with st.spinner("🛡️ Bypass + ✨ Neon Border..."):
         try:
-            video_bypass("temp.mp4", "bypass.mp4",
-                         crop_ratio=0.90, mirror=True)
+            if use_neon:
+                bypass_and_neon("temp.mp4", "bypass.mp4",
+                                crop_ratio=0.95, mirror=True,
+                                thickness=neon_thickness)
+                st.success("✅ Bypass + Neon Border ထည့်ပြီး")
+            else:
+                video_bypass("temp.mp4", "bypass.mp4",
+                             crop_ratio=0.95, mirror=True)
         except Exception as e:
-            st.warning(f"⚠️ Bypass Fail: {e}")
+            st.warning(f"⚠️ Fail: {e}")
             shutil.copy("temp.mp4", "bypass.mp4")
-    step_times["🛡️ Bypass"] = time.time() - t0
-
-    # ၄.၅ TikTok Neon Border Effect
-    t0 = time.time()
-    if use_neon:
-        with st.spinner("✨ TikTok Neon Border..."):
-            try:
-                tiktok_neon_border(
-                    "bypass.mp4", "neon.mp4",
-                    thickness=neon_thickness
-                )
-                shutil.move("neon.mp4", "bypass.mp4")
-                st.success("✅ TikTok Neon Border ထည့်ပြီး")
-            except Exception as e:
-                st.warning(f"⚠️ Neon Fail: {e}")
-        step_times["✨ Neon"] = time.time() - t0
-    else:
-        step_times["✨ Neon"] = 0.0
+    step_times["🛡️ Bypass+Neon"] = time.time() - t0
 
     # ၅။ Subtitle Overlay
     t0 = time.time()
