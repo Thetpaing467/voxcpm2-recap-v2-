@@ -321,13 +321,14 @@ def bypass_and_neon(input_video, output_video,
     return output_video
 
 
-def bypass_and_neon_animated(input_video, output_video,
-                             crop_ratio=0.95, mirror=True,
-                             thickness=30, speed=1.0):
+def bypass_and_neon_running_dot(input_video, output_video,
+                                crop_ratio=0.95, mirror=True,
+                                thickness=30, speed=1.0,
+                                dot_size=50):
     """
-    Bypass + Animated Neon Border — eq brightness pulse
-    - Cyan နဲ့ Magenta အရောင် တိကျ
-    - Brightness လှုပ်ရှားမှု
+    Running Dot — မျှားဦး ဘောင်အတိုင်း ပတ်ချာလည် လည်ပတ်
+    - Cyan မျှားဦး (clockwise)
+    - Magenta မျှားဦး (counter-clockwise)
     """
     W, H, dur = vid_info(input_video)
     pad = thickness
@@ -346,24 +347,59 @@ def bypass_and_neon_animated(input_video, output_video,
     pre_filters.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
     vf = ",".join(pre_filters)
 
-    # ✅ eq filter — brightness လှုပ်ရှားမှု
+    # 🎯 မျှားဦး လည်ပတ်မှု — ၄ ခြမ်း
+    # Phase 0-1: Top    (x: 0→W,  y: 0)
+    # Phase 1-2: Right  (x: W,    y: 0→H)
+    # Phase 2-3: Bottom (x: W→0,  y: H)
+    # Phase 3-4: Left   (x: 0,    y: H→0)
+
+    period = 4.0  # ၄ စက္ကန့် ၁ ပတ်
+
+    # x coordinate
+    x_expr = (
+        f"if(lt(mod(t*{speed},{period}),1),"
+        f"mod(t*{speed},{period})*({W}-{dot_size}),"
+        f"if(lt(mod(t*{speed},{period}),2),{W}-{dot_size},"
+        f"if(lt(mod(t*{speed},{period}),3),"
+        f"({W}-{dot_size})*(3-mod(t*{speed},{period})),"
+        f"0)))"
+    )
+
+    # y coordinate
+    y_expr = (
+        f"if(lt(mod(t*{speed},{period}),1),0,"
+        f"if(lt(mod(t*{speed},{period}),2),"
+        f"({H}-{dot_size})*(mod(t*{speed},{period})-1),"
+        f"if(lt(mod(t*{speed},{period}),3),{H}-{dot_size},"
+        f"({H}-{dot_size})*(4-mod(t*{speed},{period}))))"
+    )
+
+    # ✅ Filter chain
     fc = (
         f"[0:v]{vf}[v0];"
 
-        # အနက်ရောင် border — အောက်ခံ
+        # အနက်ရောင် border
         f"[v0]drawbox=x=0:y=0:w={W}:h={H}:"
         f"color={TIKTOK_BLACK}@1.0:t={pad}:replace=0[v1];"
 
         # Cyan border — အပြင်ဘက်
         f"[v1]drawbox=x=0:y=0:w={W}:h={H}:"
-        f"color={TIKTOK_CYAN}@1.0:t={max(3, pad//3)}:replace=0[v2];"
+        f"color={TIKTOK_CYAN}@0.6:t={max(3, pad//3)}:replace=0[v2];"
 
         # Magenta border — အတွင်းဘက်
         f"[v2]drawbox=x={pad}:y={pad}:w={W-2*pad}:h={H-2*pad}:"
-        f"color={TIKTOK_MAGENTA}@1.0:t={max(3, pad//3)}:replace=0[v3];"
+        f"color={TIKTOK_MAGENTA}@0.6:t={max(3, pad//3)}:replace=0[v3];"
 
-        # ✅ Brightness pulse — eq filter
-        f"[v3]eq=brightness='0.08*sin(2*PI*t*{speed})':eval=frame[outv]"
+        # ✅ Cyan မျှားဦး — clockwise
+        f"[v3]drawbox=x='{x_expr}':y='{y_expr}':"
+        f"w={dot_size}:h={dot_size}:"
+        f"color={TIKTOK_CYAN}@1.0:t=fill:replace=0[v4];"
+
+        # ✅ Magenta မျှားဦး — counter-clockwise
+        f"[v4]drawbox=x='{W}-{dot_size}-({x_expr})':"
+        f"y='{H}-{dot_size}-({y_expr})':"
+        f"w={dot_size}:h={dot_size}:"
+        f"color={TIKTOK_MAGENTA}@1.0:t=fill:replace=0[outv]"
     )
 
     cmd = [
@@ -377,74 +413,14 @@ def bypass_and_neon_animated(input_video, output_video,
     r = subprocess.run(cmd, capture_output=True, text=True,
                        encoding="utf-8", errors="ignore")
     if r.returncode != 0:
-        raise Exception(f"Animated Neon: {(r.stderr or '')[-500:]}")
-    return output_video
-
-
-def bypass_and_neon_rotating(input_video, output_video,
-                             crop_ratio=0.95, mirror=True,
-                             thickness=30, speed=1.0):
-    """
-    Bypass + Rotating Border — Border လည်ပတ်
-    - rotate + blend
-    """
-    W, H, dur = vid_info(input_video)
-    pad = thickness
-    pre_filters = []
-
-    if crop_ratio != 1.0:
-        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
-        if cw % 2 != 0: cw -= 1
-        if ch % 2 != 0: ch -= 1
-        cx = (W - cw) // 2; cy = (H - ch) // 2
-        pre_filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
-
-    if mirror:
-        pre_filters.append("hflip")
-
-    pre_filters.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
-    vf = ",".join(pre_filters)
-
-    fc = (
-        f"[0:v]{vf}[v0];"
-
-        # Black border
-        f"[v0]drawbox=x=0:y=0:w={W}:h={H}:"
-        f"color={TIKTOK_BLACK}@1.0:t={pad}:replace=0[v1];"
-
-        # Cyan border
-        f"[v1]drawbox=x=0:y=0:w={W}:h={H}:"
-        f"color={TIKTOK_CYAN}@1.0:t={max(3, pad//3)}:replace=0[v2];"
-
-        # Magenta border
-        f"[v2]drawbox=x={pad}:y={pad}:w={W-2*pad}:h={H-2*pad}:"
-        f"color={TIKTOK_MAGENTA}@1.0:t={max(3, pad//3)}:replace=0[v3];"
-
-        # Rotating glow
-        f"color=c=white:s={W}x{H}:d={dur}:r=30[glow_src];"
-        f"[glow_src]rotate='2*PI*t*{speed}':c=none:ow={W}:oh={H}[rot];"
-        f"[v3][rot]blend=all_mode=screen:all_opacity=0.25[outv]"
-    )
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_video,
-        "-filter_complex", fc,
-        "-map", "[outv]", "-map", "0:a?",
-        "-c:v", "libx264", "-crf", "18",
-        "-preset", "fast", "-tune", "fastdecode",
-        "-c:a", "copy", output_video
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise Exception(f"Rotating: {(r.stderr or '')[-500:]}")
+        raise Exception(f"Running Dot: {(r.stderr or '')[-500:]}")
     return output_video
 
 
 # ==================== Preview ====================
 
-def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
-    """Preview frame ပေါ်မှာ TikTok 3-layer border ဆွဲ"""
+def draw_tiktok_border_preview(img, thickness=30, dot_size=50, phase=0.0):
+    """Preview frame ပေါ်မှာ TikTok Border + မျှားဦး ဆွဲ"""
     d = ImageDraw.Draw(img, "RGBA")
     W, H = img.size
     inner_c = max(3, thickness // 3)
@@ -453,24 +429,28 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     d.rectangle([0, 0, W - 1, H - 1],
                 outline=(0, 0, 0, 255), width=thickness)
 
-    # 2. Cyan border (Animated ဆိုရင် brightness ပြောင်း)
-    if animated_phase > 0:
-        import math
-        phase = (math.sin(animated_phase * math.pi) + 1) / 2
-        b = 0.6 + 0.4 * phase
-        cyan_r = int(37 * b)
-        cyan_g = int(244 * b)
-        cyan_b = int(238 * b)
-        d.rectangle([0, 0, W - 1, H - 1],
-                    outline=(cyan_r, cyan_g, cyan_b, 255), width=inner_c)
-    else:
-        d.rectangle([0, 0, W - 1, H - 1],
-                    outline=(37, 244, 238, 255), width=inner_c)
+    # 2. Cyan border
+    d.rectangle([0, 0, W - 1, H - 1],
+                outline=(37, 244, 238, 255), width=inner_c)
 
     # 3. Magenta border
     offset = thickness
     d.rectangle([offset, offset, W - 1 - offset, H - 1 - offset],
                 outline=(254, 44, 85, 255), width=inner_c)
+
+    # 4. မျှားဦး (Preview မှာ phase နဲ့ ပြ)
+    import math
+    # Cyan မျှားဦး
+    cx_p = int((math.sin(phase * math.pi * 2) * 0.5 + 0.5) * (W - dot_size))
+    cy_p = int((math.cos(phase * math.pi * 2) * 0.5 + 0.5) * (H - dot_size))
+    d.rectangle([cx_p, cy_p, cx_p + dot_size, cy_p + dot_size],
+                fill=(37, 244, 238, 255))
+
+    # Magenta မျှားဦး (ဆန့်ကျင်ဘက်)
+    mx_p = W - dot_size - cx_p
+    my_p = H - dot_size - cy_p
+    d.rectangle([mx_p, my_p, mx_p + dot_size, my_p + dot_size],
+                fill=(254, 44, 85, 255))
 
     return img
 
@@ -662,17 +642,12 @@ st.subheader("✨ Step 3 — TikTok Neon Border")
 use_neon = st.toggle("✨ TikTok Neon Border ထည့်မလား?", value=True)
 if use_neon:
     neon_thickness = st.slider("📏 Border အထူ", 15, 60, 30, 1)
-    neon_style = st.radio("🎬 လှုပ်ရှားမှု ပုံစံ",
-                          ["Static (မလှုပ်)", "Brightness Pulse", "Rotating Glow"],
-                          index=1, horizontal=True)
-    if neon_style != "Static (မလှုပ်)":
-        neon_speed = st.slider("⚡ လှုပ်ရှားနှုန်း", 0.3, 3.0, 1.0, 0.1)
-    else:
-        neon_speed = 1.0
+    neon_speed = st.slider("⚡ လည်ပတ်နှုန်း", 0.3, 3.0, 1.0, 0.1)
+    dot_size = st.slider("🔵 မျှားဦး အရွယ်", 20, 100, 50, 5)
 else:
     neon_thickness = 30
     neon_speed = 1.0
-    neon_style = "Static (မလှုပ်)"
+    dot_size = 50
 st.divider()
 
 # Step 4 — Subtitle
@@ -704,15 +679,14 @@ if vid:
             comp = Image.alpha_composite(bg, fg)
 
             if use_neon:
-                phase = 0.5 if neon_style != "Static (မလှုပ်)" else 0.0
                 comp = draw_tiktok_border_preview(comp, thickness=neon_thickness,
-                                                   animated_phase=phase)
+                                                   dot_size=dot_size, phase=0.25)
 
             pw = 720
             comp.resize((pw, int(H * (pw / W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
             st.image("prev_out.png", use_container_width=True)
-            if use_neon and neon_style != "Static (မလှုပ်)":
-                st.caption(f"🎬 {neon_style} — Output Video မှာ လှုပ်ရှားနေမည်")
+            if use_neon:
+                st.caption("🎬 Output Video မှာ မျှားဦး ပတ်ချာလည် လည်ပတ်နေမည်")
 st.divider()
 
 # Step 6 — Generate
@@ -781,39 +755,24 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     # ၄။ Bypass + Neon Border
     t0 = time.time()
-    with st.spinner("🛡️ Bypass + ✨ Neon Border..."):
+    with st.spinner("🛡️ Bypass + ✨ Running Dot..."):
         try:
             if use_neon:
-                if neon_style == "Brightness Pulse":
-                    bypass_and_neon_animated(
-                        "temp.mp4", "bypass.mp4",
-                        crop_ratio=0.95, mirror=True,
-                        thickness=neon_thickness,
-                        speed=neon_speed
-                    )
-                    st.success("✅ Brightness Pulse ထည့်ပြီး")
-                elif neon_style == "Rotating Glow":
-                    bypass_and_neon_rotating(
-                        "temp.mp4", "bypass.mp4",
-                        crop_ratio=0.95, mirror=True,
-                        thickness=neon_thickness,
-                        speed=neon_speed
-                    )
-                    st.success("✅ Rotating Glow ထည့်ပြီး")
-                else:
-                    bypass_and_neon(
-                        "temp.mp4", "bypass.mp4",
-                        crop_ratio=0.95, mirror=True,
-                        thickness=neon_thickness
-                    )
-                    st.success("✅ Static Neon Border ထည့်ပြီး")
+                bypass_and_neon_running_dot(
+                    "temp.mp4", "bypass.mp4",
+                    crop_ratio=0.95, mirror=True,
+                    thickness=neon_thickness,
+                    speed=neon_speed,
+                    dot_size=dot_size
+                )
+                st.success("✅ Running Dot ထည့်ပြီး")
             else:
                 video_bypass("temp.mp4", "bypass.mp4",
                              crop_ratio=0.95, mirror=True)
         except Exception as e:
             st.warning(f"⚠️ Fail: {e}")
             shutil.copy("temp.mp4", "bypass.mp4")
-    step_times["🛡️ Bypass+Neon"] = time.time() - t0
+    step_times["🛡️ Bypass+Dot"] = time.time() - t0
 
     # ၅။ Subtitle Overlay
     t0 = time.time()
