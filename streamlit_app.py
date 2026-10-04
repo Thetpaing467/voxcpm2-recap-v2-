@@ -392,9 +392,27 @@ def bypass_and_neon_chase(input_video, output_video,
     return output_video
 
 
-def simple_merge(video_in, audio_in, output_video, tempo):
+def keep_count(video_in, segments):
+    """Speech အပိုင်းထဲက frame အရေအတွက် (encode မလုပ်ဘဲ တွက်)"""
+    pr = ffmpeg.probe(video_in)
+    vs = next(x for x in pr['streams'] if x['codec_type'] == 'video')
+    n_, d_ = vs['r_frame_rate'].split('/')
+    fps = float(n_) / float(d_)
+    total = int(round(float(pr['format']['duration']) * fps))
+    t = np.arange(total) / fps
+    mask = np.zeros(total, dtype=bool)
+    for a, b in segments:
+        mask |= (t >= a) & (t <= b)
+    return int(mask.sum()), fps
+
+
+def simple_merge(video_in, audio_in, output_video, tempo, segments=None):
+    vf = []
+    if segments:
+        sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in segments)
+        vf = ["-vf", f"select='{sel}',setpts=N/FRAME_RATE/TB"]
     cmd = ["ffmpeg", "-y", "-i", video_in, "-i", audio_in,
-           "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a",
+           "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a"] + vf + [
            "-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
            "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest", output_video]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
@@ -406,7 +424,7 @@ def simple_merge(video_in, audio_in, output_video, tempo):
 def final_render(video_in, audio_in, output_video, tempo,
                  srt_path=None, fp=FONT_FILE, fs=FS, pos_y=100, bh=BH, ba=BA,
                  use_neon=True, thickness=15, speed=0.4, tail=0.35,
-                 crop_ratio=0.95, mirror=True):
+                 crop_ratio=0.95, mirror=True, segments=None):
     """Crop + Mirror + Chase Neon + Subtitle + Audio — encode တစ်ခါတည်း"""
     W0, H0, _ = vid_info(video_in)
     pr = ffmpeg.probe(video_in)
@@ -467,10 +485,16 @@ def final_render(video_in, audio_in, output_video, tempo,
         CYAN = np.array([238, 244, 37], np.float32)
         MAGENTA = np.array([85, 44, 254], np.float32)
 
-        def comet(head):
-            dist = (head - S) % P
-            a = np.clip(1.0 - dist / (tail * P), 0, 1)
-            return (a ** 1.5)[:, None]
+        Si = (S.astype(np.int64)) % P
+        P_arr = np.arange(P, dtype=np.float32)
+
+        def comet_a(h):
+            dist = (h - P_arr) % P
+            return (np.clip(1.0 - dist / (tail * P), 0, 1) ** 1.5)[:, None]
+
+        def make_strip(head):
+            c_ = BASE + CYAN * comet_a(head) + MAGENTA * comet_a(head + P / 2)
+            return np.clip(c_, 0, 255).astype(np.uint8)
 
     cmd = [
         "ffmpeg", "-y",
@@ -487,20 +511,25 @@ def final_render(video_in, audio_in, output_video, tempo,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     cap = cv2.VideoCapture(video_in)
-    i = 0; k = 0
+    i = 0; j = 0; k = 0; p = 0
     try:
         while True:
-            ok, fr = cap.read()
+            if not cap.grab(): break
+            t_in = i / fps
+            i += 1
+            if segments:
+                while p < len(segments) and segments[p][1] < t_in: p += 1
+                if not (p < len(segments) and segments[p][0] <= t_in): continue
+            ok, fr = cap.retrieve()
             if not ok: break
-            t = i / fps
+            t = j / fps
             fr = fr[cy:cy + ch, cx:cx + cw]
             if mirror: fr = fr[:, ::-1]
             fr = np.ascontiguousarray(fr)
 
             if use_neon:
                 head = (t * speed * P / 4.0) % P
-                c = BASE + CYAN * comet(head) + MAGENTA * comet(head + P / 2)
-                fr[ys, xs] = np.clip(c, 0, 255).astype(np.uint8)
+                fr[ys, xs] = make_strip(head)[Si]
 
             while k < len(subs) and subs[k]["b"] < t: k += 1
             if k < len(subs) and subs[k]["a"] <= t:
@@ -509,7 +538,7 @@ def final_render(video_in, audio_in, output_video, tempo,
                 fr[sb["y0"]:sb["y1"]] = reg.astype(np.uint8)
 
             proc.stdin.write(fr.tobytes())
-            i += 1
+            j += 1
     finally:
         cap.release()
         try: proc.stdin.close()
@@ -667,7 +696,7 @@ def get_fw_model():
                         cpu_threads=os.cpu_count() or 4)
 
 
-def whisper_fast(video_path):
+def whisper_fast(video_path, model=None):
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
         "-ar", "16000", "-ac", "1",
@@ -676,7 +705,7 @@ def whisper_fast(video_path):
 
     speech_segments = []
     try:
-        model = get_fw_model()
+        model = model or get_fw_model()
         segments, _ = model.transcribe(
             "whisper_audio.wav", language=WHISPER_LANG,
             vad_filter=False, beam_size=1,
@@ -818,16 +847,12 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    # ၁။ Cut
-    t0 = time.time()
-    with st.spinner("✂️ Cut..."):
-        try:
-            silence_cut_v2("input.mp4", "input_cut.mp4")
-            shutil.move("input_cut.mp4", "input.mp4")
-            _, _, vdur = vid_info("input.mp4")
-        except Exception as e:
-            st.error(f"❌ Cut: {e}"); st.stop()
-    step_times["✂️ Cut"] = time.time() - t0
+    # ၁။ Cut (Whisper) ကို TTS နဲ့ တပြိုင်တည်း run — Video ကို ပြန် encode မလုပ်တော့
+    fw_model = None
+    try: fw_model = get_fw_model()
+    except Exception: pass
+    cut_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    cut_future = cut_pool.submit(whisper_fast, "input.mp4", fw_model)
 
     # ၂။ TTS
     t0 = time.time()
@@ -840,6 +865,19 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         st.error(f"TTS: {e}"); st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
 
+    # Cut ရလဒ် စောင့် (TTS နဲ့ အပြိုင်ပြီးသားဖြစ်နိုင်)
+    t0 = time.time()
+    try:
+        segments = cut_future.result()
+        if not segments: raise Exception("Speech မတွေ့")
+        kept, vfps = keep_count("input.mp4", segments)
+        if kept == 0: raise Exception("Speech မတွေ့")
+        vdur = kept / vfps
+    except Exception as e:
+        st.error(f"❌ Cut: {e}"); st.stop()
+    cut_pool.shutdown(wait=False)
+    step_times["✂️ Cut (စောင့်ချိန်)"] = time.time() - t0
+
     adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
     tempo = max(0.5, min(2.0, adur/vdur))
 
@@ -851,10 +889,11 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             final_render("input.mp4", "voice.mp3", "final.mp4", tempo,
                          srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
                          bh=BH, ba=BA, use_neon=use_neon,
-                         thickness=neon_thickness, speed=neon_speed)
+                         thickness=neon_thickness, speed=neon_speed,
+                         segments=segments)
         except Exception as e:
             st.warning(f"⚠️ Fail: {e}")
-            simple_merge("input.mp4", "voice.mp3", "final.mp4", tempo)
+            simple_merge("input.mp4", "voice.mp3", "final.mp4", tempo, segments)
     step_times["🎬 Render"] = time.time() - t0
 
     total_elapsed = time.time() - total_start
