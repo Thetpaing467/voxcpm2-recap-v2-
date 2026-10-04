@@ -22,7 +22,7 @@ ENC_PRESET = "fast"
 ENC_CRF = 18
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
-TTS_WORKERS = 3
+TTS_WORKERS = 5
 PNG_WORKERS = 4
 
 WHISPER_MODEL = "tiny"
@@ -392,6 +392,134 @@ def bypass_and_neon_chase(input_video, output_video,
     return output_video
 
 
+def simple_merge(video_in, audio_in, output_video, tempo):
+    cmd = ["ffmpeg", "-y", "-i", video_in, "-i", audio_in,
+           "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a",
+           "-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
+           "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest", output_video]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0:
+        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+    return output_video
+
+
+def final_render(video_in, audio_in, output_video, tempo,
+                 srt_path=None, fp=FONT_FILE, fs=FS, pos_y=100, bh=BH, ba=BA,
+                 use_neon=True, thickness=15, speed=0.4, tail=0.35,
+                 crop_ratio=0.95, mirror=True):
+    """Crop + Mirror + Chase Neon + Subtitle + Audio — encode တစ်ခါတည်း"""
+    W0, H0, _ = vid_info(video_in)
+    pr = ffmpeg.probe(video_in)
+    vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
+    n, d = vs['r_frame_rate'].split('/')
+    fps = float(n) / float(d)
+
+    if crop_ratio != 1.0:
+        cw = int(W0 * crop_ratio); ch = int(H0 * crop_ratio)
+        if cw % 2: cw -= 1
+        if ch % 2: ch -= 1
+        cx = (W0 - cw) // 2; cy = (H0 - ch) // 2
+    else:
+        cw, ch, cx, cy = W0, H0, 0, 0
+    W, H = cw, ch
+
+    # ---- Subtitle PNG များကို အကြိုပြင် (parallel) ----
+    subs = []
+    if srt_path:
+        segs = parse_srt(srt_path)
+        os.makedirs("subtitle_pngs", exist_ok=True)
+
+        def prep(args):
+            i, sg = args
+            p = f"subtitle_pngs/s_{i:04d}.png"
+            render_png(sg["text"], p, fp, W, H, fs, pos_y, bh, ba,
+                       box_width_ratio=BOX_WIDTH_RATIO)
+            rgba = cv2.imread(p, cv2.IMREAD_UNCHANGED)
+            try: os.remove(p)
+            except: pass
+            if rgba is None: return None
+            rows = np.where(rgba[:, :, 3].any(axis=1))[0]
+            if len(rows) == 0: return None
+            y0, y1 = int(rows[0]), int(rows[-1]) + 1
+            crop = rgba[y0:y1]
+            alpha = crop[:, :, 3:4].astype(np.float32) / 255.0
+            pre = crop[:, :, :3].astype(np.float32) * alpha
+            return {"a": sg["start"], "b": sg["end"], "y0": y0, "y1": y1,
+                    "inv": 1.0 - alpha, "pre": pre}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=PNG_WORKERS) as ex:
+            subs = [x for x in ex.map(prep, enumerate(segs)) if x]
+
+    # ---- Neon ring ကြိုတွက် ----
+    if use_neon:
+        th = thickness
+        P = 2 * (W + H)
+        yy, xx = np.mgrid[0:H, 0:W]
+        ring = (xx < th) | (xx >= W - th) | (yy < th) | (yy >= H - th)
+        ys, xs = np.nonzero(ring)
+        dt, db, dl, dr = ys, H - 1 - ys, xs, W - 1 - xs
+        m = np.minimum.reduce([dt, db, dl, dr])
+        S = np.where(m == dt, xs,
+            np.where(m == dr, W + ys,
+            np.where(m == db, 2 * W + H + (W - xs),
+                     2 * W + 2 * H - ys))).astype(np.float32)
+        BASE = np.array([15, 15, 15], np.float32)
+        CYAN = np.array([238, 244, 37], np.float32)
+        MAGENTA = np.array([85, 44, 254], np.float32)
+
+        def comet(head):
+            dist = (head - S) % P
+            a = np.clip(1.0 - dist / (tail * P), 0, 1)
+            return (a ** 1.5)[:, None]
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
+        "-i", audio_in, "-af", f"atempo={tempo}",
+        "-map", "0:v", "-map", "1:a",
+        "-c:v", "libx264", "-crf", str(ENC_CRF), "-preset", "veryfast",
+        "-pix_fmt", "yuv420p", "-threads", "0",
+        "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest",
+        output_video
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    cap = cv2.VideoCapture(video_in)
+    i = 0; k = 0
+    try:
+        while True:
+            ok, fr = cap.read()
+            if not ok: break
+            t = i / fps
+            fr = fr[cy:cy + ch, cx:cx + cw]
+            if mirror: fr = fr[:, ::-1]
+            fr = np.ascontiguousarray(fr)
+
+            if use_neon:
+                head = (t * speed * P / 4.0) % P
+                c = BASE + CYAN * comet(head) + MAGENTA * comet(head + P / 2)
+                fr[ys, xs] = np.clip(c, 0, 255).astype(np.uint8)
+
+            while k < len(subs) and subs[k]["b"] < t: k += 1
+            if k < len(subs) and subs[k]["a"] <= t:
+                sb = subs[k]
+                reg = fr[sb["y0"]:sb["y1"]].astype(np.float32) * sb["inv"] + sb["pre"]
+                fr[sb["y0"]:sb["y1"]] = reg.astype(np.uint8)
+
+            proc.stdin.write(fr.tobytes())
+            i += 1
+    finally:
+        cap.release()
+        try: proc.stdin.close()
+        except: pass
+        proc.wait()
+    if proc.returncode != 0:
+        raise Exception("Final render: ffmpeg fail")
+    return output_video
+
+
 # ==================== Preview ====================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
@@ -532,6 +660,13 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
     return out
 
 
+@st.cache_resource(show_spinner=False)
+def get_fw_model():
+    from faster_whisper import WhisperModel
+    return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
+                        cpu_threads=os.cpu_count() or 4)
+
+
 def whisper_fast(video_path):
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
@@ -541,8 +676,7 @@ def whisper_fast(video_path):
 
     speech_segments = []
     try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        model = get_fw_model()
         segments, _ = model.transcribe(
             "whisper_audio.wav", language=WHISPER_LANG,
             vad_filter=False, beam_size=1,
@@ -625,8 +759,11 @@ st.divider()
 if vid:
     st.subheader("🖼️ Step 5 — Preview")
     with st.spinner("Preview..."):
-        vid.seek(0)
-        with open("preview.mp4", "wb") as f: f.write(vid.read())
+        pkey = (vid.name, vid.size)
+        if st.session_state.get("pkey") != pkey or not os.path.exists("preview.mp4"):
+            vid.seek(0)
+            with open("preview.mp4", "wb") as f: f.write(vid.read())
+            st.session_state.pkey = pkey
         W, H, _ = vid_info("preview.mp4")
 
         render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA,
@@ -706,55 +843,19 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
     tempo = max(0.5, min(2.0, adur/vdur))
 
-    # ၃။ Video + Audio
+    # ၃။ Render — Bypass + Neon + Subtitle + Audio (encode တစ်ခါတည်း)
     t0 = time.time()
-    with st.spinner("🎬 Render Base..."):
-        vi = ffmpeg.input("input.mp4")
-        va = ffmpeg.input("voice.mp3").audio.filter('atempo', tempo)
-        ffmpeg.output(vi.video, va, "temp.mp4",
-            vcodec='libx264', crf=ENC_CRF, preset='fast', tune='fastdecode',
-            acodec='aac', audio_bitrate=AUDIO_BITRATE,
-            shortest=None, threads=0).run(overwrite_output=True)
-    step_times["🎬 Render"] = time.time() - t0
-
-    # ၄။ Bypass + Neon Border
-    t0 = time.time()
-    with st.spinner("🛡️ Bypass + ✨ Neon Border..."):
+    with st.spinner("🎬 Render (Bypass + ✨ Neon + 📝 Subtitle)..."):
         try:
-            if use_neon:
-                if neon_animated:
-                    bypass_and_neon_chase(
-                        "temp.mp4", "bypass.mp4",
-                        crop_ratio=0.95, mirror=True,
-                        thickness=neon_thickness,
-                        speed=neon_speed
-                    )
-                    st.success("✅ Chase Neon Border ထည့်ပြီး")
-                else:
-                    bypass_and_neon(
-                        "temp.mp4", "bypass.mp4",
-                        crop_ratio=0.95, mirror=True,
-                        thickness=neon_thickness
-                    )
-                    st.success("✅ Static Neon Border ထည့်ပြီး")
-            else:
-                video_bypass("temp.mp4", "bypass.mp4",
-                             crop_ratio=0.95, mirror=True)
+            sp = scr_to_srt(script, vdur, "sub.srt") if use_sub else None
+            final_render("input.mp4", "voice.mp3", "final.mp4", tempo,
+                         srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
+                         bh=BH, ba=BA, use_neon=use_neon,
+                         thickness=neon_thickness, speed=neon_speed)
         except Exception as e:
             st.warning(f"⚠️ Fail: {e}")
-            shutil.copy("temp.mp4", "bypass.mp4")
-    step_times["🛡️ Bypass+Neon"] = time.time() - t0
-
-    # ၅။ Subtitle Overlay
-    t0 = time.time()
-    with st.spinner("📝 Subtitle Overlay..."):
-        if use_sub:
-            sp = scr_to_srt(script, vdur, "sub.srt")
-            overlay("bypass.mp4", sp, "final.mp4", FONT_FILE, FS, pos_y, BH, BA,
-                    box_width_ratio=BOX_WIDTH_RATIO)
-        else:
-            shutil.copy("bypass.mp4", "final.mp4")
-    step_times["📝 Subtitle"] = time.time() - t0
+            simple_merge("input.mp4", "voice.mp3", "final.mp4", tempo)
+    step_times["🎬 Render"] = time.time() - t0
 
     total_elapsed = time.time() - total_start
 
