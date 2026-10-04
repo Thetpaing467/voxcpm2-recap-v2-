@@ -587,6 +587,33 @@ def prepare_video_job(video_in, script_text, use_sub, fw_model,
     return {"segments": segments, "vdur": vdur, "render_err": render_err}
 
 
+@st.cache_resource(show_spinner=False)
+def get_tr_model(size):
+    from faster_whisper import WhisperModel
+    return WhisperModel(size, device="cpu", compute_type="int8",
+                        cpu_threads=os.cpu_count() or 4)
+
+
+def transcribe_video(video_path, size="medium", progress_cb=None):
+    """Video → မြန်မာ transcript (Local · Free · API key မလို)"""
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path, "-vn",
+        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "tr_audio.wav"
+    ], capture_output=True, check=True)
+    model = get_tr_model(size)
+    segments, info = model.transcribe(
+        "tr_audio.wav", language="my", beam_size=5,
+        vad_filter=True, condition_on_previous_text=False, temperature=0
+    )
+    lines = []
+    for seg in segments:
+        t = seg.text.strip()
+        if t: lines.append(t)
+        if progress_cb and info.duration:
+            progress_cb(min(seg.end / info.duration, 1.0))
+    return "\n\n".join(lines)
+
+
 # ==================== Preview ====================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
@@ -868,6 +895,31 @@ if vid:
             st.image("prev_out.png", use_container_width=True)
             if use_neon and neon_animated:
                 st.caption("🎬 Animated — Output Video မှာ အလင်းတန်း ပတ်ပြေးနေမည်")
+st.divider()
+
+# Transcript ထုတ်ယူ — Local (faster-whisper) · Free · API key မလို
+st.subheader("📄 Transcript ထုတ်ယူ")
+tr_size = st.selectbox("Model (ကြီးလေ တိကျလေ၊ နှေးလေ)",
+                       ["small", "medium", "large-v3"], index=1)
+if st.button("📄 Video ထဲက Transcript ထုတ်မယ်", use_container_width=True):
+    if vid is None:
+        st.error("Video Upload အရင်လုပ်ပါ")
+    else:
+        vid.seek(0)
+        with open("tr_input.mp4", "wb") as f: f.write(vid.read())
+        pb_tr = st.progress(0)
+        with st.spinner("📄 Transcribe လုပ်နေသည်... (ပထမဆုံးအကြိမ် Model download ကြာနိုင်)"):
+            try:
+                st.session_state["tr_edit"] = transcribe_video(
+                    "tr_input.mp4", tr_size, lambda p: pb_tr.progress(p))
+                pb_tr.progress(1.0)
+            except Exception as e:
+                st.error(f"❌ Transcript: {e}")
+if st.session_state.get("tr_edit"):
+    st.text_area("Transcript (ပြင်လို့ရ)", key="tr_edit", height=250)
+    if st.button("➡️ Script ထဲ ထည့်မယ်", use_container_width=True):
+        st.session_state.script = st.session_state["tr_edit"]
+        st.rerun()
 st.divider()
 
 # Step 6 — Generate
