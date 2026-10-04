@@ -29,7 +29,6 @@ TTS_WORKERS = 5
 PNG_WORKERS = 4
 
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"   # Gemini Canvas
-GEMINI_MODEL = "gemini-3-flash-preview"   # Google docs ရဲ့ လက်ရှိ model
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
 
@@ -589,49 +588,6 @@ def prepare_video_job(video_in, script_text, use_sub, fw_model,
     return {"segments": segments, "vdur": vdur, "render_err": render_err}
 
 
-def get_gemini_key():
-    try:
-        k = st.secrets["GEMINI_API_KEY"]
-        if k: return str(k)
-    except Exception:
-        pass
-    return os.environ.get("GEMINI_API_KEY", "")
-
-
-def gemini_transcribe(video_path, api_key, model=GEMINI_MODEL):
-    """Gemini API (Free key) — တရုတ် Video → မြန်မာ Dialogue Script"""
-    from google import genai
-    small = "tr_small.mp4"
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path, "-vf", "scale=-2:360", "-r", "12",
-        "-c:v", "libx264", "-crf", "32", "-preset", "veryfast",
-        "-c:a", "aac", "-b:a", "64k", small
-    ], capture_output=True, check=True)
-
-    client = genai.Client(api_key=api_key)
-    f = client.files.upload(file=small)
-    try:
-        while f.state.name == "PROCESSING":
-            time.sleep(2)
-            f = client.files.get(name=f.name)
-        if f.state.name != "ACTIVE":
-            raise Exception("Gemini video processing fail")
-        prompt = ("ဗီဒီယိုထဲက စကားပြောတွေ (တရုတ်ဘာသာ) ကို မြန်မာဘာသာနဲ့ အပြည့်အစုံ ဘာသာပြန်ပြီး "
-                  "Dialogue Script အဖြစ် ထုတ်ပေးပါ။ စကားပြောတစ်ခုချင်းကို စာကြောင်းတစ်ကြောင်းစီ ခွဲပြီး၊ "
-                  "စာကြောင်းတစ်ခုနဲ့တစ်ခုကြား စာကြောင်းလွတ်တစ်ကြောင်း ခြားပါ။ "
-                  "ရှင်းလင်းချက်၊ ခေါင်းစဉ်၊ အချိန်မှတ်တမ်း မထည့်ပါနဲ့။ Script စာသားပဲ ပြန်ပေးပါ။")
-        resp = client.models.generate_content(model=model, contents=[f, prompt])
-        text = (resp.text or "").strip()
-    finally:
-        try: client.files.delete(name=f.name)
-        except Exception: pass
-    lines = [l.strip().strip('"\u201c\u201d').strip() for l in text.splitlines()]
-    lines = [l for l in lines if l]
-    if not lines:
-        raise Exception("Gemini က စာမပြန်ပါ")
-    return "\n\n".join(lines)
-
-
 # ==================== Preview ====================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
@@ -865,24 +821,7 @@ st.divider()
 
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
-if vid:
-    st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
-    gem_key = get_gemini_key()
-    if not gem_key:
-        gem_key = st.text_input("🔑 Gemini API Key", type="password",
-                                placeholder="aistudio.google.com/apikey မှာ အခမဲ့ယူ")
-    if st.button("🤖 Transcript ထုတ်မယ် (API key)", use_container_width=True):
-        if not gem_key:
-            st.error("Gemini API Key ထည့်ပါ")
-        else:
-            vid.seek(0)
-            with open("tr_input.mp4", "wb") as f: f.write(vid.read())
-            with st.spinner("🤖 Gemini Transcribe လုပ်နေသည်..."):
-                try:
-                    st.session_state.script = gemini_transcribe("tr_input.mp4", gem_key)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Transcript: {e}")
+if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
 # TikTok Neon Border — UI မပြဘဲ နောက်ကွယ်မှာ Auto (ပုံသေ)
