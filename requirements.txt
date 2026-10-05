@@ -8,5 +8,3 @@ openai-whisper
 faster-whisper
 gradio_client
 google-genai
-torch
-transformers
