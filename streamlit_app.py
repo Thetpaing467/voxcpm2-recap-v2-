@@ -79,6 +79,15 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 .step-timer{background:rgba(255,255,255,.05);border-left:4px solid #667eea;
  border-radius:10px;padding:12px 18px;margin:8px 0;color:#e8e8f0;font-size:.95rem}
 .step-timer b{color:#6ba8ff;font-size:1.05rem}
+
+/* Floating Action Button — Canvas */
+.st-key-canvas_fab{position:fixed;bottom:24px;right:24px;z-index:999;
+ width:auto!important}
+.st-key-canvas_fab button{width:60px!important;height:60px!important;
+ min-height:60px!important;border-radius:50%!important;padding:0!important;
+ font-size:28px!important;
+ box-shadow:0 6px 20px rgba(102,126,234,.6)!important}
+.st-key-canvas_fab button:hover{transform:scale(1.1)}
 </style>
 """, unsafe_allow_html=True)
 
@@ -902,7 +911,8 @@ if hasattr(st, "dialog"):
     def canvas_dialog():
         _canvas_body()
 
-    if st.button("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", use_container_width=True):
+    # Floating Action Button (ညာအောက်ထောင့်)
+    if st.button("📄", key="canvas_fab", help="Gemini Canvas ဖွင့်မယ်"):
         canvas_dialog()
 else:
     with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)"):
