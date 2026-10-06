@@ -881,15 +881,9 @@ with c2:
 
 def _canvas_body():
     st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
-    components.html(f"""
-    <button onclick="window.open('{CANVAS_URL}','canvas_win','width=480,height=820,left=40,top=40')"
-      style="width:100%;padding:12px;border-radius:10px;border:1px solid #667eea;
-             background:#1a1a35;color:#e8e8f0;font-size:15px;font-weight:600;cursor:pointer">
-      🪟 Popup Window နဲ့ ဖွင့် (PC မှာ ဘေးချင်းကပ်ကြည့်လို့ရ)
-    </button>""", height=56)
     if st.toggle("👁️ ဒီနေရာထဲမှာ iframe နဲ့ စမ်းကြည့်မယ်", value=False, key="canvas_iframe"):
         components.iframe(CANVAS_URL, height=480, scrolling=True)
-        st.caption("⚠️ အလွတ်ပဲ ပြရင် Google က ပိတ်ထားတာ — အပေါ်က ခလုတ်နှစ်ခုကို သုံးပါ")
+        st.caption("⚠️ အလွတ်ပဲ ပြရင် Google က ပိတ်ထားတာ — အပေါ်က ခလုတ်ကို သုံးပါ")
     pasted = st.text_area("Canvas ကနေ Copy → ဒီမှာ Paste", height=240, key="canvas_paste")
     if st.button("➡️ Script ထဲ ထည့်မယ်", key="canvas_apply", use_container_width=True):
         lines = [l.strip().strip('"\u201c\u201d').strip() for l in pasted.splitlines()]
@@ -1049,4 +1043,4 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     st.success(f"✅ Done — ⏱️ {total_elapsed:.1f}s")
     st.video("final.mp4")
     with open("final.mp4", "rb") as f:
-        st.download_button("📥 Download", f, file_name="recap.mp4") 
+        st.download_button("📥 Download", f, file_name="recap.mp4")
