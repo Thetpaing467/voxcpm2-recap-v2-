@@ -54,10 +54,17 @@ st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="cen
 # ==================== Helper — Download နှိပ်ရင် ရှင်းမယ့် Function ====================
 def _on_download_clear():
     """Download နှိပ်လိုက်တာနဲ့ Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
+    # Script + Paste
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.paste_big = ""
+
+    # Preview cache
     st.session_state.pkey = None
+
+    # ⭐ Video uploader ကို key rotate လုပ်ပြီး ရှင်း
+    st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
+
     # ⭐ Ref Audio ကို မထိဘူး — ရှိနေမယ်
 
 
@@ -107,6 +114,11 @@ if not st.session_state.auth:
             else:
                 st.error("Password မှား")
     st.stop()
+
+
+# ==================== Session State Init ====================
+if "script" not in st.session_state: st.session_state.script = ""
+if "video_up_key" not in st.session_state: st.session_state.video_up_key = 0
 
 
 # ==================== Utility Functions ====================
@@ -859,8 +871,6 @@ st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow
 st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
-if "script" not in st.session_state: st.session_state.script = ""
-
 # ==================== Gemini Canvas ====================
 with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
     st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
@@ -887,7 +897,6 @@ pasted_now = st.text_area(
     placeholder="📋  ဒီနေရာကို Long-press → Paste  (သို့)  Ctrl+V  —  ချက်ချင်း Script ထဲ ရောက်မယ်",
 )
 
-# CSS — paste box ကို လှလှ ဆွဲ
 st.markdown("""
 <style>
 div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea {
@@ -940,7 +949,12 @@ st.divider()
 
 # ==================== Step 2 — Video ====================
 st.subheader("📁 Step 2 — Video")
-vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
+vid = st.file_uploader(
+    "📹",
+    type=["mp4","mov","avi","mkv"],
+    label_visibility="collapsed",
+    key=f"video_up_{st.session_state.video_up_key}"   # ⭐ dynamic key
+)
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
@@ -1006,7 +1020,7 @@ if use_voxcpm:
         st.session_state.ref = "ref.wav"
         st.success("✅ Ref Audio")
     else:
-        # Ref မရှိရင် ရှိပြီးသား file ရှိမရှိ စစ်
+        # Ref မရှိရင် disk ပေါ်မှာ ရှိမရှိ စစ်
         if os.path.exists("ref.wav"):
             st.session_state.ref = "ref.wav"
             st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
