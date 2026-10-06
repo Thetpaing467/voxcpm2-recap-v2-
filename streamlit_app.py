@@ -891,16 +891,9 @@ def _canvas_body():
         st.rerun()
 
 
-if hasattr(st, "dialog"):
-    @st.dialog("📄 Gemini Canvas")
-    def canvas_dialog():
-        _canvas_body()
-
-    if st.button("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", use_container_width=True):
-        canvas_dialog()
-else:
-    with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)"):
-        _canvas_body()
+# Gemini Canvas — popup မသုံးတော့ဘဲ inline expander ပဲ
+with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)"):
+    _canvas_body()
 st.divider()
 
 st.subheader("📁 Step 2 — Video")
