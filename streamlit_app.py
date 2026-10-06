@@ -79,6 +79,15 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 .step-timer{background:rgba(255,255,255,.05);border-left:4px solid #667eea;
  border-radius:10px;padding:12px 18px;margin:8px 0;color:#e8e8f0;font-size:.95rem}
 .step-timer b{color:#6ba8ff;font-size:1.05rem}
+
+/* ===== Floating Canvas Button ===== */
+.st-key-fab{position:fixed!important;bottom:24px;right:20px;
+ z-index:99999;width:auto!important}
+.st-key-fab button{width:60px!important;height:60px!important;
+ border-radius:50%!important;padding:0!important;font-size:26px!important;
+ box-shadow:0 6px 20px rgba(102,126,234,.6)!important;
+ animation:fabpulse 2.2s infinite}
+@keyframes fabpulse{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -879,6 +888,7 @@ with c2:
     if st.button("🗑️ Clear", use_container_width=True):
         st.session_state.script = ""; st.rerun()
 
+
 def _canvas_body():
     st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
     components.html(f"""
@@ -897,13 +907,15 @@ def _canvas_body():
         st.rerun()
 
 
+# ===== Floating Canvas Button (ညာအောက်ထောင့်) =====
 if hasattr(st, "dialog"):
     @st.dialog("📄 Gemini Canvas")
     def canvas_dialog():
         _canvas_body()
 
-    if st.button("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", use_container_width=True):
-        canvas_dialog()
+    with st.container(key="fab"):
+        if st.button("📄", key="fab_btn", help="Gemini Canvas / Transcript"):
+            canvas_dialog()
 else:
     with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)"):
         _canvas_body()
