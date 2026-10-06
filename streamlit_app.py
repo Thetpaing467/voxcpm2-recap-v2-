@@ -50,6 +50,17 @@ EDGE_VOICE_FIXED = "male"
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
+
+# ==================== Helper — Download နှိပ်ရင် ရှင်းမယ့် Function ====================
+def _on_download_clear():
+    """Download နှိပ်လိုက်တာနဲ့ Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
+    st.session_state.script = ""
+    st.session_state.last_paste = ""
+    st.session_state.paste_big = ""
+    st.session_state.pkey = None
+    # ⭐ Ref Audio ကို မထိဘူး — ရှိနေမယ်
+
+
 st.markdown("""
 <style>
 .stApp{background:linear-gradient(160deg,#0f0f23,#1a1a35,#0f0f23);color:#e8e8f0}
@@ -78,27 +89,6 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 .step-timer{background:rgba(255,255,255,.05);border-left:4px solid #667eea;
  border-radius:10px;padding:12px 18px;margin:8px 0;color:#e8e8f0;font-size:.95rem}
 .step-timer b{color:#6ba8ff;font-size:1.05rem}
-
-/* ⭐ Big Paste Box */
-div[data-testid="stTextArea"] textarea.pasteBox {
-  background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
-  border:2px dashed rgba(198,107,255,.55)!important;
-  border-radius:18px!important;
-  color:#fff!important;
-  font-size:1.05rem!important;
-  padding:22px!important;
-  text-align:center!important;
-  transition:all .2s;
-}
-div[data-testid="stTextArea"] textarea.pasteBox:focus {
-  border-color:#C66BFF!important;
-  border-style:solid!important;
-  box-shadow:0 0 24px rgba(198,107,255,.5)!important;
-}
-div[data-testid="stTextArea"] textarea.pasteBox::placeholder {
-  color:#b48cff!important;
-  font-weight:600!important;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -888,42 +878,38 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Auto paste area
-with st.container():
-    # custom class ကို key နဲ့ ချိတ်ဖို့ trick
-    paste_placeholder = st.empty()
-    pasted_now = paste_placeholder.text_area(
-        "paste",
-        value="",
-        height=80,
-        key="paste_big",
-        label_visibility="collapsed",
-        placeholder="📋  ဒီနေရာကို Long-press → Paste  (သို့)  Ctrl+V  —  ချက်ချင်း Script ထဲ ရောက်မယ်",
-    )
+pasted_now = st.text_area(
+    "paste",
+    value="",
+    height=80,
+    key="paste_big",
+    label_visibility="collapsed",
+    placeholder="📋  ဒီနေရာကို Long-press → Paste  (သို့)  Ctrl+V  —  ချက်ချင်း Script ထဲ ရောက်မယ်",
+)
 
-    # CSS ကို key နဲ့ target
-    st.markdown("""
-    <style>
-    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea {
-      background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
-      border:2px dashed rgba(198,107,255,.55)!important;
-      border-radius:18px!important;
-      color:#fff!important;
-      font-size:1.05rem!important;
-      padding:22px!important;
-      text-align:center!important;
-    }
-    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea:focus {
-      border-color:#C66BFF!important;
-      border-style:solid!important;
-      box-shadow:0 0 24px rgba(198,107,255,.5)!important;
-    }
-    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeholder {
-      color:#b48cff!important;
-      font-weight:600!important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# CSS — paste box ကို လှလှ ဆွဲ
+st.markdown("""
+<style>
+div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea {
+  background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
+  border:2px dashed rgba(198,107,255,.55)!important;
+  border-radius:18px!important;
+  color:#fff!important;
+  font-size:1.05rem!important;
+  padding:22px!important;
+  text-align:center!important;
+}
+div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea:focus {
+  border-color:#C66BFF!important;
+  border-style:solid!important;
+  box-shadow:0 0 24px rgba(198,107,255,.5)!important;
+}
+div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeholder {
+  color:#b48cff!important;
+  font-weight:600!important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # Auto-detect paste
 if pasted_now and pasted_now.strip():
@@ -1020,7 +1006,12 @@ if use_voxcpm:
         st.session_state.ref = "ref.wav"
         st.success("✅ Ref Audio")
     else:
-        st.session_state.ref = None
+        # Ref မရှိရင် ရှိပြီးသား file ရှိမရှိ စစ်
+        if os.path.exists("ref.wav"):
+            st.session_state.ref = "ref.wav"
+            st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
+        else:
+            st.session_state.ref = None
 else:
     st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
     st.session_state.ref = None
@@ -1089,4 +1080,10 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     st.success(f"✅ Done — ⏱️ {total_elapsed:.1f}s")
     st.video("final.mp4")
     with open("final.mp4", "rb") as f:
-        st.download_button("📥 Download", f, file_name="recap.mp4")
+        st.download_button(
+            "📥 Download",
+            f,
+            file_name="recap.mp4",
+            on_click=_on_download_clear,
+            use_container_width=True,
+        )
