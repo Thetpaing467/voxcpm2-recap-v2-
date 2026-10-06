@@ -1,5 +1,5 @@
 import streamlit as st
-import os, re, ffmpeg, shutil, subprocess, asyncio, time, threading, queue
+import os, re, ffmpeg, shutil, subprocess, asyncio, time
 import concurrent.futures
 import numpy as np
 import edge_tts
@@ -8,6 +8,7 @@ import cv2
 from gradio_client import Client, handle_file
 
 os.environ["HF_HOME"] = "/tmp/hf_cache"
+cv2.setNumThreads(os.cpu_count() or 4)
 
 SPACES = [
     {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
@@ -18,17 +19,15 @@ PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
 FS, BH, BA = 30, 100, 200
-ENC_PRESET = "fast"
-ENC_CRF = 18
 FINAL_PRESET = "ultrafast"
-FINAL_CRF = 18
-USE_FAST_VAD = True   # Whisper မသုံးဘဲ VAD နဲ့ speech ရှာ (အမြန်ဆုံး)
+FINAL_CRF = 22
+USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
-TTS_WORKERS = 5
+TTS_WORKERS = 8
 PNG_WORKERS = 4
 
-CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"   # Gemini Canvas
+CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
 
@@ -36,14 +35,6 @@ BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
 CORNER_RADIUS = 20
 
-# ---- Video / Neon settings ----
-CROP_RATIO = 0.95
-MAX_LONG_SIDE = 1920      # ဒီထက်ကြီးတဲ့ video (4K) ကို အလိုအလျောက်ချုံ့ → ပိုမြန်
-NEON_THICKNESS = 20       # border အထူ (px)
-NEON_SPEED = 0.6          # ပတ်ပြေးနှုန်း (1.0 = ၄ စက္ကန့်/အပတ်)
-NEON_TAIL = 0.45          # အလင်းတန်း အမြီးအရှည် (border ရဲ့ ၄၅%)
-
-# TikTok Logo Colors
 TIKTOK_CYAN = "#25F4EE"
 TIKTOK_MAGENTA = "#FE2C55"
 TIKTOK_BLACK = "#000000"
@@ -112,19 +103,6 @@ def vid_info(p):
     return int(v['width']), int(v['height']), float(pr['format']['duration'])
 
 
-def vid_fps(p):
-    try:
-        pr = ffmpeg.probe(p)
-        v = next(s for s in pr['streams'] if s['codec_type'] == 'video')
-        n, d = v['r_frame_rate'].split('/')
-        f = float(n) / float(d)
-        if f > 0:
-            return f
-    except Exception:
-        pass
-    return 30.0
-
-
 def t2s(s):
     ms = int(round((s - int(s)) * 1000)); tot = int(s)
     if ms >= 1000: tot += 1; ms = 0
@@ -141,14 +119,13 @@ def s2t(ts):
     return None
 
 
-def render_rgba(text, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
+def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
                 box_width_ratio=BOX_WIDTH_RATIO,
                 padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
-    """Subtitle ကို RGBA image အဖြစ် memory ထဲမှာပဲ ဆွဲ (disk မသုံး)"""
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    img = Image.new("RGBA", (W, H), (0,0,0,0))
     d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
-    except Exception: f = ImageFont.load_default()
+    except: f = ImageFont.load_default()
 
     mc = max(15, int(W/(fs*0.9)))
     lines, cur = [], ""
@@ -158,7 +135,7 @@ def render_rgba(text, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
             if cur: lines.append(cur)
             cur = w
     if cur: lines.append(cur)
-    if not lines: return None
+    if not lines: return out
 
     lh = int(fs * 1.3)
     text_h = len(lines) * lh
@@ -179,22 +156,12 @@ def render_rgba(text, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
         bb = d.textbbox((0, 0), ln, font=f)
         lw = bb[2] - bb[0]
         lx = box_x + (box_w - lw) // 2
-        try:
-            # stroke တစ်ခါတည်းနဲ့ outline ဆွဲ (နည်းဟောင်း ၂၅ ခါဆွဲတာထက် အများကြီးမြန်)
-            d.text((lx, ty), ln, font=f, fill=(255, 255, 255, 255),
-                   stroke_width=2, stroke_fill=(0, 0, 0, 255))
-        except Exception:
-            d.text((lx, ty), ln, font=f, fill=(255, 255, 255, 255))
+        for dx in [-2,-1,0,1,2]:
+            for dy in [-2,-1,0,1,2]:
+                d.text((lx+dx, ty+dy), ln, font=f, fill=(0,0,0,255))
+        d.text((lx, ty), ln, font=f, fill=(255,255,255,255))
         ty += lh
-    return img
 
-
-def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
-               box_width_ratio=BOX_WIDTH_RATIO,
-               padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
-    img = render_rgba(text, fp, W, H, fs, pos_y, bh, ba,
-                      box_width_ratio, padding_y, corner_radius)
-    if img is None: return out
     img.save(out, "PNG")
     return out
 
@@ -256,79 +223,12 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-# ==================== TikTok Neon (ပိုလင်း + ပိုမြန်) ====================
-
-class NeonRing:
-    """
-    Border ring ပေါ်မှာ ပတ်ပြေးတဲ့ Cyan + Magenta အလင်းတန်း။
-    - အရောင်ပုံစံ (comet pattern) ကို တစ်ခါတည်း ကြိုတွက်ထား
-    - frame တစ်ခုချင်းမှာ index ကို shift လုပ်ပြီး ယူရုံပဲ → အရမ်းမြန်
-    - ခေါင်း (head) မှာ အဖြူရောင် အလင်းပွင့် + အပြင်ဘက်ဆုံး အလွှာ ပိုလင်း
-    """
-    def __init__(self, W, H, thickness=NEON_THICKNESS, tail=NEON_TAIL):
-        th = int(max(2, min(thickness, W // 2 - 1, H // 2 - 1)))
-        P = 2 * (W + H)
-        self.P = P
-
-        mask = np.zeros((H, W), dtype=bool)
-        mask[:th] = True; mask[-th:] = True
-        mask[:, :th] = True; mask[:, -th:] = True
-        ys, xs = np.nonzero(mask)
-
-        dt, db, dl, dr = ys, H - 1 - ys, xs, W - 1 - xs
-        m = np.minimum.reduce([dt, db, dl, dr])
-        # ပတ်လမ်းတစ်လျှောက် ဆက်တိုက်နေရာ (clockwise): top → right → bottom → left
-        S = np.where(m == dt, xs,
-            np.where(m == dr, W + ys,
-            np.where(m == db, 2 * W + H - 1 - xs,
-                     2 * W + 2 * H - 1 - ys))).astype(np.int64) % P
-
-        BASE = np.array([22, 22, 22], np.float32)
-        CYAN = np.array([238, 244, 37], np.float32)      # BGR
-        MAGENTA = np.array([85, 44, 254], np.float32)    # BGR
-
-        pos = np.arange(P, dtype=np.float32)
-        d1 = (-pos) % P                  # Cyan head = 0
-        d2 = (P / 2.0 - pos) % P         # Magenta head = P/2
-
-        def prof(dist, length, power):
-            return np.clip(1.0 - dist / length, 0.0, 1.0) ** power
-
-        a1 = prof(d1, tail * P, 0.7)[:, None]    # power နည်း = ပိုလင်း/ပိုကျယ်
-        a2 = prof(d2, tail * P, 0.7)[:, None]
-        w1 = prof(d1, 0.05 * P, 2.0)[:, None]    # အဖြူ အလင်းပွင့် (head)
-        w2 = prof(d2, 0.05 * P, 2.0)[:, None]
-
-        col = BASE[None, :] + CYAN[None, :] * a1 + MAGENTA[None, :] * a2 \
-              + 255.0 * 0.85 * (w1 + w2)
-
-        G = np.linspace(1.0, 0.6, th, dtype=np.float32)       # အပြင်ဘက် ပိုလင်း၊ အတွင်း မှိန်သွား
-        pat = np.clip(col[None, :, :] * G[:, None, None], 0, 255).astype(np.uint8)  # (th, P, 3)
-        self.pat = np.concatenate([pat, pat], axis=1).reshape(-1, 3)   # modulo မလိုအောင် ၂ ထပ်
-
-        self.flat = (ys * W + xs).astype(np.int64)
-        self.base_idx = (m * 2 * P + S + P).astype(np.int32)
-
-    def apply(self, fr, head):
-        """fr = BGR uint8, C-contiguous (in-place)"""
-        s = int(head) % self.P
-        fr.reshape(-1, 3)[self.flat] = self.pat.take(self.base_idx - s, axis=0)
-
-
-def draw_neon_preview(img, thickness=NEON_THICKNESS):
-    """Preview frame ပေါ်မှာ Output နဲ့ တူတဲ့ Neon ဆွဲ"""
-    rgb = np.array(img.convert("RGB"))
-    bgr = np.ascontiguousarray(rgb[:, :, ::-1])
-    H, W = bgr.shape[:2]
-    ring = NeonRing(W, H, thickness)
-    ring.apply(bgr, ring.P * 0.15)
-    return Image.fromarray(np.ascontiguousarray(bgr[:, :, ::-1])).convert("RGBA")
-
-
 def keep_count(video_in, segments):
     """Speech အပိုင်းထဲက frame အရေအတွက် (encode မလုပ်ဘဲ တွက်)"""
-    fps = vid_fps(video_in)
     pr = ffmpeg.probe(video_in)
+    vs = next(x for x in pr['streams'] if x['codec_type'] == 'video')
+    n_, d_ = vs['r_frame_rate'].split('/')
+    fps = float(n_) / float(d_)
     total = int(round(float(pr['format']['duration']) * fps))
     t = np.arange(total) / fps
     mask = np.zeros(total, dtype=bool)
@@ -344,7 +244,7 @@ def simple_merge(video_in, audio_in, output_video, tempo, segments=None):
         vf = ["-vf", f"select='{sel}',setpts=N/FRAME_RATE/TB"]
     cmd = ["ffmpeg", "-y", "-i", video_in, "-i", audio_in,
            "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a"] + vf + [
-           "-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
+           "-c:v", "libx264", "-crf", "22", "-preset", "ultrafast",
            "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest", output_video]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if r.returncode != 0:
@@ -354,66 +254,88 @@ def simple_merge(video_in, audio_in, output_video, tempo, segments=None):
 
 def final_render(video_in, audio_in, output_video, tempo,
                  srt_path=None, fp=FONT_FILE, fs=FS, pos_y=100, bh=BH, ba=BA,
-                 use_neon=True, thickness=NEON_THICKNESS, speed=NEON_SPEED,
-                 tail=NEON_TAIL, crop_ratio=CROP_RATIO, mirror=True, segments=None):
-    """
-    Crop + Mirror + Neon + Subtitle + Audio — encode တစ်ခါတည်း
-    Pipeline (၃ thread): [Decode+Crop+Flip] → [Neon+Subtitle] → [ffmpeg ထဲ ရေး]
-    """
-    fps = vid_fps(video_in)
+                 use_neon=True, thickness=15, speed=0.4, tail=0.45,
+                 crop_ratio=0.95, mirror=True, segments=None):
+    """Crop + Mirror + BRIGHT Chase Neon + Subtitle + Audio
+    Pipeline: [decode thread] -> [composite (main)] -> [ffmpeg writer thread]"""
+    import queue, threading
 
-    # cv2 က တကယ်ထုတ်ပေးမယ့် frame အရွယ်ကို အတိအကျသိဖို့ (rotation ပြဿနာ မဖြစ်စေ)
-    pc = cv2.VideoCapture(video_in)
-    ok0, f0 = pc.read()
-    pc.release()
-    if not ok0 or f0 is None:
-        raise Exception("Video ဖတ်မရ")
-    H0, W0 = f0.shape[:2]
-    del f0
+    W0, H0, _ = vid_info(video_in)
+    pr = ffmpeg.probe(video_in)
+    vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
+    n, d = vs['r_frame_rate'].split('/')
+    fps = float(n) / float(d)
 
     if crop_ratio != 1.0:
         cw = int(W0 * crop_ratio); ch = int(H0 * crop_ratio)
-        cw -= cw % 2; ch -= ch % 2
+        if cw % 2: cw -= 1
+        if ch % 2: ch -= 1
         cx = (W0 - cw) // 2; cy = (H0 - ch) // 2
     else:
-        cw, ch = W0 - W0 % 2, H0 - H0 % 2
-        cx = cy = 0
+        cw, ch, cx, cy = W0, H0, 0, 0
+    W, H = cw, ch
 
-    scale = 1.0
-    if MAX_LONG_SIDE and max(cw, ch) > MAX_LONG_SIDE:
-        scale = MAX_LONG_SIDE / float(max(cw, ch))
-    W = max(2, int(cw * scale) // 2 * 2)
-    H = max(2, int(ch * scale) // 2 * 2)
-    do_resize = (W != cw or H != ch)
-
-    # ---- Subtitle ကြိုပြင် (parallel, memory ထဲမှာပဲ) ----
+    # ---- Subtitle PNG ကြိုပြင် (parallel) ----
     subs = []
     if srt_path:
         segs = parse_srt(srt_path)
+        os.makedirs("subtitle_pngs", exist_ok=True)
 
         def prep(args):
             i, sg = args
-            img = render_rgba(sg["text"], fp, W, H, fs, pos_y, bh, ba,
-                              box_width_ratio=BOX_WIDTH_RATIO)
-            if img is None: return None
-            arr = np.asarray(img)                      # RGBA
-            rows = np.where(arr[:, :, 3].any(axis=1))[0]
+            p = f"subtitle_pngs/s_{i:04d}.png"
+            render_png(sg["text"], p, fp, W, H, fs, pos_y, bh, ba,
+                       box_width_ratio=BOX_WIDTH_RATIO)
+            rgba = cv2.imread(p, cv2.IMREAD_UNCHANGED)
+            try: os.remove(p)
+            except: pass
+            if rgba is None: return None
+            rows = np.where(rgba[:, :, 3].any(axis=1))[0]
             if len(rows) == 0: return None
             y0, y1 = int(rows[0]), int(rows[-1]) + 1
-            crop = arr[y0:y1]
-            bgra = np.ascontiguousarray(crop[:, :, [2, 1, 0, 3]])
-            return {"a": sg["start"], "b": sg["end"], "y0": y0, "y1": y1, "bgra": bgra}
+            crop = rgba[y0:y1]
+            alpha = crop[:, :, 3:4].astype(np.float32) / 255.0
+            pre = crop[:, :, :3].astype(np.float32) * alpha
+            return {"a": sg["start"], "b": sg["end"], "y0": y0, "y1": y1,
+                    "inv": 1.0 - alpha, "pre": pre}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=PNG_WORKERS) as ex:
             subs = [x for x in ex.map(prep, enumerate(segs)) if x]
 
-    ring = NeonRing(W, H, thickness, tail) if use_neon else None
+    # ---- BRIGHT Neon: ring နေရာ + Color lookup table (တစ်ခါတည်း ကြိုတွက်) ----
+    if use_neon:
+        th = max(1, min(thickness, W // 4, H // 4))
+        P = 2 * (W + H)
+        yy, xx = np.mgrid[0:H, 0:W]
+        ring = (xx < th) | (xx >= W - th) | (yy < th) | (yy >= H - th)
+        ys, xs = np.nonzero(ring)
+        dt, db, dl, dr = ys, H - 1 - ys, xs, W - 1 - xs
+        m = np.minimum.reduce([dt, db, dl, dr])
+        S = np.where(m == dt, xs,
+            np.where(m == dr, W + ys,
+            np.where(m == db, 2 * W + H + (W - xs),
+                     2 * W + 2 * H - ys)))
+        Si = (S.astype(np.int64) % P).astype(np.int32)
+        lin = (ys.astype(np.int64) * W + xs).astype(np.int64)
 
-    # ---- ffmpeg (raw frame လက်ခံ) ----
+        BASE = np.array([60, 45, 45], np.float32)       # အောက်ခံ အလင်းရောင်
+        CYAN = np.array([238, 244, 37], np.float32)     # BGR
+        MAGENTA = np.array([85, 44, 254], np.float32)   # BGR
+        GAIN = 1.5                                      # အရောင် တောက်ပမှု
+        HOT = 230.0                                     # head အဖြူရောင် အလင်း
+
+        dd = np.arange(P, dtype=np.float32)
+        a1 = np.clip(1.0 - dd / (tail * P), 0, 1)
+        a2 = np.roll(a1, -(P // 2))
+        T = (BASE
+             + GAIN * (CYAN * a1[:, None] + MAGENTA * a2[:, None])
+             + HOT * ((a1 ** 8) + (a2 ** 8))[:, None])
+        T = np.clip(T, 0, 255).astype(np.uint8)
+
     cmd = [
         "ffmpeg", "-y",
         "-f", "rawvideo", "-pix_fmt", "bgr24",
-        "-s", f"{W}x{H}", "-r", f"{fps:.5f}", "-i", "-",
+        "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
     ]
     if audio_in:
         cmd += ["-i", audio_in, "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a"]
@@ -423,29 +345,26 @@ def final_render(video_in, audio_in, output_video, tempo,
             "-pix_fmt", "yuv420p", "-threads", "0"]
     if audio_in:
         cmd += ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest"]
-    cmd += ["-movflags", "+faststart", output_video]
-
-    logf = open("final_ffmpeg.log", "wb")
+    cmd += [output_video]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL, stderr=logf,
-                            bufsize=W * H * 3 * 2)
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    q_in = queue.Queue(maxsize=6)
-    q_out = queue.Queue(maxsize=6)
+    cap = cv2.VideoCapture(video_in)
+    q_in = queue.Queue(maxsize=12)
+    q_out = queue.Queue(maxsize=12)
     stop = threading.Event()
-    err = {}
+    errs = []
 
-    def put(q, item):
+    def qput(q, item):
         while not stop.is_set():
             try:
                 q.put(item, timeout=0.5)
                 return True
             except queue.Full:
-                pass
+                continue
         return False
 
     def reader():
-        cap = cv2.VideoCapture(video_in)
         i = 0; p = 0
         try:
             while not stop.is_set():
@@ -454,94 +373,69 @@ def final_render(video_in, audio_in, output_video, tempo,
                 i += 1
                 if segments:
                     while p < len(segments) and segments[p][1] < t_in: p += 1
-                    if p >= len(segments): break          # Speech ကုန်ပြီ → ကျန်တာ မဖတ်တော့
-                    if segments[p][0] > t_in: continue    # Speech မဟုတ်တဲ့ frame ကျော်
+                    if not (p < len(segments) and segments[p][0] <= t_in): continue
                 ok, fr = cap.retrieve()
-                if not ok or fr is None: break
+                if not ok: break
                 fr = fr[cy:cy + ch, cx:cx + cw]
-                fr = cv2.flip(fr, 1) if mirror else np.ascontiguousarray(fr)
-                if do_resize:
-                    fr = cv2.resize(fr, (W, H), interpolation=cv2.INTER_AREA)
-                fr = np.ascontiguousarray(fr)
-                if not put(q_in, fr): break
+                if mirror: fr = fr[:, ::-1]
+                if not qput(q_in, np.ascontiguousarray(fr)): return
         except Exception as e:
-            err["r"] = e
+            errs.append(e); stop.set()
         finally:
-            cap.release()
-            put(q_in, None)
+            qput(q_in, None)
 
     def writer():
         try:
             while True:
                 try:
-                    fr = q_out.get(timeout=0.5)
+                    item = q_out.get(timeout=0.5)
                 except queue.Empty:
                     if stop.is_set(): return
                     continue
-                if fr is None: break
-                proc.stdin.write(fr.tobytes())
+                if item is None: return
+                proc.stdin.write(item)
         except Exception as e:
-            err["w"] = e
-            stop.set()
+            errs.append(e); stop.set()
 
     rt = threading.Thread(target=reader, daemon=True)
     wt = threading.Thread(target=writer, daemon=True)
     rt.start(); wt.start()
 
-    j = 0; k = 0; cur_k = -1; inv = pre = None
+    j = 0; k = 0
     try:
-        while True:
+        while not stop.is_set():
             try:
                 fr = q_in.get(timeout=0.5)
             except queue.Empty:
-                if stop.is_set(): break
                 continue
             if fr is None: break
-
             t = j / fps
 
-            # Subtitle
+            if use_neon:
+                head = int((t * speed * P / 4.0) % P)
+                fr.reshape(-1, 3)[lin] = T[(head - Si) % P]
+
             while k < len(subs) and subs[k]["b"] < t: k += 1
             if k < len(subs) and subs[k]["a"] <= t:
                 sb = subs[k]
-                if cur_k != k:
-                    al = sb["bgra"][:, :, 3:4].astype(np.float32) / 255.0
-                    pre = sb["bgra"][:, :, :3].astype(np.float32) * al
-                    inv = 1.0 - al
-                    cur_k = k
-                reg = fr[sb["y0"]:sb["y1"]].astype(np.float32)
-                reg *= inv
-                reg += pre
+                reg = fr[sb["y0"]:sb["y1"]].astype(np.float32) * sb["inv"] + sb["pre"]
                 fr[sb["y0"]:sb["y1"]] = reg.astype(np.uint8)
 
-            # Neon (Subtitle ပေါ်မှာ ထပ်ဆွဲ → border အမြဲ ပေါ်နေမယ်)
-            if ring is not None:
-                ring.apply(fr, t * speed * ring.P / 4.0)
-
-            if not put(q_out, fr): break
+            if not qput(q_out, fr): break
             j += 1
-        put(q_out, None)
+        qput(q_out, None)
         wt.join()
     finally:
         stop.set()
-        rt.join(timeout=10)
-        wt.join(timeout=10)
+        rt.join(timeout=5)
+        cap.release()
         try: proc.stdin.close()
-        except Exception: pass
+        except: pass
         proc.wait()
-        logf.close()
-
-    if "r" in err: raise Exception(f"Read: {err['r']}")
-    if "w" in err and proc.returncode != 0:
-        raise Exception(f"Write: {err['w']}")
-    if j == 0: raise Exception("Frame မရ")
+    if errs:
+        raise Exception(f"Final render: {errs[0]}")
     if proc.returncode != 0:
-        try:
-            with open("final_ffmpeg.log", "rb") as lf:
-                tail_txt = lf.read()[-300:].decode("utf-8", "ignore")
-        except Exception:
-            tail_txt = ""
-        raise Exception(f"Final render: ffmpeg fail {tail_txt}")
+        raise Exception("Final render: ffmpeg fail")
     return output_video
 
 
@@ -575,6 +469,36 @@ def prepare_video_job(video_in, script_text, use_sub, fw_model,
     except Exception as e:
         render_err = str(e)
     return {"segments": segments, "vdur": vdur, "render_err": render_err}
+
+
+# ==================== Preview ====================
+
+def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
+    """Preview frame ပေါ်မှာ TikTok 3-layer border ဆွဲ"""
+    d = ImageDraw.Draw(img, "RGBA")
+    W, H = img.size
+    inner_c = max(3, thickness // 3)
+
+    d.rectangle([0, 0, W - 1, H - 1],
+                outline=(0, 0, 0, 255), width=thickness)
+
+    if animated_phase > 0:
+        import math
+        phase = (math.sin(animated_phase * math.pi) + 1) / 2
+        cyan_r = int(37 * (1 - phase) + 254 * phase)
+        cyan_g = int(244 * (1 - phase) + 44 * phase)
+        cyan_b = int(238 * (1 - phase) + 85 * phase)
+        d.rectangle([0, 0, W - 1, H - 1],
+                    outline=(cyan_r, cyan_g, cyan_b, 255), width=inner_c)
+    else:
+        d.rectangle([0, 0, W - 1, H - 1],
+                    outline=(37, 244, 238, 255), width=inner_c)
+
+    offset = thickness
+    d.rectangle([offset, offset, W - 1 - offset, H - 1 - offset],
+                outline=(254, 44, 85, 255), width=inner_c)
+
+    return img
 
 
 # ==================== TTS Functions ====================
@@ -624,24 +548,18 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
         i, c = args
         dst = f"edge_chunk_{i}.mp3"
         last = None
-        for _ in range(3):                       # network error ရှိရင် ၃ ကြိမ်အထိ ထပ်စမ်း
+        for _ in range(3):   # retry
             try:
-                asyncio.run(_edge_tts_async(c, dst, voice_id))
-                return (i, dst)
-            except RuntimeError:
                 loop = asyncio.new_event_loop()
                 try:
-                    asyncio.set_event_loop(loop)
                     loop.run_until_complete(_edge_tts_async(c, dst, voice_id))
-                    return (i, dst)
-                except Exception as e:
-                    last = e
                 finally:
                     loop.close()
+                return (i, dst)
             except Exception as e:
                 last = e
-            time.sleep(0.7)
-        raise last if last else Exception("Edge TTS fail")
+                time.sleep(0.5)
+        raise last
 
     results = [None] * len(chunks); done = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
@@ -652,9 +570,14 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     with open("edge_concat.txt", "w", encoding="utf-8") as f:
         for a in results: f.write(f"file '{a}'\n")
 
-    ffmpeg.input("edge_concat.txt", format="concat", safe=0).output(
-        out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True, quiet=True)
+    # mp3 chunk တွေ ပုံစံတူလို့ re-encode မလုပ်ဘဲ copy (မြန်)
+    r = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                        "-i", "edge_concat.txt", "-c", "copy", out_path],
+                       capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0:
+        ffmpeg.input("edge_concat.txt", format="concat", safe=0).output(
+            out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
+        ).run(overwrite_output=True, quiet=True)
     return out_path
 
 
@@ -721,7 +644,7 @@ def whisper_fast(video_path, model=None):
             if segs_vad:
                 return segs_vad
         except Exception:
-            pass   # VAD မရရင် Whisper နဲ့ ဆက်သွား
+            pass
 
     speech_segments = []
     try:
@@ -770,13 +693,11 @@ vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility=
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# TikTok Neon Border — UI မပြဘဲ နောက်ကွယ်မှာ Auto (ပုံသေ)
 use_neon = True
 neon_animated = True
-neon_thickness = NEON_THICKNESS
-neon_speed = NEON_SPEED
+neon_thickness = 15
+neon_speed = 0.4
 
-# Step 4 — Subtitle
 st.subheader("📝 Step 4 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
@@ -784,7 +705,6 @@ if use_sub:
     pos_y = st.slider("📍 Position", 0, 100, 100, 1)
 st.divider()
 
-# Step 5 — Preview
 if vid:
     st.subheader("🖼️ Step 5 — Preview")
     with st.spinner("Preview..."):
@@ -808,16 +728,17 @@ if vid:
             comp = Image.alpha_composite(bg, fg)
 
             if use_neon:
-                comp = draw_neon_preview(comp, thickness=neon_thickness)
+                phase = 0.5 if neon_animated else 0.0
+                comp = draw_tiktok_border_preview(comp, thickness=neon_thickness,
+                                                   animated_phase=phase)
 
             pw = 720
-            comp.resize((pw, int(comp.size[1] * (pw / comp.size[0]))), Image.LANCZOS).convert("RGB").save("prev_out.png")
+            comp.resize((pw, int(H * (pw / W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
             st.image("prev_out.png", use_container_width=True)
             if use_neon and neon_animated:
                 st.caption("🎬 Animated — Output Video မှာ အလင်းတန်း ပတ်ပြေးနေမည်")
 st.divider()
 
-# Step 6 — Generate
 st.subheader("🚀 Step 6 — Generate")
 
 use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True)
@@ -845,7 +766,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    # ၁။ Cut + Render ကို Background မှာ — TTS နဲ့ တပြိုင်တည်း (အသံမပါ Video အရင်ထုတ်)
+    # ၁။ Cut + Render ကို Background မှာ — TTS နဲ့ တပြိုင်တည်း
     fw_model = None
     if not USE_FAST_VAD:
         try: fw_model = get_fw_model()
