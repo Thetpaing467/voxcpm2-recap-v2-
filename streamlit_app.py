@@ -23,14 +23,14 @@ ENC_PRESET = "fast"
 ENC_CRF = 18
 FINAL_PRESET = "ultrafast"
 FINAL_CRF = 20
-USE_FAST_VAD = True   # Whisper မသုံးဘဲ VAD နဲ့ speech ရှာ (အမြန်ဆုံး)
+USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
-EDGE_CHUNK = 400   # chunk ကြီးလေ request နည်းလေ (rate limit လျော့)
+EDGE_CHUNK = 400
 TTS_WORKERS = 2
 PNG_WORKERS = 4
 
-CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"   # Gemini Canvas
+CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
 
@@ -38,7 +38,6 @@ BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
 CORNER_RADIUS = 20
 
-# TikTok Logo Colors
 TIKTOK_CYAN = "#25F4EE"
 TIKTOK_MAGENTA = "#FE2C55"
 TIKTOK_BLACK = "#000000"
@@ -79,6 +78,27 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 .step-timer{background:rgba(255,255,255,.05);border-left:4px solid #667eea;
  border-radius:10px;padding:12px 18px;margin:8px 0;color:#e8e8f0;font-size:.95rem}
 .step-timer b{color:#6ba8ff;font-size:1.05rem}
+
+/* ⭐ Big Paste Box */
+div[data-testid="stTextArea"] textarea.pasteBox {
+  background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
+  border:2px dashed rgba(198,107,255,.55)!important;
+  border-radius:18px!important;
+  color:#fff!important;
+  font-size:1.05rem!important;
+  padding:22px!important;
+  text-align:center!important;
+  transition:all .2s;
+}
+div[data-testid="stTextArea"] textarea.pasteBox:focus {
+  border-color:#C66BFF!important;
+  border-style:solid!important;
+  box-shadow:0 0 24px rgba(198,107,255,.5)!important;
+}
+div[data-testid="stTextArea"] textarea.pasteBox::placeholder {
+  color:#b48cff!important;
+  font-weight:600!important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -248,7 +268,6 @@ def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100,
 
 
 def normalize_script(t):
-    """Script ကို TTS/Subtitle အတွက် သန့်စင် (quote, emoji, စာကြောင်းလွတ်, ။ ထပ်)"""
     t = re.sub(r'[\U0001F000-\U0001FFFF\u2600-\u27BF\uFE0F]', '', t)
     t = re.sub(r'[\u201c\u201d"`*_#<>\[\]{}()\uff08\uff09\u300c\u300d\u300e\u300f\u00ab\u00bb~^|\\/]', ' ', t)
     out = []
@@ -263,7 +282,6 @@ def normalize_script(t):
 
 
 def has_speech(t):
-    """ပြောလို့ရတဲ့ အက္ခရာ/ဂဏန်း ပါမပါ (။ ၊ သင်္ကေတချည်းဆိုရင် False)"""
     return re.search(r"[\u1000-\u1049\u1050-\u109F\w]", t) is not None
 
 
@@ -315,11 +333,8 @@ def video_bypass(input_video, output_video="bypass.mp4",
     return output_video
 
 
-# ==================== TikTok Neon Border (Static + Chase) ====================
-
 def bypass_and_neon(input_video, output_video,
                     crop_ratio=0.95, mirror=True, thickness=30):
-    """Bypass + Static Neon Border — ၃ လွှာ (Video မဖုံး)"""
     W, H, dur = vid_info(input_video)
     pad = thickness
     filters = []
@@ -356,7 +371,6 @@ def bypass_and_neon(input_video, output_video,
 def bypass_and_neon_chase(input_video, output_video,
                           crop_ratio=0.95, mirror=True,
                           thickness=30, speed=1.0, tail=0.35):
-    """Bypass + ပတ်ပြေးနေတဲ့ Neon အလင်းတန်း (comet / မြားဦး style)"""
     base = "bypass_base.mp4"
     video_bypass(input_video, base, crop_ratio, mirror)
 
@@ -369,7 +383,6 @@ def bypass_and_neon_chase(input_video, output_video,
     th = thickness
     P = 2 * (W + H)
 
-    # Border ring pixel တွေရဲ့ ပတ်လမ်းအတိုင်း နေရာ (S) ကို တစ်ခါတည်း တွက်
     yy, xx = np.mgrid[0:H, 0:W]
     ring = (xx < th) | (xx >= W - th) | (yy < th) | (yy >= H - th)
     ys, xs = np.nonzero(ring)
@@ -380,13 +393,13 @@ def bypass_and_neon_chase(input_video, output_video,
         np.where(m == db, 2 * W + H + (W - xs),
                  2 * W + 2 * H - ys))).astype(np.float32)
 
-    BASE = np.array([15, 15, 15], np.float32)       # အနက်ရောင် အောက်ခံ
-    CYAN = np.array([238, 244, 37], np.float32)     # BGR
-    MAGENTA = np.array([85, 44, 254], np.float32)   # BGR
+    BASE = np.array([15, 15, 15], np.float32)
+    CYAN = np.array([238, 244, 37], np.float32)
+    MAGENTA = np.array([85, 44, 254], np.float32)
 
     def comet(head):
-        dist = (head - S) % P                       # head ရဲ့ နောက်ဘက် ဝေးမှု
-        a = np.clip(1.0 - dist / (tail * P), 0, 1)  # tail မှိန်သွား
+        dist = (head - S) % P
+        a = np.clip(1.0 - dist / (tail * P), 0, 1)
         return (a ** 1.5)[:, None]
 
     cmd = [
@@ -409,7 +422,7 @@ def bypass_and_neon_chase(input_video, output_video,
         ok, fr = cap.read()
         if not ok: break
         t = i / fps
-        head = (t * speed * P / 4.0) % P            # speed=1 → ၄ စက္ကန့်/အပတ်
+        head = (t * speed * P / 4.0) % P
         c = BASE + CYAN * comet(head) + MAGENTA * comet(head + P / 2)
         fr[ys, xs] = np.clip(c, 0, 255).astype(np.uint8)
         proc.stdin.write(fr.tobytes())
@@ -423,7 +436,6 @@ def bypass_and_neon_chase(input_video, output_video,
 
 
 def keep_count(video_in, segments):
-    """Speech အပိုင်းထဲက frame အရေအတွက် (encode မလုပ်ဘဲ တွက်)"""
     pr = ffmpeg.probe(video_in)
     vs = next(x for x in pr['streams'] if x['codec_type'] == 'video')
     n_, d_ = vs['r_frame_rate'].split('/')
@@ -455,7 +467,6 @@ def final_render(video_in, audio_in, output_video, tempo,
                  srt_path=None, fp=FONT_FILE, fs=FS, pos_y=100, bh=BH, ba=BA,
                  use_neon=True, thickness=15, speed=0.4, tail=0.5,
                  crop_ratio=0.95, mirror=True, segments=None):
-    """Crop + Mirror + Chase Neon + Subtitle + Audio — encode တစ်ခါတည်း"""
     W0, H0, _ = vid_info(video_in)
     pr = ffmpeg.probe(video_in)
     vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
@@ -471,7 +482,6 @@ def final_render(video_in, audio_in, output_video, tempo,
         cw, ch, cx, cy = W0, H0, 0, 0
     W, H = cw, ch
 
-    # ---- Subtitle PNG များကို အကြိုပြင် (parallel) ----
     subs = []
     if srt_path:
         segs = parse_srt(srt_path)
@@ -498,7 +508,6 @@ def final_render(video_in, audio_in, output_video, tempo,
         with concurrent.futures.ThreadPoolExecutor(max_workers=PNG_WORKERS) as ex:
             subs = [x for x in ex.map(prep, enumerate(segs)) if x]
 
-    # ---- Neon ring ကြိုတွက် ----
     if use_neon:
         th = thickness
         P = 2 * (W + H)
@@ -511,10 +520,10 @@ def final_render(video_in, audio_in, output_video, tempo,
             np.where(m == dr, W + ys,
             np.where(m == db, 2 * W + H + (W - xs),
                      2 * W + 2 * H - ys))).astype(np.float32)
-        BASE = np.array([12, 8, 10], np.float32)         # အောက်ခံ (အနက်ဖြစ်မနေအောင် အရောင်အနည်းငယ်)
-        CYAN = np.array([255, 255, 0], np.float32)       # BGR → #00FFFF လင်းလင်း
-        MAGENTA = np.array([110, 30, 255], np.float32)   # BGR → #FF1E6E လင်းလင်း
-        IDLE = 0.14                                      # အမြီးမရှိတဲ့နေရာမှာလည်း အရောင်အလင်း အနည်းငယ်
+        BASE = np.array([12, 8, 10], np.float32)
+        CYAN = np.array([255, 255, 0], np.float32)
+        MAGENTA = np.array([110, 30, 255], np.float32)
+        IDLE = 0.14
 
         Si = (S.astype(np.int64)) % P
         P_arr = np.arange(P, dtype=np.float32)
@@ -522,8 +531,8 @@ def final_render(video_in, audio_in, output_video, tempo,
         def layer(h, color):
             dist = (h - P_arr) % P
             a_ = np.clip(1.0 - dist / (tail * P), 0, 1)
-            glow = IDLE + (1.0 - IDLE) * (a_ ** 0.55)                    # အမြီး ပိုကြာကြာ လင်း
-            core = np.clip(1.0 - dist / (0.06 * P), 0, 1) ** 2           # ဦးခေါင်း အဖြူရောင် တောက်
+            glow = IDLE + (1.0 - IDLE) * (a_ ** 0.55)
+            core = np.clip(1.0 - dist / (0.06 * P), 0, 1) ** 2
             return color * glow[:, None] + 255.0 * 0.9 * core[:, None]
 
         def make_strip(head):
@@ -587,7 +596,6 @@ def final_render(video_in, audio_in, output_video, tempo,
 
 
 def mux_audio(video_in, audio_in, output_video, tempo):
-    """Video ကို ပြန် encode မလုပ်ဘဲ အသံပေါင်းပေး (copy)"""
     cmd = ["ffmpeg", "-y", "-i", video_in, "-i", audio_in,
            "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a",
            "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE,
@@ -600,7 +608,6 @@ def mux_audio(video_in, audio_in, output_video, tempo):
 
 def prepare_video_job(video_in, script_text, use_sub, fw_model,
                       pos_y, use_neon, thickness, speed):
-    """Background: Speech ရှာ → Subtitle → အသံမပါ Video render (TTS နဲ့ တပြိုင်တည်း)"""
     segments = whisper_fast(video_in, fw_model)
     if not segments: raise Exception("Speech မတွေ့")
     kept, vfps = keep_count(video_in, segments)
@@ -621,16 +628,13 @@ def prepare_video_job(video_in, script_text, use_sub, fw_model,
 # ==================== Preview ====================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
-    """Preview frame ပေါ်မှာ TikTok 3-layer border ဆွဲ"""
     d = ImageDraw.Draw(img, "RGBA")
     W, H = img.size
     inner_c = max(3, thickness // 3)
 
-    # 1. အနက်ရောင် border
     d.rectangle([0, 0, W - 1, H - 1],
                 outline=(0, 0, 0, 255), width=thickness)
 
-    # 2. Cyan border (Animated ဆိုရင် အရောင် ပြောင်း)
     if animated_phase > 0:
         import math
         phase = (math.sin(animated_phase * math.pi) + 1) / 2
@@ -643,7 +647,6 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
         d.rectangle([0, 0, W - 1, H - 1],
                     outline=(37, 244, 238, 255), width=inner_c)
 
-    # 3. Magenta border
     offset = thickness
     d.rectangle([offset, offset, W - 1 - offset, H - 1 - offset],
                 outline=(254, 44, 85, 255), width=inner_c)
@@ -694,7 +697,6 @@ async def _edge_tts_async(text, out_file, voice):
 def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
 
-    # စာတိုတိုပြန်ခွဲ + ပြောလို့မရတဲ့ chunk ဖယ်
     small = []
     for c in chunks:
         for x in split_scr(c, EDGE_CHUNK):
@@ -716,17 +718,17 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
         key = hashlib.md5((voice_id + c).encode("utf-8")).hexdigest()
         dst = f"tts_cache/{key}.mp3"
         if os.path.exists(dst) and os.path.getsize(dst) > 0:
-            return (i, dst)   # ယခင်ထုတ်ပြီးသား — request ပြန်မခေါ်
+            return (i, dst)
         for attempt in range(4):
             try:
                 if os.path.exists(dst): os.remove(dst)
                 run_async(lambda: _edge_tts_async(c, dst, voice_id))
                 if os.path.exists(dst) and os.path.getsize(dst) > 0:
-                    time.sleep(0.7)   # request တစ်ခုနဲ့တစ်ခုကြား နားချိန်
+                    time.sleep(0.7)
                     return (i, dst)
             except Exception:
                 pass
-            time.sleep(3 * (attempt + 1))   # rate limit ရှောင်ဖို့ တဖြည်းဖြည်း စောင့်
+            time.sleep(3 * (attempt + 1))
         return (i, None)
 
     results = [None] * len(chunks); done = 0; skipped = []
@@ -752,7 +754,6 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
 
 def tts_free(chunks, out, cb=None):
-    """Edge TTS သီဟ"""
     edge_tts_run(chunks, out, cb=cb)
     st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
     return out
@@ -816,7 +817,7 @@ def whisper_fast(video_path, model=None):
             if segs_vad:
                 return segs_vad
         except Exception:
-            pass   # VAD မရရင် Whisper နဲ့ ဆက်သွား
+            pass
 
     speech_segments = []
     try:
@@ -869,6 +870,75 @@ st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သ�
 st.divider()
 
 if "script" not in st.session_state: st.session_state.script = ""
+
+# ==================== Gemini Canvas ====================
+with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
+    st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
+    st.caption("Canvas ဖွင့် → Transcript Copy → အောက်က box ထဲ Paste လုပ်ပါ")
+
+# ==================== ⭐ Big Paste Box (Auto-detect) ====================
+st.markdown("""
+<div style="text-align:center;margin:8px 0 4px">
+  <span style="font-size:1.1rem;font-weight:700;
+    background:linear-gradient(90deg,#FF6B9D,#C66BFF,#6BA8FF);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+    background-clip:text">
+    📋  Paste Box
+  </span>
+</div>
+""", unsafe_allow_html=True)
+
+# Auto paste area
+with st.container():
+    # custom class ကို key နဲ့ ချိတ်ဖို့ trick
+    paste_placeholder = st.empty()
+    pasted_now = paste_placeholder.text_area(
+        "paste",
+        value="",
+        height=80,
+        key="paste_big",
+        label_visibility="collapsed",
+        placeholder="📋  ဒီနေရာကို Long-press → Paste  (သို့)  Ctrl+V  —  ချက်ချင်း Script ထဲ ရောက်မယ်",
+    )
+
+    # CSS ကို key နဲ့ target
+    st.markdown("""
+    <style>
+    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea {
+      background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
+      border:2px dashed rgba(198,107,255,.55)!important;
+      border-radius:18px!important;
+      color:#fff!important;
+      font-size:1.05rem!important;
+      padding:22px!important;
+      text-align:center!important;
+    }
+    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea:focus {
+      border-color:#C66BFF!important;
+      border-style:solid!important;
+      box-shadow:0 0 24px rgba(198,107,255,.5)!important;
+    }
+    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeholder {
+      color:#b48cff!important;
+      font-weight:600!important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Auto-detect paste
+if pasted_now and pasted_now.strip():
+    clean = pasted_now.strip()
+    if clean != st.session_state.get("last_paste", ""):
+        st.session_state.last_paste = clean
+        lines = [l.strip().strip('"\u201c\u201d').strip()
+                 for l in clean.splitlines()]
+        result = "\n\n".join(l for l in lines if l)
+        st.session_state.script = result
+        st.session_state.paste_big = ""
+        st.success(f"✅ Script ထဲ Auto ရောက်သွားပြီ — {len(result)} လုံး")
+        st.rerun()
+
+# ==================== Script Display ====================
 script = st.text_area("Script", value=st.session_state.script, height=180,
                        label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
 st.session_state.script = script
@@ -877,37 +947,23 @@ c1, c2 = st.columns([3, 1])
 with c1: st.caption(f"📝 {len(script):,}")
 with c2:
     if st.button("🗑️ Clear", use_container_width=True):
-        st.session_state.script = ""; st.rerun()
-
-def _canvas_body():
-    st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
-    if st.toggle("👁️ ဒီနေရာထဲမှာ iframe နဲ့ စမ်းကြည့်မယ်", value=False, key="canvas_iframe"):
-        components.iframe(CANVAS_URL, height=480, scrolling=True)
-        st.caption("⚠️ အလွတ်ပဲ ပြရင် Google က ပိတ်ထားတာ — အပေါ်က ခလုတ်ကို သုံးပါ")
-    pasted = st.text_area("Canvas ကနေ Copy → ဒီမှာ Paste", height=240, key="canvas_paste")
-    if st.button("➡️ Script ထဲ ထည့်မယ်", key="canvas_apply", use_container_width=True):
-        lines = [l.strip().strip('"\u201c\u201d').strip() for l in pasted.splitlines()]
-        st.session_state.script = "\n\n".join(l for l in lines if l)
+        st.session_state.script = ""
+        st.session_state.last_paste = ""
         st.rerun()
-
-
-# Gemini Canvas — popup မသုံးတော့ဘဲ inline expander ပဲ
-with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)"):
-    _canvas_body()
 st.divider()
 
+# ==================== Step 2 — Video ====================
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader("📹", type=["mp4","mov","avi","mkv"], label_visibility="collapsed")
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# TikTok Neon Border — UI မပြဘဲ နောက်ကွယ်မှာ Auto (ပုံသေ)
 use_neon = True
 neon_animated = True
 neon_thickness = 15
 neon_speed = 0.4
 
-# Step 4 — Subtitle
+# ==================== Step 4 — Subtitle ====================
 st.subheader("📝 Step 4 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
@@ -915,7 +971,7 @@ if use_sub:
     pos_y = st.slider("📍 Position", 0, 100, 100, 1)
 st.divider()
 
-# Step 5 — Preview
+# ==================== Step 5 — Preview ====================
 if vid:
     st.subheader("🖼️ Step 5 — Preview")
     with st.spinner("Preview..."):
@@ -950,7 +1006,7 @@ if vid:
                 st.caption("🎬 Animated — Output Video မှာ အလင်းတန်း ပတ်ပြေးနေမည်")
 st.divider()
 
-# Step 6 — Generate
+# ==================== Step 6 — Generate ====================
 st.subheader("🚀 Step 6 — Generate")
 
 use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True)
@@ -980,7 +1036,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
-    # ၁။ Cut + Render ကို Background မှာ — TTS နဲ့ တပြိုင်တည်း (အသံမပါ Video အရင်ထုတ်)
     fw_model = None
     if not USE_FAST_VAD:
         try: fw_model = get_fw_model()
@@ -989,7 +1044,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     job = job_pool.submit(prepare_video_job, "input.mp4", script_n, use_sub, fw_model,
                           pos_y, use_neon, neon_thickness, neon_speed)
 
-    # ၂။ TTS
     t0 = time.time()
     pb = st.progress(0); txt = st.empty()
     def cb(i, tot, c): pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}]")
@@ -1000,7 +1054,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         st.error(f"TTS: {e}"); st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
 
-    # ၃။ Background job စောင့် + အသံပေါင်း
     t0 = time.time()
     try:
         info = job.result()
