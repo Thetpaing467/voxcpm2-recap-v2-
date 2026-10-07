@@ -23,6 +23,7 @@ ENC_PRESET = "fast"
 ENC_CRF = 18
 FINAL_PRESET = "ultrafast"
 FINAL_CRF = 20
+USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 600
 EDGE_CHUNK = 400
@@ -30,6 +31,8 @@ TTS_WORKERS = 2
 PNG_WORKERS = 4
 
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
+WHISPER_MODEL = "tiny"
+WHISPER_LANG = "my"
 
 BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
@@ -45,38 +48,24 @@ EDGE_VOICES = {
 }
 EDGE_VOICE_FIXED = "male"
 
-GROQ_WHISPER_MODEL = "whisper-large-v3"
-
-# ⭐ Model အသစ်များ (Groq က llama-3.3-70b-versatile ကို ဖြုတ်ပြီးပြီ)
-# ရွေးချယ်စရာများ:
-#   "openai/gpt-oss-120b"            ← အကောင်းဆုံး (အကြံပြု)
-#   "openai/gpt-oss-20b"             ← ပိုမြန်၊ ပိုသေး
-#   "llama-3.1-8b-instant"           ← အလွန်မြန် (အရည်အသွေး နည်းနည်းနိမ့်)
-#   "moonshotai/kimi-k2-instruct"    ← တရုတ်စာနဲ့ ကောင်း
-GROQ_LLM_MODEL = "openai/gpt-oss-120b"
-
-SOURCE_LANGS = {
-    "🇨🇳 တရုတ်": "zh",
-    "🇬🇧 အင်္ဂလိပ်": "en",
-    "🇲🇲 မြန်မာ (တိုက်ရိုက်)": "my",
-    "🇯🇵 ဂျပန်": "ja",
-    "🇰🇷 ကိုရီးယား": "ko",
-    "🇹🇭 ထိုင်း": "th",
-    "🇻🇳 ဗီယက်နမ်": "vi",
-    "🇮🇳 ဟိန္ဒီ": "hi",
-    "🤖 Auto Detect": None,
-}
-
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
 
-# ==================== Download Clear ====================
+# ==================== Helper — Download နှိပ်ရင် ရှင်းမယ့် Function ====================
 def _on_download_clear():
+    """Download နှိပ်လိုက်တာနဲ့ Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
+    # Script + Paste
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.paste_big = ""
+
+    # Preview cache
     st.session_state.pkey = None
+
+    # ⭐ Video uploader ကို key rotate လုပ်ပြီး ရှင်း
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
+
+    # ⭐ Ref Audio ကို မထိဘူး — ရှိနေမယ်
 
 
 st.markdown("""
@@ -107,11 +96,6 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 .step-timer{background:rgba(255,255,255,.05);border-left:4px solid #667eea;
  border-radius:10px;padding:12px 18px;margin:8px 0;color:#e8e8f0;font-size:.95rem}
 .step-timer b{color:#6ba8ff;font-size:1.05rem}
-.groq-box{background:linear-gradient(135deg,rgba(255,107,157,.15),rgba(198,107,255,.15));
- border:2px solid rgba(198,107,255,.5);border-radius:16px;padding:18px;margin:10px 0}
-.groq-ok{background:linear-gradient(135deg,rgba(72,187,120,.15),rgba(56,161,105,.15));
- border:2px solid rgba(72,187,120,.5);border-radius:16px;padding:14px;margin:10px 0;
- text-align:center;font-weight:700;color:#7ee2a8}
 </style>
 """, unsafe_allow_html=True)
 
@@ -135,7 +119,6 @@ if not st.session_state.auth:
 # ==================== Session State Init ====================
 if "script" not in st.session_state: st.session_state.script = ""
 if "video_up_key" not in st.session_state: st.session_state.video_up_key = 0
-if "groq_key" not in st.session_state: st.session_state.groq_key = ""
 
 
 # ==================== Utility Functions ====================
@@ -251,6 +234,41 @@ def parse_srt(path):
     return segs
 
 
+def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100,
+            box_width_ratio=BOX_WIDTH_RATIO):
+    W, H, _ = vid_info(vp); segs = parse_srt(sp)
+    if not segs: raise Exception("SRT empty")
+    os.makedirs("subtitle_pngs", exist_ok=True)
+
+    def render_one(args):
+        i, s = args
+        p = f"subtitle_pngs/s_{i:04d}.png"
+        render_png(s["text"], p, fp, W, H, fs, pos_y, bh, ba,
+                   box_width_ratio=box_width_ratio)
+        return i, {"p": p, "a": s["start"], "b": s["end"]}
+
+    pngs = [None] * len(segs)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=PNG_WORKERS) as ex:
+        for idx, item in ex.map(render_one, enumerate(segs)):
+            pngs[idx] = item
+
+    cmd = ["ffmpeg","-y","-i",vp] + sum([["-i",x["p"]] for x in pngs], [])
+    flt, cur = [], "[0:v]"
+    for i, x in enumerate(pngs):
+        lbl = f"[v{i}]"
+        flt.append(f"{cur}[{i+1}:v]overlay=0:0:enable='between(t,{x['a']:.3f},{x['b']:.3f})'{lbl}")
+        cur = lbl
+    cmd += ["-filter_complex",";".join(flt),"-map",cur,"-map","0:a?",
+            "-c:v","libx264","-crf",str(ENC_CRF),"-preset",ENC_PRESET,
+            "-tune","fastdecode","-c:a","copy",op]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-500:]}")
+    for x in pngs:
+        try: os.remove(x["p"])
+        except: pass
+    return op
+
+
 def normalize_script(t):
     t = re.sub(r'[\U0001F000-\U0001FFFF\u2600-\u27BF\uFE0F]', '', t)
     t = re.sub(r'[\u201c\u201d"`*_#<>\[\]{}()\uff08\uff09\u300c\u300d\u300e\u300f\u00ab\u00bb~^|\\/]', ' ', t)
@@ -288,396 +306,135 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-# ==================== Preview Border ====================
-
-def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
-    d = ImageDraw.Draw(img, "RGBA")
-    W, H = img.size
-    inner_c = max(3, thickness // 3)
-
-    d.rectangle([0, 0, W - 1, H - 1],
-                outline=(0, 0, 0, 255), width=thickness)
-
-    if animated_phase > 0:
-        import math
-        phase = (math.sin(animated_phase * math.pi) + 1) / 2
-        cyan_r = int(37 * (1 - phase) + 254 * phase)
-        cyan_g = int(244 * (1 - phase) + 44 * phase)
-        cyan_b = int(238 * (1 - phase) + 85 * phase)
-        d.rectangle([0, 0, W - 1, H - 1],
-                    outline=(cyan_r, cyan_g, cyan_b, 255), width=inner_c)
-    else:
-        d.rectangle([0, 0, W - 1, H - 1],
-                    outline=(37, 244, 238, 255), width=inner_c)
-
-    offset = thickness
-    d.rectangle([offset, offset, W - 1 - offset, H - 1 - offset],
-                outline=(254, 44, 85, 255), width=inner_c)
-
-    return img
-
-
-# ==================== Groq ====================
-
-def extract_audio_for_asr(video_path, audio_path="asr_audio.wav"):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", audio_path
-    ], capture_output=True, check=True)
-    return audio_path
-
-
-def split_audio_if_large(audio_path, max_mb=24):
-    size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-    if size_mb <= max_mb:
-        return [audio_path]
-
-    pr = ffmpeg.probe(audio_path)
-    dur = float(pr['format']['duration'])
-    n_chunks = int(size_mb / max_mb) + 1
-    chunk_dur = dur / n_chunks
-
-    chunks = []
-    for i in range(n_chunks):
-        start = i * chunk_dur
-        out = f"groq_chunk_{i:02d}.wav"
-        subprocess.run([
-            "ffmpeg", "-y", "-ss", f"{start:.2f}",
-            "-t", f"{chunk_dur:.2f}",
-            "-i", audio_path,
-            "-ar", "16000", "-ac", "1",
-            "-c:a", "pcm_s16le", out
-        ], capture_output=True, check=True)
-        chunks.append(out)
-    return chunks
-
-
-def get_groq_client():
-    from groq import Groq
-    key = st.session_state.get("groq_key", "").strip()
-    if not key:
-        raise Exception("Groq API Key မထည့်ရသေးပါ — အပေါ်မှာ ထည့်ပါ")
-    return Groq(api_key=key)
-
-
-def test_groq_key(key):
-    from groq import Groq
-    try:
-        client = Groq(api_key=key.strip())
-        client.models.list()
-        return True, ""
-    except Exception as e:
-        return False, str(e)
-
-
-def groq_transcribe_chunk(audio_path, source_lang):
-    client = get_groq_client()
-    kwargs = {
-        "file": (os.path.basename(audio_path), open(audio_path, "rb")),
-        "model": GROQ_WHISPER_MODEL,
-        "response_format": "text",
-        "temperature": 0,
-    }
-    if source_lang:
-        kwargs["language"] = source_lang
-    try:
-        result = client.audio.transcriptions.create(**kwargs)
-    finally:
-        kwargs["file"][1].close()
-    if isinstance(result, str):
-        return result.strip()
-    return (getattr(result, "text", "") or "").strip()
-
-
-def groq_transcribe_video(video_path, source_lang, progress_cb=None):
-    audio = extract_audio_for_asr(video_path, "groq_audio.wav")
-    chunks = split_audio_if_large(audio)
-
-    texts = []
-    for i, ch in enumerate(chunks):
-        if progress_cb:
-            progress_cb(i, len(chunks), f"🔊 Whisper [{i+1}/{len(chunks)}]...")
-        txt = groq_transcribe_chunk(ch, source_lang)
-        if txt:
-            texts.append(txt)
-
-    for ch in chunks:
-        if ch != audio:
-            try: os.remove(ch)
-            except: pass
-    return " ".join(texts).strip()
-
-
-def groq_translate_to_myanmar(text, source_lang_label="", progress_cb=None):
-    """
-    ⭐ Groq LLM (gpt-oss-120b) နဲ့ source text → မြန်မာစာ
-    Reasoning model ဖြစ်လို့ reasoning output ကို ဖျောက်ထားတယ်
-    """
-    client = get_groq_client()
-
-    system_prompt = (
-        "You are a professional translator specialized in translating "
-        f"{source_lang_label or 'foreign'} text into natural, fluent Burmese (မြန်မာစာ). "
-        "Rules:\n"
-        "- Output ONLY the Burmese translation.\n"
-        "- Do NOT include the original text.\n"
-        "- Do NOT add explanations, notes, or pinyin.\n"
-        "- Keep the meaning accurate and natural.\n"
-        "- Use proper Burmese punctuation (။ ၊).\n"
-        "- Preserve names as-is (transliterate naturally into Burmese if possible).\n"
-        "- Do NOT add any reasoning, thinking, or meta-commentary.\n"
-    )
-
-    MAX_CHARS = 2500
-    chunks = [text[i:i+MAX_CHARS] for i in range(0, len(text), MAX_CHARS)]
-
-    out_parts = []
-    for i, ch in enumerate(chunks):
-        if progress_cb:
-            progress_cb(i, len(chunks), f"🇲🇲 ဘာသာပြန် [{i+1}/{len(chunks)}]...")
-
-        # ⭐ API ခေါ်ဆိုမှု — model အသစ် + reasoning ဖျောက်
-        create_kwargs = {
-            "model": GROQ_LLM_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": ch},
-            ],
-            "temperature": 0.3,
-            "max_tokens": 4000,
-        }
-
-        # gpt-oss models တွေအတွက် reasoning output ကို ဖျောက်
-        if "gpt-oss" in GROQ_LLM_MODEL:
-            create_kwargs["reasoning_effort"] = "low"
-            try:
-                create_kwargs["include_reasoning"] = False
-            except Exception:
-                pass
-
-        try:
-            resp = client.chat.completions.create(**create_kwargs)
-        except Exception as e:
-            # include_reasoning မလက်ခံရင် ဖြုတ်ပြီး ပြန်စမ်း
-            err_str = str(e).lower()
-            if "include_reasoning" in err_str or "reasoning" in err_str:
-                create_kwargs.pop("include_reasoning", None)
-                create_kwargs.pop("reasoning_effort", None)
-                resp = client.chat.completions.create(**create_kwargs)
-            else:
-                raise
-
-        content = resp.choices[0].message.content.strip()
-        out_parts.append(content)
-
-    return " ".join(out_parts).strip()
-
-
-def extract_myanmar_transcript(video_path, source_lang, source_lang_label,
-                                progress_cb=None):
-    source_text = groq_transcribe_video(video_path, source_lang, progress_cb=None)
-    if not source_text:
-        raise Exception("စကားပြော မတွေ့ပါ — audio ထဲမှာ အသံ မရှိပါ")
-
-    if source_lang == "my":
-        return {
-            "source_text": source_text,
-            "text": source_text,
-            "srt": _text_to_srt(source_text),
-        }
-
-    mm_text = groq_translate_to_myanmar(
-        source_text, source_lang_label, progress_cb=progress_cb
-    )
-    if not mm_text:
-        raise Exception("ဘာသာပြန် မအောင်မြင်ပါ")
-    return {
-        "source_text": source_text,
-        "text": mm_text,
-        "srt": _text_to_srt(mm_text),
-    }
-
-
-def _text_to_srt(text):
-    sents = [s.strip() for s in re.split(r"[။!?]\s*", text) if s.strip()]
-    if not sents:
-        return ""
-    lines = []
-    for i, s in enumerate(sents, 1):
-        lines.append(f"{i}\n00:00:00,000 --> 00:00:02,000\n{s}။\n")
-    return "\n".join(lines)
-
-
-# ==================== TTS ====================
-
-def tts_demo(chunks, ref, space, cb=None):
-    cl = Client(space); files = []; rf = handle_file(ref) if ref else None
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
-        res = cl.predict(
-            text_input=c,
-            control_instruction="A warm young woman, calm and expressive",
-            reference_wav_path_input=rf,
-            use_prompt_text=False, prompt_text_input="",
-            cfg_value_input=2.0, do_normalize=True, denoise=False,
-            api_name="/generate"
-        )
-        p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
-    return files
-
-
-def tts_burmese(chunks, ref, space, cb=None):
-    cl = Client(space); files = []
-    if not ref: raise Exception("Reference Audio needed")
-    rf = handle_file(ref)
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
-        res = cl.predict(
-            target_text=c, ref_audio=rf,
-            ref_text="မြန်မာ အသံနမူနာ", cfg_value=2.0,
-            inference_timesteps=10, api_name="/tts"
-        )
-        p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
-    return files
-
-
-async def _edge_tts_async(text, out_file, voice):
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(out_file)
-
-
-def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
-    voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
-    small = []
-    for c in chunks:
-        for x in split_scr(c, EDGE_CHUNK):
-            if has_speech(x): small.append(x)
-    chunks = small
-    if not chunks: raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
-
-    def run_async(coro_fn):
-        try: asyncio.run(coro_fn())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(coro_fn())
-            loop.close()
-
-    def tts_one(args):
-        i, c = args
-        os.makedirs("tts_cache", exist_ok=True)
-        key = hashlib.md5((voice_id + c).encode("utf-8")).hexdigest()
-        dst = f"tts_cache/{key}.mp3"
-        if os.path.exists(dst) and os.path.getsize(dst) > 0:
-            return (i, dst)
-        for attempt in range(4):
-            try:
-                if os.path.exists(dst): os.remove(dst)
-                run_async(lambda: _edge_tts_async(c, dst, voice_id))
-                if os.path.exists(dst) and os.path.getsize(dst) > 0:
-                    time.sleep(0.7)
-                    return (i, dst)
-            except Exception:
-                pass
-            time.sleep(3 * (attempt + 1))
-        return (i, None)
-
-    results = [None] * len(chunks); done = 0; skipped = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        for idx, dst in ex.map(tts_one, enumerate(chunks)):
-            results[idx] = dst; done += 1
-            if dst is None: skipped.append(idx)
-            if cb: cb(done - 1, len(chunks), chunks[idx])
-
-    good = [a for a in results if a]
-    if not good:
-        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ")
-    if skipped:
-        st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
-
-    with open("edge_concat.txt", "w", encoding="utf-8") as f:
-        for a in good: f.write(f"file '{a}'\n")
-
-    ffmpeg.input("edge_concat.txt", format="concat", safe=0).output(
-        out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
-    return out_path
-
-
-def tts_free(chunks, out, cb=None):
-    edge_tts_run(chunks, out, cb=cb)
-    st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
-    return out
-
-
-def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
-    chunks = split_scr(text, TTS_CHUNK)
-    if not use_voxcpm:
-        return tts_free(chunks, out, cb=cb)
-
-    files = None
-    for s in SPACES:
-        try:
-            st.info(f"🎙️ VoxCPM2 — {s['space']} — စမ်းနေသည်...")
-            if s["type"] == "demo":
-                files = tts_demo(chunks, ref, s["space"], cb)
-            else:
-                files = tts_burmese(chunks, ref, s["space"], cb)
-            st.success("✅ VoxCPM2 — အောင်မြင်")
-            break
-        except Exception as e:
-            st.warning(f"⚠️ VoxCPM2 — Fail: {str(e)[:80]}")
-            files = None
-            continue
-
-    if files is None:
-        st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS သီဟ Auto")
-        return tts_free(chunks, out, cb=cb)
-
-    with open("concat.txt", "w", encoding="utf-8") as f:
-        for a in files: f.write(f"file '{a}'\n")
-    ffmpeg.input("concat.txt", format="concat", safe=0).output(
-        out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
-    return out
-
-
-# ==================== Video Processing ====================
-
-def whisper_fast_for_vad(video_path):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", "vad_audio.wav"
-    ], capture_output=True, check=True)
-
-    r = subprocess.run([
-        "ffmpeg", "-i", "vad_audio.wav",
-        "-af", "silencedetect=noise=-30dB:d=0.5",
-        "-f", "null", "-"
-    ], capture_output=True, text=True, encoding="utf-8", errors="ignore")
-
-    stderr = r.stderr or ""
-    silences = []
-    for m in re.finditer(r"silence_start: ([\d.]+)", stderr):
-        silences.append(float(m.group(1)))
-
-    pr = ffmpeg.probe("vad_audio.wav")
-    total_dur = float(pr['format']['duration'])
-
-    speech = []
-    prev = 0.0
-    for s_start in silences:
-        if s_start > prev + 0.3:
-            speech.append((prev, s_start))
-        prev = s_start
-    if prev < total_dur - 0.3:
-        speech.append((prev, total_dur))
-
-    return speech if speech else [(0.0, total_dur)]
+def video_bypass(input_video, output_video="bypass.mp4",
+                 crop_ratio=0.95, mirror=True):
+    W, H, dur = vid_info(input_video)
+    filters = []
+
+    if crop_ratio != 1.0:
+        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
+        if cw % 2 != 0: cw -= 1
+        if ch % 2 != 0: ch -= 1
+        cx = (W - cw) // 2; cy = (H - ch) // 2
+        filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
+
+    if mirror:
+        filters.append("hflip")
+
+    vf = ",".join(filters) if filters else "null"
+
+    cmd = [
+        "ffmpeg", "-y", "-i", input_video,
+        "-vf", vf,
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "copy", output_video
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0:
+        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+    return output_video
+
+
+def bypass_and_neon(input_video, output_video,
+                    crop_ratio=0.95, mirror=True, thickness=30):
+    W, H, dur = vid_info(input_video)
+    pad = thickness
+    filters = []
+
+    if crop_ratio != 1.0:
+        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
+        if cw % 2 != 0: cw -= 1
+        if ch % 2 != 0: ch -= 1
+        cx = (W - cw) // 2; cy = (H - ch) // 2
+        filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
+
+    if mirror:
+        filters.append("hflip")
+
+    filters.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
+    filters.append(f"drawbox=x=0:y=0:w={W}:h={H}:color={TIKTOK_BLACK}@1.0:t={pad}:replace=0")
+    filters.append(f"drawbox=x=0:y=0:w={W}:h={H}:color={TIKTOK_CYAN}@1.0:t={max(3, pad//3)}:replace=0")
+    filters.append(f"drawbox=x={pad}:y={pad}:w={W-2*pad}:h={H-2*pad}:color={TIKTOK_MAGENTA}@1.0:t={max(3, pad//3)}:replace=0")
+
+    vf = ",".join(filters)
+
+    cmd = [
+        "ffmpeg", "-y", "-i", input_video,
+        "-vf", vf,
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "copy", output_video
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0:
+        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+    return output_video
+
+
+def bypass_and_neon_chase(input_video, output_video,
+                          crop_ratio=0.95, mirror=True,
+                          thickness=30, speed=1.0, tail=0.35):
+    base = "bypass_base.mp4"
+    video_bypass(input_video, base, crop_ratio, mirror)
+
+    W, H, _ = vid_info(base)
+    pr = ffmpeg.probe(base)
+    vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
+    n, d = vs['r_frame_rate'].split('/')
+    fps = float(n) / float(d)
+
+    th = thickness
+    P = 2 * (W + H)
+
+    yy, xx = np.mgrid[0:H, 0:W]
+    ring = (xx < th) | (xx >= W - th) | (yy < th) | (yy >= H - th)
+    ys, xs = np.nonzero(ring)
+    dt, db, dl, dr = ys, H - 1 - ys, xs, W - 1 - xs
+    m = np.minimum.reduce([dt, db, dl, dr])
+    S = np.where(m == dt, xs,
+        np.where(m == dr, W + ys,
+        np.where(m == db, 2 * W + H + (W - xs),
+                 2 * W + 2 * H - ys))).astype(np.float32)
+
+    BASE = np.array([15, 15, 15], np.float32)
+    CYAN = np.array([238, 244, 37], np.float32)
+    MAGENTA = np.array([85, 44, 254], np.float32)
+
+    def comet(head):
+        dist = (head - S) % P
+        a = np.clip(1.0 - dist / (tail * P), 0, 1)
+        return (a ** 1.5)[:, None]
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
+        "-i", base,
+        "-map", "0:v", "-map", "1:a?",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest",
+        output_video
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+
+    cap = cv2.VideoCapture(base)
+    i = 0
+    while True:
+        ok, fr = cap.read()
+        if not ok: break
+        t = i / fps
+        head = (t * speed * P / 4.0) % P
+        c = BASE + CYAN * comet(head) + MAGENTA * comet(head + P / 2)
+        fr[ys, xs] = np.clip(c, 0, 255).astype(np.uint8)
+        proc.stdin.write(fr.tobytes())
+        i += 1
+    cap.release()
+    proc.stdin.close()
+    proc.wait()
+    if proc.returncode != 0:
+        raise Exception("Chase Neon: ffmpeg fail")
+    return output_video
 
 
 def keep_count(video_in, segments):
@@ -769,6 +526,7 @@ def final_render(video_in, audio_in, output_video, tempo,
         CYAN = np.array([255, 255, 0], np.float32)
         MAGENTA = np.array([110, 30, 255], np.float32)
         IDLE = 0.14
+
         Si = (S.astype(np.int64)) % P
         P_arr = np.arange(P, dtype=np.float32)
 
@@ -850,9 +608,9 @@ def mux_audio(video_in, audio_in, output_video, tempo):
     return output_video
 
 
-def prepare_video_job(video_in, script_text, use_sub, pos_y,
-                      use_neon, thickness, speed):
-    segments = whisper_fast_for_vad(video_in)
+def prepare_video_job(video_in, script_text, use_sub, fw_model,
+                      pos_y, use_neon, thickness, speed):
+    segments = whisper_fast(video_in, fw_model)
     if not segments: raise Exception("Speech မတွေ့")
     kept, vfps = keep_count(video_in, segments)
     if kept == 0: raise Exception("Speech မတွေ့")
@@ -869,179 +627,248 @@ def prepare_video_job(video_in, script_text, use_sub, pos_y,
     return {"segments": segments, "vdur": vdur, "render_err": render_err}
 
 
+# ==================== Preview ====================
+
+def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
+    d = ImageDraw.Draw(img, "RGBA")
+    W, H = img.size
+    inner_c = max(3, thickness // 3)
+
+    d.rectangle([0, 0, W - 1, H - 1],
+                outline=(0, 0, 0, 255), width=thickness)
+
+    if animated_phase > 0:
+        import math
+        phase = (math.sin(animated_phase * math.pi) + 1) / 2
+        cyan_r = int(37 * (1 - phase) + 254 * phase)
+        cyan_g = int(244 * (1 - phase) + 44 * phase)
+        cyan_b = int(238 * (1 - phase) + 85 * phase)
+        d.rectangle([0, 0, W - 1, H - 1],
+                    outline=(cyan_r, cyan_g, cyan_b, 255), width=inner_c)
+    else:
+        d.rectangle([0, 0, W - 1, H - 1],
+                    outline=(37, 244, 238, 255), width=inner_c)
+
+    offset = thickness
+    d.rectangle([offset, offset, W - 1 - offset, H - 1 - offset],
+                outline=(254, 44, 85, 255), width=inner_c)
+
+    return img
+
+
+# ==================== TTS Functions ====================
+
+def tts_demo(chunks, ref, space, cb=None):
+    cl = Client(space); files = []; rf = handle_file(ref) if ref else None
+    for i, c in enumerate(chunks):
+        if cb: cb(i, len(chunks), c)
+        res = cl.predict(
+            text_input=c,
+            control_instruction="A warm young woman, calm and expressive",
+            reference_wav_path_input=rf,
+            use_prompt_text=False, prompt_text_input="",
+            cfg_value_input=2.0, do_normalize=True, denoise=False,
+            api_name="/generate"
+        )
+        p = res[0] if isinstance(res, (tuple, list)) else res
+        dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
+    return files
+
+
+def tts_burmese(chunks, ref, space, cb=None):
+    cl = Client(space); files = []
+    if not ref: raise Exception("Reference Audio needed")
+    rf = handle_file(ref)
+    for i, c in enumerate(chunks):
+        if cb: cb(i, len(chunks), c)
+        res = cl.predict(
+            target_text=c, ref_audio=rf,
+            ref_text="မြန်မာ အသံနမူနာ", cfg_value=2.0,
+            inference_timesteps=10, api_name="/tts"
+        )
+        p = res[0] if isinstance(res, (tuple, list)) else res
+        dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
+    return files
+
+
+async def _edge_tts_async(text, out_file, voice):
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(out_file)
+
+
+def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
+    voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
+
+    small = []
+    for c in chunks:
+        for x in split_scr(c, EDGE_CHUNK):
+            if has_speech(x): small.append(x)
+    chunks = small
+    if not chunks: raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
+
+    def run_async(coro_fn):
+        try: asyncio.run(coro_fn())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(coro_fn())
+            loop.close()
+
+    def tts_one(args):
+        i, c = args
+        os.makedirs("tts_cache", exist_ok=True)
+        key = hashlib.md5((voice_id + c).encode("utf-8")).hexdigest()
+        dst = f"tts_cache/{key}.mp3"
+        if os.path.exists(dst) and os.path.getsize(dst) > 0:
+            return (i, dst)
+        for attempt in range(4):
+            try:
+                if os.path.exists(dst): os.remove(dst)
+                run_async(lambda: _edge_tts_async(c, dst, voice_id))
+                if os.path.exists(dst) and os.path.getsize(dst) > 0:
+                    time.sleep(0.7)
+                    return (i, dst)
+            except Exception:
+                pass
+            time.sleep(3 * (attempt + 1))
+        return (i, None)
+
+    results = [None] * len(chunks); done = 0; skipped = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for idx, dst in ex.map(tts_one, enumerate(chunks)):
+            results[idx] = dst; done += 1
+            if dst is None: skipped.append(idx)
+            if cb: cb(done - 1, len(chunks), chunks[idx])
+
+    good = [a for a in results if a]
+    if not good:
+        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ (edge-tts>=7.0.0) / ခဏနေ ပြန်စမ်းပါ")
+    if skipped:
+        st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
+
+    with open("edge_concat.txt", "w", encoding="utf-8") as f:
+        for a in good: f.write(f"file '{a}'\n")
+
+    ffmpeg.input("edge_concat.txt", format="concat", safe=0).output(
+        out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
+    ).run(overwrite_output=True)
+    return out_path
+
+
+def tts_free(chunks, out, cb=None):
+    edge_tts_run(chunks, out, cb=cb)
+    st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
+    return out
+
+
+def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
+    chunks = split_scr(text, TTS_CHUNK)
+
+    if not use_voxcpm:
+        return tts_free(chunks, out, cb=cb)
+
+    files = None
+    for s in SPACES:
+        try:
+            st.info(f"🎙️ VoxCPM2 — {s['space']} — စမ်းနေသည်...")
+            if s["type"] == "demo":
+                files = tts_demo(chunks, ref, s["space"], cb)
+            else:
+                files = tts_burmese(chunks, ref, s["space"], cb)
+            st.success("✅ VoxCPM2 — အောင်မြင်")
+            break
+        except Exception as e:
+            st.warning(f"⚠️ VoxCPM2 — Fail: {str(e)[:80]}")
+            files = None
+            continue
+
+    if files is None:
+        st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS သီဟ Auto")
+        return tts_free(chunks, out, cb=cb)
+
+    with open("concat.txt", "w", encoding="utf-8") as f:
+        for a in files: f.write(f"file '{a}'\n")
+    ffmpeg.input("concat.txt", format="concat", safe=0).output(
+        out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
+    ).run(overwrite_output=True)
+    return out
+
+
+@st.cache_resource(show_spinner=False)
+def get_fw_model():
+    from faster_whisper import WhisperModel
+    return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
+                        cpu_threads=os.cpu_count() or 4)
+
+
+def whisper_fast(video_path, model=None):
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path,
+        "-ar", "16000", "-ac", "1",
+        "-c:a", "pcm_s16le", "whisper_audio.wav"
+    ], capture_output=True, check=True)
+
+    if USE_FAST_VAD:
+        try:
+            from faster_whisper.audio import decode_audio
+            from faster_whisper.vad import get_speech_timestamps, VadOptions
+            audio = decode_audio("whisper_audio.wav", sampling_rate=16000)
+            ts = get_speech_timestamps(
+                audio, VadOptions(min_silence_duration_ms=700, speech_pad_ms=200))
+            segs_vad = [(t["start"] / 16000.0, t["end"] / 16000.0) for t in ts]
+            if segs_vad:
+                return segs_vad
+        except Exception:
+            pass
+
+    speech_segments = []
+    try:
+        model = model or get_fw_model()
+        segments, _ = model.transcribe(
+            "whisper_audio.wav", language=WHISPER_LANG,
+            vad_filter=False, beam_size=1,
+            condition_on_previous_text=False, temperature=0
+        )
+        for seg in segments:
+            speech_segments.append((seg.start, seg.end))
+    except Exception:
+        import whisper
+        model = whisper.load_model(WHISPER_MODEL)
+        result = model.transcribe(
+            "whisper_audio.wav", language=WHISPER_LANG,
+            condition_on_previous_text=False, beam_size=1, temperature=0
+        )
+        for seg in result["segments"]:
+            speech_segments.append((seg["start"], seg["end"]))
+    return speech_segments
+
+
+def silence_cut_v2(input_video, output_video="input_cut.mp4"):
+    t0 = time.time()
+    speech_segments = whisper_fast(input_video)
+    whisper_time = time.time() - t0
+
+    if not speech_segments: raise Exception("Speech မတွေ့")
+
+    select_exprs = [f"between(t,{s:.3f},{e:.3f})" for s, e in speech_segments]
+    select_str = "+".join(select_exprs)
+
+    cmd = ["ffmpeg", "-y", "-i", input_video,
+           "-vf", f"select='{select_str}',setpts=N/FRAME_RATE/TB",
+           "-af", f"aselect='{select_str}',asetpts=N/SR/TB",
+           "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
+           "-c:a", "aac", "-b:a", "128k", output_video]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+
+    total = sum(e - s for s, e in speech_segments)
+    return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
+
+
 # ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Transcript → VoxCPM2 / Edge TTS → Recap</div>", unsafe_allow_html=True)
-st.divider()
-
-# ==================== Groq API Key Panel ====================
-with st.expander("🔑 Groq API Key ထည့်ရန်", expanded=(not st.session_state.groq_key)):
-    st.markdown("""
-    <div class="groq-box">
-        <b style="color:#C66BFF;font-size:1.1rem">🔑 Groq API Key ထည့်ပါ</b><br>
-        <span style="color:#b8b8d0;font-size:.9rem">
-        1. <a href="https://console.groq.com/keys" target="_blank" style="color:#6ba8ff">console.groq.com/keys</a> ဖွင့်<br>
-        2. Sign up → Create API Key → Copy (<code style="color:#7ee2a8">gsk_...</code>)<br>
-        3. အောက်မှာ Paste လုပ်ပြီး Save နှိပ်
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    new_key = st.text_input(
-        "Groq API Key",
-        value=st.session_state.groq_key,
-        type="password",
-        placeholder="gsk_xxxxxxxxxxxxxxxxxxxxx",
-        label_visibility="collapsed",
-        key="groq_key_input",
-    )
-
-    cc1, cc2, cc3 = st.columns([2, 2, 1])
-    with cc1:
-        if st.button("💾 Save Key", use_container_width=True, type="primary"):
-            k = new_key.strip()
-            if not k:
-                st.error("Key ထည့်ပါ")
-            elif not k.startswith("gsk_"):
-                st.warning("Key က gsk_ နဲ့ စရမယ် — စစ်ပါ")
-                st.session_state.groq_key = k
-                st.rerun()
-            else:
-                with st.spinner("စစ်ဆေးနေသည်..."):
-                    ok, err = test_groq_key(k)
-                if ok:
-                    st.session_state.groq_key = k
-                    st.success("✅ API Key မှန်ပါတယ်!")
-                    st.rerun()
-                else:
-                    st.error(f"❌ Key မှားနေတယ်: {err[:150]}")
-    with cc2:
-        if st.button("🗑️ Clear Key", use_container_width=True):
-            st.session_state.groq_key = ""
-            st.rerun()
-    with cc3:
-        if st.session_state.groq_key:
-            st.markdown("✅")
-
-if st.session_state.groq_key:
-    masked = st.session_state.groq_key[:10] + "..." + st.session_state.groq_key[-4:]
-    st.markdown(
-        f"<div class='groq-ok'>✅ Groq API Key — <code>{masked}</code></div>",
-        unsafe_allow_html=True
-    )
-st.divider()
-
-# ==================== Groq Transcript ====================
-with st.expander("🎬 Video → မြန်မာ Transcript (Groq AI)", expanded=False):
-    st.caption(f"⚡ Groq — Whisper {GROQ_WHISPER_MODEL} + LLM {GROQ_LLM_MODEL}")
-
-    if not st.session_state.groq_key:
-        st.error("⚠️ အပေါ်က **🔑 Groq API Key ထည့်ရန်** panel မှာ Key အရင် ထည့်ပါ")
-    else:
-        src_label = st.selectbox(
-            "🎙️ Video ထဲက ဘာသာစကား",
-            options=list(SOURCE_LANGS.keys()),
-            index=0,
-            key="src_lang_sel",
-        )
-        source_lang = SOURCE_LANGS[src_label]
-
-        if source_lang == "my":
-            st.info("🇲🇲 မြန်မာစာ — transcript တိုက်ရိုက် ထုတ်ပေးမယ် (ဘာသာပြန် မလို)")
-        elif source_lang is None:
-            st.info("🤖 Auto Detect — Whisper က ဘာသာစကား ခန့်မှန်းပြီး မြန်မာ ပြန်ပေးမယ်")
-        else:
-            st.info(f"🌐 {src_label} → 🇲🇲 မြန်မာ (transcribe + translate)")
-
-        tr_vid = st.file_uploader(
-            "Video for transcription",
-            type=["mp4", "mov", "avi", "mkv", "webm"],
-            key="tr_video_upload",
-            label_visibility="collapsed",
-        )
-
-        if tr_vid is not None:
-            st.success(f"✅ {tr_vid.name} — {tr_vid.size/(1024*1024):.1f} MB")
-
-            if st.button("🔍 Transcript ထုတ်", use_container_width=True, key="tr_btn"):
-                tr_path = "tr_input.mp4"
-                tr_vid.seek(0)
-                with open(tr_path, "wb") as f:
-                    f.write(tr_vid.read())
-
-                prog = st.progress(0)
-                status = st.empty()
-
-                def _cb(cur, total, txt):
-                    if total > 0:
-                        prog.progress(min(1.0, cur / total))
-                    status.caption(txt)
-
-                with st.spinner("Groq AI က transcript ထုတ်နေသည်..."):
-                    try:
-                        t0 = time.time()
-                        result = extract_myanmar_transcript(
-                            tr_path, source_lang, src_label, progress_cb=_cb
-                        )
-                        elapsed = time.time() - t0
-                        prog.progress(1.0)
-                        status.empty()
-
-                        mm_text = result["text"]
-                        src_text = result["source_text"]
-
-                        if not mm_text:
-                            st.warning("⚠️ စကားပြော မတွေ့ပါ")
-                        else:
-                            st.success(f"✅ Done — ⏱️ {elapsed:.1f}s — {len(mm_text)} လုံး")
-
-                            if source_lang != "my" and src_text:
-                                with st.expander(f"📄 မူရင်းစာ ({src_label})"):
-                                    st.text_area(
-                                        "source",
-                                        value=src_text,
-                                        height=150,
-                                        key="tr_src_out",
-                                        label_visibility="collapsed",
-                                    )
-
-                            st.text_area(
-                                "🇲🇲 မြန်မာ Transcript",
-                                value=mm_text,
-                                height=220,
-                                key="tr_output",
-                            )
-
-                            c_a, c_b, c_c = st.columns(3)
-                            with c_a:
-                                if st.button("📋 Script ထဲ ထည့်", use_container_width=True, key="tr_to_script"):
-                                    st.session_state.script = mm_text
-                                    st.session_state.last_paste = mm_text
-                                    st.success("Script ထဲ ရောက်သွားပြီ!")
-                                    st.rerun()
-                            with c_b:
-                                st.download_button(
-                                    "📥 .txt",
-                                    data=mm_text.encode("utf-8"),
-                                    file_name="transcript.txt",
-                                    mime="text/plain",
-                                    use_container_width=True,
-                                    key="tr_dl_txt",
-                                )
-                            with c_c:
-                                st.download_button(
-                                    "📥 .srt",
-                                    data=result["srt"].encode("utf-8"),
-                                    file_name="transcript.srt",
-                                    mime="text/plain",
-                                    use_container_width=True,
-                                    key="tr_dl_srt",
-                                )
-
-                    except Exception as e:
-                        st.error(f"❌ Fail: {e}")
-
+st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
 # ==================== Gemini Canvas ====================
@@ -1049,7 +876,7 @@ with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", 
     st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
     st.caption("Canvas ဖွင့် → Transcript Copy → အောက်က box ထဲ Paste လုပ်ပါ")
 
-# ==================== Paste Box ====================
+# ==================== ⭐ Big Paste Box (Auto-detect) ====================
 st.markdown("""
 <div style="text-align:center;margin:8px 0 4px">
   <span style="font-size:1.1rem;font-weight:700;
@@ -1093,6 +920,7 @@ div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeh
 </style>
 """, unsafe_allow_html=True)
 
+# Auto-detect paste
 if pasted_now and pasted_now.strip():
     clean = pasted_now.strip()
     if clean != st.session_state.get("last_paste", ""):
@@ -1125,7 +953,7 @@ vid = st.file_uploader(
     "📹",
     type=["mp4","mov","avi","mkv"],
     label_visibility="collapsed",
-    key=f"video_up_{st.session_state.video_up_key}"
+    key=f"video_up_{st.session_state.video_up_key}"   # ⭐ dynamic key
 )
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
@@ -1192,6 +1020,7 @@ if use_voxcpm:
         st.session_state.ref = "ref.wav"
         st.success("✅ Ref Audio")
     else:
+        # Ref မရှိရင် disk ပေါ်မှာ ရှိမရှိ စစ်
         if os.path.exists("ref.wav"):
             st.session_state.ref = "ref.wav"
             st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
@@ -1212,8 +1041,12 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f: f.write(vid.read())
     _, _, vdur = vid_info("input.mp4")
 
+    fw_model = None
+    if not USE_FAST_VAD:
+        try: fw_model = get_fw_model()
+        except Exception: pass
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    job = job_pool.submit(prepare_video_job, "input.mp4", script_n, use_sub,
+    job = job_pool.submit(prepare_video_job, "input.mp4", script_n, use_sub, fw_model,
                           pos_y, use_neon, neon_thickness, neon_speed)
 
     t0 = time.time()
