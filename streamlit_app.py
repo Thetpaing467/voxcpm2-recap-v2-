@@ -6,7 +6,7 @@ import numpy as np
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
-from google import genai
+from gradio_client import Client, handle_file
 
 os.environ["HF_HOME"] = "/tmp/hf_cache"
 
@@ -30,7 +30,9 @@ EDGE_CHUNK = 400
 TTS_WORKERS = 2
 PNG_WORKERS = 4
 
-WHISPER_MODEL = "tiny"
+CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
+WHISPER_MODEL = "tiny"                          # VAD အတွက် (မြန်)
+WHISPER_MODEL_TRANSCRIBE = "medium"             # ⭐ NEW — Transcript အတွက် (မြန်မာအတွက် တိကျ)
 WHISPER_LANG = "my"
 
 BOX_WIDTH_RATIO = 1.0
@@ -327,6 +329,108 @@ def video_bypass(input_video, output_video="bypass.mp4",
     return output_video
 
 
+def bypass_and_neon(input_video, output_video,
+                    crop_ratio=0.95, mirror=True, thickness=30):
+    W, H, dur = vid_info(input_video)
+    pad = thickness
+    filters = []
+
+    if crop_ratio != 1.0:
+        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
+        if cw % 2 != 0: cw -= 1
+        if ch % 2 != 0: ch -= 1
+        cx = (W - cw) // 2; cy = (H - ch) // 2
+        filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
+
+    if mirror:
+        filters.append("hflip")
+
+    filters.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
+    filters.append(f"drawbox=x=0:y=0:w={W}:h={H}:color={TIKTOK_BLACK}@1.0:t={pad}:replace=0")
+    filters.append(f"drawbox=x=0:y=0:w={W}:h={H}:color={TIKTOK_CYAN}@1.0:t={max(3, pad//3)}:replace=0")
+    filters.append(f"drawbox=x={pad}:y={pad}:w={W-2*pad}:h={H-2*pad}:color={TIKTOK_MAGENTA}@1.0:t={max(3, pad//3)}:replace=0")
+
+    vf = ",".join(filters)
+
+    cmd = [
+        "ffmpeg", "-y", "-i", input_video,
+        "-vf", vf,
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "copy", output_video
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0:
+        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+    return output_video
+
+
+def bypass_and_neon_chase(input_video, output_video,
+                          crop_ratio=0.95, mirror=True,
+                          thickness=30, speed=1.0, tail=0.35):
+    base = "bypass_base.mp4"
+    video_bypass(input_video, base, crop_ratio, mirror)
+
+    W, H, _ = vid_info(base)
+    pr = ffmpeg.probe(base)
+    vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
+    n, d = vs['r_frame_rate'].split('/')
+    fps = float(n) / float(d)
+
+    th = thickness
+    P = 2 * (W + H)
+
+    yy, xx = np.mgrid[0:H, 0:W]
+    ring = (xx < th) | (xx >= W - th) | (yy < th) | (yy >= H - th)
+    ys, xs = np.nonzero(ring)
+    dt, db, dl, dr = ys, H - 1 - ys, xs, W - 1 - xs
+    m = np.minimum.reduce([dt, db, dl, dr])
+    S = np.where(m == dt, xs,
+        np.where(m == dr, W + ys,
+        np.where(m == db, 2 * W + H + (W - xs),
+                 2 * W + 2 * H - ys))).astype(np.float32)
+
+    BASE = np.array([15, 15, 15], np.float32)
+    CYAN = np.array([238, 244, 37], np.float32)
+    MAGENTA = np.array([85, 44, 254], np.float32)
+
+    def comet(head):
+        dist = (head - S) % P
+        a = np.clip(1.0 - dist / (tail * P), 0, 1)
+        return (a ** 1.5)[:, None]
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
+        "-i", base,
+        "-map", "0:v", "-map", "1:a?",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest",
+        output_video
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+
+    cap = cv2.VideoCapture(base)
+    i = 0
+    while True:
+        ok, fr = cap.read()
+        if not ok: break
+        t = i / fps
+        head = (t * speed * P / 4.0) % P
+        c = BASE + CYAN * comet(head) + MAGENTA * comet(head + P / 2)
+        fr[ys, xs] = np.clip(c, 0, 255).astype(np.uint8)
+        proc.stdin.write(fr.tobytes())
+        i += 1
+    cap.release()
+    proc.stdin.close()
+    proc.wait()
+    if proc.returncode != 0:
+        raise Exception("Chase Neon: ffmpeg fail")
+    return output_video
+
+
 def keep_count(video_in, segments):
     pr = ffmpeg.probe(video_in)
     vs = next(x for x in pr['streams'] if x['codec_type'] == 'video')
@@ -549,7 +653,6 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
 # ==================== TTS Functions ====================
 
 def tts_demo(chunks, ref, space, cb=None):
-    from gradio_client import Client, handle_file
     cl = Client(space); files = []; rf = handle_file(ref) if ref else None
     for i, c in enumerate(chunks):
         if cb: cb(i, len(chunks), c)
@@ -567,7 +670,6 @@ def tts_demo(chunks, ref, space, cb=None):
 
 
 def tts_burmese(chunks, ref, space, cb=None):
-    from gradio_client import Client, handle_file
     cl = Client(space); files = []
     if not ref: raise Exception("Reference Audio needed")
     rf = handle_file(ref)
@@ -634,7 +736,7 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
     good = [a for a in results if a]
     if not good:
-        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ / ခဏနေ ပြန်စမ်းပါ")
+        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ (edge-tts>=7.0.0) / ခဏနေ ပြန်စမ်းပါ")
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
@@ -735,115 +837,183 @@ def whisper_fast(video_path, model=None):
     return speech_segments
 
 
+# ==================== ⭐ NEW — Myanmar Transcript Extractor ====================
+
+@st.cache_resource(show_spinner=False)
+def get_transcribe_model():
+    """Transcript အတွက် faster-whisper model (medium) — cache"""
+    from faster_whisper import WhisperModel
+    return WhisperModel(
+        WHISPER_MODEL_TRANSCRIBE,
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=os.cpu_count() or 4,
+    )
+
+
+def extract_audio_for_asr(video_path, audio_path="asr_audio.wav"):
+    """Video → 16kHz mono wav"""
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path,
+        "-ar", "16000", "-ac", "1",
+        "-c:a", "pcm_s16le", audio_path
+    ], capture_output=True, check=True)
+    return audio_path
+
+
+def transcribe_myanmar(video_path, progress_cb=None):
+    """
+    Video → မြန်မာ Transcript
+    return: {"text": str, "segments": list, "srt": str, "duration": float}
+    """
+    audio = extract_audio_for_asr(video_path)
+    model = get_transcribe_model()
+
+    segments_gen, info = model.transcribe(
+        audio,
+        language="my",
+        task="transcribe",
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=500),
+        condition_on_previous_text=False,
+        temperature=0,
+    )
+
+    total = float(getattr(info, "duration", 0.0) or 0.0)
+    seg_list = []
+    full_text_parts = []
+    srt_lines = []
+
+    for i, seg in enumerate(segments_gen, 1):
+        txt = seg.text.strip()
+        seg_list.append({"start": seg.start, "end": seg.end, "text": txt})
+        full_text_parts.append(txt)
+        srt_lines.append(
+            f"{i}\n{t2s(seg.start)} --> {t2s(seg.end)}\n{txt}\n"
+        )
+        if progress_cb:
+            progress_cb(seg.end, total, txt)
+
+    return {
+        "text": " ".join(full_text_parts).strip(),
+        "segments": seg_list,
+        "srt": "\n".join(srt_lines),
+        "duration": total,
+    }
+
+
+def silence_cut_v2(input_video, output_video="input_cut.mp4"):
+    t0 = time.time()
+    speech_segments = whisper_fast(input_video)
+    whisper_time = time.time() - t0
+
+    if not speech_segments: raise Exception("Speech မတွေ့")
+
+    select_exprs = [f"between(t,{s:.3f},{e:.3f})" for s, e in speech_segments]
+    select_str = "+".join(select_exprs)
+
+    cmd = ["ffmpeg", "-y", "-i", input_video,
+           "-vf", f"select='{select_str}',setpts=N/FRAME_RATE/TB",
+           "-af", f"aselect='{select_str}',asetpts=N/SR/TB",
+           "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
+           "-c:a", "aac", "-b:a", "128k", output_video]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
+
+    total = sum(e - s for s, e in speech_segments)
+    return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
+
+
 # ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → AI Script Extractor → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
-# ==================== AI Script Generator Service (Free Internal Environment) ====================
-st.subheader("🤖 AI Script Generator")
-with st.expander("✨ ဗီဒီယိုဖိုင်မှ ဇာတ်ညွှန်း အလိုအလျောက် ထုတ်ယူရန် (AI Transcribe)", expanded=True):
-    st.markdown("ဗီဒီယိုဖိုင် တင်ပြီး အောက်ပါ ခလုတ်ကို နှိပ်ရုံဖြင့် AI က ဇာတ်ညွှန်းကို မြန်မာဘာသာဖြင့် အလိုအလျောက် ထုတ်ပေးပါမည်။")
-    
-    # Optional API Key input if system env is not set
-    manual_api_key = st.text_input("🔑 Google Gemini API Key (Optional)", type="password", placeholder="API Key ထည့်ရန် (လိုအပ်မှသာ)", help="Environment တွင် Key မရှိပါက ဤနေရာတွင် ထည့်နိုင်ပါသည်။")
+# ==================== ⭐ NEW — Video → Myanmar Transcript ====================
+with st.expander("🎬 Video → မြန်မာ Transcript (Whisper AI)", expanded=False):
+    st.caption(f"Model: **{WHISPER_MODEL_TRANSCRIBE}** — Video upload ရုံနဲ့ မြန်မာ transcript ထုတ်ပေးမယ်")
 
-    ai_target_lang = st.selectbox(
-        "ထွက်လာမည့် ဘာသာစကား (Output Language)",
-        ["မြန်မာဘာသာ (Burmese)", "မူရင်းဘာသာအတိုင်း (Original)", "English", "中文 (Chinese)", "ไทย (Thai)"],
-        index=0
-    )
-    
-    ai_vid_upload = st.file_uploader(
-        "📹 ဇာတ်ညွှန်းထုတ်မည့် ဗီဒီယိုဖိုင် ရွေးပါ",
-        type=["mp4","mov","avi","mkv","webm"],
-        key="ai_transcribe_vid"
+    tr_vid = st.file_uploader(
+        "Video for transcription",
+        type=["mp4", "mov", "avi", "mkv", "webm"],
+        key="tr_video_upload",
+        label_visibility="collapsed",
     )
 
-    if st.button("🚀 AI ဖြင့် ဇာတ်ညွှန်း အလွန်အမြန် ထုတ်မည်", type="primary", use_container_width=True):
-        if ai_vid_upload is None:
-            st.error("ကျေးဇူးပြု၍ ဗီဒီယိုဖိုင် အရင်တင်ပေးပါ။")
-        else:
-            with st.spinner("🤖 AI မှ ဗီဒီယိုကို နားထောင်၍ ဇာတ်ညွှန်း ရေးသားနေပါပြီ... ခဏစောင့်ပါ..."):
+    if tr_vid is not None:
+        st.success(f"✅ {tr_vid.name} — {tr_vid.size/(1024*1024):.1f} MB")
+
+        if st.button("🔍 Transcript ထုတ်", use_container_width=True, key="tr_btn"):
+            tr_path = "tr_input.mp4"
+            tr_vid.seek(0)
+            with open(tr_path, "wb") as f:
+                f.write(tr_vid.read())
+
+            prog = st.progress(0)
+            status = st.empty()
+
+            def _cb(cur, total, txt):
+                if total > 0:
+                    prog.progress(min(1.0, cur / total))
+                status.caption(f"⏳ {cur:.1f}s / {total:.1f}s — {txt[:50]}")
+
+            with st.spinner(f"Whisper ({WHISPER_MODEL_TRANSCRIBE}) မြန်မာ transcript ထုတ်နေသည်..."):
                 try:
-                    temp_vid_path = "temp_ai_vid.mp4"
-                    with open(temp_vid_path, "wb") as f:
-                        f.write(ai_vid_upload.read())
-                    
-                    # Use manual api key if provided, else rely on default env
-                    if manual_api_key and manual_api_key.strip():
-                        client = genai.Client(api_key=manual_api_key.strip())
+                    t0 = time.time()
+                    result = transcribe_myanmar(tr_path, progress_cb=_cb)
+                    elapsed = time.time() - t0
+                    prog.progress(1.0)
+                    status.empty()
+
+                    if not result["text"]:
+                        st.warning("⚠️ စကားပြော မတွေ့ပါ")
                     else:
-                        client = genai.Client()
+                        st.success(f"✅ Done — ⏱️ {elapsed:.1f}s — {len(result['text'])} လုံး")
 
-                    uploaded_file = client.files.upload(file=temp_vid_path)
-                    
-                    while uploaded_file.state.name == "PROCESSING":
-                        time.sleep(2)
-                        uploaded_file = client.files.get(name=uploaded_file.name)
+                        st.text_area(
+                            "📝 Myanmar Transcript",
+                            value=result["text"],
+                            height=200,
+                            key="tr_output",
+                        )
 
-                    lang_prompt_map = {
-                        "မြန်မာဘာသာ (Burmese)": "Translate and fully transcribe the spoken dialogue completely into fluent, natural Burmese (မြန်မာဘာသာ). Ensure all terms are fully rendered in Burmese without mixing raw English or pinyin words.",
-                        "မူရင်းဘာသာအတိုင်း (Original)": "Transcribe the spoken dialogue in its exact original spoken language verbatim.",
-                        "English": "Translate and transcribe the spoken dialogue into English.",
-                        "中文 (Chinese)": "Translate and transcribe the spoken dialogue into Chinese (中文).",
-                        "ไทย (Thai)": "Translate and transcribe the spoken dialogue into Thai."
-                    }
-
-                    prompt_text = f"""Listen carefully to the spoken dialogue in the video.
-{lang_prompt_map[ai_target_lang]}
-
-Format the entire output strictly as continuous dialogue lines separated by blank lines, with each spoken line enclosed in quotation marks, exactly like this format:
-
-"..."
-
-"..."
-
-Do not add any bullet points, numbering, speaker names, introductions, or markdown headers. Provide only direct sequential dialogue lines in quotation marks."""
-
-                    response = client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=[uploaded_file, prompt_text]
-                    )
-
-                    if response and response.text:
-                        clean_text = response.text.strip()
-                        st.session_state.script = clean_text
-                        st.success("✅ AI ဇာတ်ညွှန်း ထုတ်ယူမှု အောင်မြင်ပါပြီ! အောက်ပါ Script Box သို့ ရောက်သွားပါပြီ။")
-                        st.rerun()
-                    else:
-                        st.error("AI မှ အဖြေ မပြန်ခဲ့ပါ။")
-
-                    try:
-                        client.files.delete(name=uploaded_file.name)
-                    except:
-                        pass
-                    if os.path.exists(temp_vid_path):
-                        os.remove(temp_vid_path)
+                        c_a, c_b, c_c = st.columns(3)
+                        with c_a:
+                            if st.button("📋 Script ထဲ ထည့်", use_container_width=True, key="tr_to_script"):
+                                st.session_state.script = result["text"]
+                                st.session_state.last_paste = result["text"]
+                                st.success("Script ထဲ ရောက်သွားပြီ!")
+                                st.rerun()
+                        with c_b:
+                            st.download_button(
+                                "📥 .txt",
+                                data=result["text"].encode("utf-8"),
+                                file_name="transcript.txt",
+                                mime="text/plain",
+                                use_container_width=True,
+                                key="tr_dl_txt",
+                            )
+                        with c_c:
+                            st.download_button(
+                                "📥 .srt",
+                                data=result["srt"].encode("utf-8"),
+                                file_name="transcript.srt",
+                                mime="text/plain",
+                                use_container_width=True,
+                                key="tr_dl_srt",
+                            )
 
                 except Exception as e:
-                    st.error(f"❌ AI Error: {e}")
+                    st.error(f"❌ Fail: {e}")
 
 st.divider()
 
-# ==================== Built-in Prompt & Instructions Expander ====================
-with st.expander("📄 Script ဇာတ်ညွှန်း ရေးသားရန် လမ်းညွှန်ချက် (Prompt Guide)", expanded=False):
-    st.markdown("""
-    ဗီဒီယိုဇာတ်ညွှန်းကို AI ဖြင့် တိကျသေသပ်စွာ ထုတ်ယူလိုပါက အောက်ပါ Prompt ကို အသုံးပြုနိုင်ပါသည် -
-    """)
-    st.code("""
-Listen carefully to the spoken dialogue in the video.
-Translate and fully transcribe the spoken dialogue completely into fluent, natural Burmese (မြန်မာဘာသာ). Ensure all terms, names, and dialogues are fully rendered in Burmese without mixing raw English or pinyin words.
-
-Format the entire output strictly as continuous dialogue lines separated by blank lines, with each spoken line enclosed in quotation marks, exactly like this format:
-
-"..."
-
-"..."
-
-Do not add any bullet points, numbering, speaker names, introductions, or markdown headers. Provide only direct sequential dialogue lines in quotation marks.
-    """, language="text")
+# ==================== Gemini Canvas ====================
+with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
+    st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
+    st.caption("Canvas ဖွင့် → Transcript Copy → အောက်က box ထဲ Paste လုပ်ပါ")
 
 # ==================== ⭐ Big Paste Box (Auto-detect) ====================
 st.markdown("""
@@ -889,6 +1059,7 @@ div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeh
 </style>
 """, unsafe_allow_html=True)
 
+# Auto-detect paste
 if pasted_now and pasted_now.strip():
     clean = pasted_now.strip()
     if clean != st.session_state.get("last_paste", ""):
