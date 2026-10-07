@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import streamlit.components.v1 as components
 import os, re, hashlib, ffmpeg, shutil, subprocess, asyncio, time
@@ -6,7 +7,7 @@ import numpy as np
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
-from gradio_client import Client, handle_file
+from google import genai
 
 os.environ["HF_HOME"] = "/tmp/hf_cache"
 
@@ -30,7 +31,6 @@ EDGE_CHUNK = 400
 TTS_WORKERS = 2
 PNG_WORKERS = 4
 
-CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
 
@@ -54,18 +54,11 @@ st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="cen
 # ==================== Helper — Download နှိပ်ရင် ရှင်းမယ့် Function ====================
 def _on_download_clear():
     """Download နှိပ်လိုက်တာနဲ့ Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
-    # Script + Paste
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.paste_big = ""
-
-    # Preview cache
     st.session_state.pkey = None
-
-    # ⭐ Video uploader ကို key rotate လုပ်ပြီး ရှင်း
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
-
-    # ⭐ Ref Audio ကို မထိဘူး — ရှိနေမယ်
 
 
 st.markdown("""
@@ -335,108 +328,6 @@ def video_bypass(input_video, output_video="bypass.mp4",
     return output_video
 
 
-def bypass_and_neon(input_video, output_video,
-                    crop_ratio=0.95, mirror=True, thickness=30):
-    W, H, dur = vid_info(input_video)
-    pad = thickness
-    filters = []
-
-    if crop_ratio != 1.0:
-        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
-        if cw % 2 != 0: cw -= 1
-        if ch % 2 != 0: ch -= 1
-        cx = (W - cw) // 2; cy = (H - ch) // 2
-        filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
-
-    if mirror:
-        filters.append("hflip")
-
-    filters.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
-    filters.append(f"drawbox=x=0:y=0:w={W}:h={H}:color={TIKTOK_BLACK}@1.0:t={pad}:replace=0")
-    filters.append(f"drawbox=x=0:y=0:w={W}:h={H}:color={TIKTOK_CYAN}@1.0:t={max(3, pad//3)}:replace=0")
-    filters.append(f"drawbox=x={pad}:y={pad}:w={W-2*pad}:h={H-2*pad}:color={TIKTOK_MAGENTA}@1.0:t={max(3, pad//3)}:replace=0")
-
-    vf = ",".join(filters)
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_video,
-        "-vf", vf,
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-        "-c:a", "copy", output_video
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
-    return output_video
-
-
-def bypass_and_neon_chase(input_video, output_video,
-                          crop_ratio=0.95, mirror=True,
-                          thickness=30, speed=1.0, tail=0.35):
-    base = "bypass_base.mp4"
-    video_bypass(input_video, base, crop_ratio, mirror)
-
-    W, H, _ = vid_info(base)
-    pr = ffmpeg.probe(base)
-    vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
-    n, d = vs['r_frame_rate'].split('/')
-    fps = float(n) / float(d)
-
-    th = thickness
-    P = 2 * (W + H)
-
-    yy, xx = np.mgrid[0:H, 0:W]
-    ring = (xx < th) | (xx >= W - th) | (yy < th) | (yy >= H - th)
-    ys, xs = np.nonzero(ring)
-    dt, db, dl, dr = ys, H - 1 - ys, xs, W - 1 - xs
-    m = np.minimum.reduce([dt, db, dl, dr])
-    S = np.where(m == dt, xs,
-        np.where(m == dr, W + ys,
-        np.where(m == db, 2 * W + H + (W - xs),
-                 2 * W + 2 * H - ys))).astype(np.float32)
-
-    BASE = np.array([15, 15, 15], np.float32)
-    CYAN = np.array([238, 244, 37], np.float32)
-    MAGENTA = np.array([85, 44, 254], np.float32)
-
-    def comet(head):
-        dist = (head - S) % P
-        a = np.clip(1.0 - dist / (tail * P), 0, 1)
-        return (a ** 1.5)[:, None]
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo", "-pix_fmt", "bgr24",
-        "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
-        "-i", base,
-        "-map", "0:v", "-map", "1:a?",
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-        "-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest",
-        output_video
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
-
-    cap = cv2.VideoCapture(base)
-    i = 0
-    while True:
-        ok, fr = cap.read()
-        if not ok: break
-        t = i / fps
-        head = (t * speed * P / 4.0) % P
-        c = BASE + CYAN * comet(head) + MAGENTA * comet(head + P / 2)
-        fr[ys, xs] = np.clip(c, 0, 255).astype(np.uint8)
-        proc.stdin.write(fr.tobytes())
-        i += 1
-    cap.release()
-    proc.stdin.close()
-    proc.wait()
-    if proc.returncode != 0:
-        raise Exception("Chase Neon: ffmpeg fail")
-    return output_video
-
-
 def keep_count(video_in, segments):
     pr = ffmpeg.probe(video_in)
     vs = next(x for x in pr['streams'] if x['codec_type'] == 'video')
@@ -659,6 +550,7 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
 # ==================== TTS Functions ====================
 
 def tts_demo(chunks, ref, space, cb=None):
+    from gradio_client import Client, handle_file
     cl = Client(space); files = []; rf = handle_file(ref) if ref else None
     for i, c in enumerate(chunks):
         if cb: cb(i, len(chunks), c)
@@ -676,6 +568,7 @@ def tts_demo(chunks, ref, space, cb=None):
 
 
 def tts_burmese(chunks, ref, space, cb=None):
+    from gradio_client import Client, handle_file
     cl = Client(space); files = []
     if not ref: raise Exception("Reference Audio needed")
     rf = handle_file(ref)
@@ -742,7 +635,7 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
     good = [a for a in results if a]
     if not good:
-        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ (edge-tts>=7.0.0) / ခဏနေ ပြန်စမ်းပါ")
+        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ / ခဏနေ ပြန်စမ်းပါ")
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
@@ -843,38 +736,113 @@ def whisper_fast(video_path, model=None):
     return speech_segments
 
 
-def silence_cut_v2(input_video, output_video="input_cut.mp4"):
-    t0 = time.time()
-    speech_segments = whisper_fast(input_video)
-    whisper_time = time.time() - t0
-
-    if not speech_segments: raise Exception("Speech မတွေ့")
-
-    select_exprs = [f"between(t,{s:.3f},{e:.3f})" for s, e in speech_segments]
-    select_str = "+".join(select_exprs)
-
-    cmd = ["ffmpeg", "-y", "-i", input_video,
-           "-vf", f"select='{select_str}',setpts=N/FRAME_RATE/TB",
-           "-af", f"aselect='{select_str}',asetpts=N/SR/TB",
-           "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
-           "-c:a", "aac", "-b:a", "128k", output_video]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
-
-    total = sum(e - s for s, e in speech_segments)
-    return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
-
-
 # ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → AI Script Extractor → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
-# ==================== Gemini Canvas ====================
-with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
-    st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
-    st.caption("Canvas ဖွင့် → Transcript Copy → အောက်က box ထဲ Paste လုပ်ပါ")
+# ==================== AI Script Generator Service (Free Gemini API) ====================
+st.subheader("🤖 AI Script Generator (Gemini Free Service)")
+with st.expander("✨ ဗီဒီယိုဖိုင်မှ ဇာတ်ညွှန်း အလိုအလျောက် ထုတ်ယူရန် (AI Transcribe)", expanded=True):
+    st.markdown("ဗီဒီယိုဖိုင် တင်ပြီး အောက်ပါ ခလုတ်ကို နှိပ်ရုံဖြင့် AI က ဇာတ်ညွှန်းကို မြန်မာဘာသာဖြင့် အလိုအလျောက် ထုတ်ပေးပါမည်။")
+    
+    ai_target_lang = st.selectbox(
+        "ထွက်လာမည့် ဘာသာစကား (Output Language)",
+        ["မြန်မာဘာသာ (Burmese)", "မူရင်းဘာသာအတိုင်း (Original)", "English", "中文 (Chinese)", "ไทย (Thai)"],
+        index=0
+    )
+    
+    ai_vid_upload = st.file_uploader(
+        "📹 ဇာတ်ညွှန်းထုတ်မည့် ဗီဒီယိုဖိုင် ရွေးပါ",
+        type=["mp4","mov","avi","mkv","webm"],
+        key="ai_transcribe_vid"
+    )
+
+    if st.button("🚀 AI ဖြင့် ဇာတ်ညွှန်း အလွန်အမြန် ထုတ်မည်", type="primary", use_container_width=True):
+        if ai_vid_upload is None:
+            st.error("ကျေးဇူးပြု၍ ဗီဒီယိုဖိုင် အရင်တင်ပေးပါ။")
+        else:
+            with st.spinner("🤖 AI မှ ဗီဒီယိုကို နားထောင်၍ ဇာတ်ညွှန်း ရေးသားနေပါပြီ... ခဏစောင့်ပါ..."):
+                try:
+                    # Save temp file for Gemini API
+                    temp_vid_path = "temp_ai_vid.mp4"
+                    with open(temp_vid_path, "wb") as f:
+                        f.write(ai_vid_upload.read())
+                    
+                    # Using Google GenAI SDK (gemini-2.5-flash)
+                    client = genai.Client()
+                    
+                    uploaded_file = client.files.upload(file=temp_vid_path)
+                    
+                    # Wait for file processing if needed
+                    while uploaded_file.state.name == "PROCESSING":
+                        time.sleep(2)
+                        uploaded_file = client.files.get(name=uploaded_file.name)
+
+                    lang_prompt_map = {
+                        "မြန်မာဘာသာ (Burmese)": "Translate and fully transcribe the spoken dialogue completely into fluent, natural Burmese (မြန်မာဘာသာ). Ensure all terms are fully rendered in Burmese without mixing raw English or pinyin words.",
+                        "မူရင်းဘာသာအတိုင်း (Original)": "Transcribe the spoken dialogue in its exact original spoken language verbatim.",
+                        "English": "Translate and transcribe the spoken dialogue into English.",
+                        "中文 (Chinese)": "Translate and transcribe the spoken dialogue into Chinese (中文).",
+                        "ไทย (Thai)": "Translate and transcribe the spoken dialogue into Thai."
+                    }
+
+                    prompt_text = f"""Listen carefully to the spoken dialogue in the video.
+{lang_prompt_map[ai_target_lang]}
+
+Format the entire output strictly as continuous dialogue lines separated by blank lines, with each spoken line enclosed in quotation marks, exactly like this format:
+
+"..."
+
+"..."
+
+Do not add any bullet points, numbering, speaker names, introductions, or markdown headers. Provide only direct sequential dialogue lines in quotation marks."""
+
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=[uploaded_file, prompt_text]
+                    )
+
+                    if response and response.text:
+                        clean_text = response.text.strip()
+                        # Format lines nicely into session script
+                        st.session_state.script = clean_text
+                        st.success("✅ AI ဇာတ်ညွှန်း ထုတ်ယူမှု အောင်မြင်ပါပြီ! အောက်ပါ Script Box သို့ ရောက်သွားပါပြီ။")
+                        st.rerun()
+                    else:
+                        st.error("AI မှ အဖြေ မပြန်ခဲ့ပါ။")
+
+                    # Cleanup uploaded file from gemini
+                    try:
+                        client.files.delete(name=uploaded_file.name)
+                    except:
+                        pass
+                    if os.path.exists(temp_vid_path):
+                        os.remove(temp_vid_path)
+
+                except Exception as e:
+                    st.error(f"❌ AI Error: {e}")
+
+st.divider()
+
+# ==================== Built-in Prompt & Instructions Expander ====================
+with st.expander("📄 Script ဇာတ်ညွှန်း ရေးသားရန် လမ်းညွှန်ချက် (Prompt Guide)", expanded=False):
+    st.markdown("""
+    ဗီဒီယိုဇာတ်ညွှန်းကို AI ဖြင့် တိကျသေသပ်စွာ ထုတ်ယူလိုပါက အောက်ပါ Prompt ကို အသုံးပြုနိုင်ပါသည် -
+    """)
+    st.code("""
+Listen carefully to the spoken dialogue in the video.
+Translate and fully transcribe the spoken dialogue completely into fluent, natural Burmese (မြန်မာဘာသာ). Ensure all terms, names, and dialogues are fully rendered in Burmese without mixing raw English or pinyin words.
+
+Format the entire output strictly as continuous dialogue lines separated by blank lines, with each spoken line enclosed in quotation marks, exactly like this format:
+
+"..."
+
+"..."
+
+Do not add any bullet points, numbering, speaker names, introductions, or markdown headers. Provide only direct sequential dialogue lines in quotation marks.
+    """, language="text")
 
 # ==================== ⭐ Big Paste Box (Auto-detect) ====================
 st.markdown("""
@@ -953,7 +921,7 @@ vid = st.file_uploader(
     "📹",
     type=["mp4","mov","avi","mkv"],
     label_visibility="collapsed",
-    key=f"video_up_{st.session_state.video_up_key}"   # ⭐ dynamic key
+    key=f"video_up_{st.session_state.video_up_key}"
 )
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
@@ -1020,7 +988,6 @@ if use_voxcpm:
         st.session_state.ref = "ref.wav"
         st.success("✅ Ref Audio")
     else:
-        # Ref မရှိရင် disk ပေါ်မှာ ရှိမရှိ စစ်
         if os.path.exists("ref.wav"):
             st.session_state.ref = "ref.wav"
             st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
@@ -1101,3 +1068,5 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             on_click=_on_download_clear,
             use_container_width=True,
         )
+
+```
