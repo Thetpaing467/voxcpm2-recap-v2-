@@ -46,7 +46,14 @@ EDGE_VOICES = {
 EDGE_VOICE_FIXED = "male"
 
 GROQ_WHISPER_MODEL = "whisper-large-v3"
-GROQ_LLM_MODEL = "llama-3.3-70b-versatile"
+
+# ⭐ Model အသစ်များ (Groq က llama-3.3-70b-versatile ကို ဖြုတ်ပြီးပြီ)
+# ရွေးချယ်စရာများ:
+#   "openai/gpt-oss-120b"            ← အကောင်းဆုံး (အကြံပြု)
+#   "openai/gpt-oss-20b"             ← ပိုမြန်၊ ပိုသေး
+#   "llama-3.1-8b-instant"           ← အလွန်မြန် (အရည်အသွေး နည်းနည်းနိမ့်)
+#   "moonshotai/kimi-k2-instruct"    ← တရုတ်စာနဲ့ ကောင်း
+GROQ_LLM_MODEL = "openai/gpt-oss-120b"
 
 SOURCE_LANGS = {
     "🇨🇳 တရုတ်": "zh",
@@ -63,7 +70,7 @@ SOURCE_LANGS = {
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
 
-# ==================== Download Clear Helper ====================
+# ==================== Download Clear ====================
 def _on_download_clear():
     st.session_state.script = ""
     st.session_state.last_paste = ""
@@ -281,7 +288,7 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-# ==================== TikTok Border Preview ====================
+# ==================== Preview Border ====================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     d = ImageDraw.Draw(img, "RGBA")
@@ -310,7 +317,7 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     return img
 
 
-# ==================== ⭐ Groq Client (session key ကနေ) ====================
+# ==================== Groq ====================
 
 def extract_audio_for_asr(video_path, audio_path="asr_audio.wav"):
     subprocess.run([
@@ -347,9 +354,6 @@ def split_audio_if_large(audio_path, max_mb=24):
 
 
 def get_groq_client():
-    """
-    ⭐ Session state ထဲက key ကို သုံး — Secrets မလို
-    """
     from groq import Groq
     key = st.session_state.get("groq_key", "").strip()
     if not key:
@@ -358,11 +362,9 @@ def get_groq_client():
 
 
 def test_groq_key(key):
-    """Key မှန်/မမှန် စမ်းသပ်"""
     from groq import Groq
     try:
         client = Groq(api_key=key.strip())
-        # Light test — models list ကို ခေါ်
         client.models.list()
         return True, ""
     except Exception as e:
@@ -408,6 +410,10 @@ def groq_transcribe_video(video_path, source_lang, progress_cb=None):
 
 
 def groq_translate_to_myanmar(text, source_lang_label="", progress_cb=None):
+    """
+    ⭐ Groq LLM (gpt-oss-120b) နဲ့ source text → မြန်မာစာ
+    Reasoning model ဖြစ်လို့ reasoning output ကို ဖျောက်ထားတယ်
+    """
     client = get_groq_client()
 
     system_prompt = (
@@ -420,6 +426,7 @@ def groq_translate_to_myanmar(text, source_lang_label="", progress_cb=None):
         "- Keep the meaning accurate and natural.\n"
         "- Use proper Burmese punctuation (။ ၊).\n"
         "- Preserve names as-is (transliterate naturally into Burmese if possible).\n"
+        "- Do NOT add any reasoning, thinking, or meta-commentary.\n"
     )
 
     MAX_CHARS = 2500
@@ -429,16 +436,41 @@ def groq_translate_to_myanmar(text, source_lang_label="", progress_cb=None):
     for i, ch in enumerate(chunks):
         if progress_cb:
             progress_cb(i, len(chunks), f"🇲🇲 ဘာသာပြန် [{i+1}/{len(chunks)}]...")
-        resp = client.chat.completions.create(
-            model=GROQ_LLM_MODEL,
-            messages=[
+
+        # ⭐ API ခေါ်ဆိုမှု — model အသစ် + reasoning ဖျောက်
+        create_kwargs = {
+            "model": GROQ_LLM_MODEL,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": ch},
             ],
-            temperature=0.3,
-            max_tokens=4000,
-        )
-        out_parts.append(resp.choices[0].message.content.strip())
+            "temperature": 0.3,
+            "max_tokens": 4000,
+        }
+
+        # gpt-oss models တွေအတွက် reasoning output ကို ဖျောက်
+        if "gpt-oss" in GROQ_LLM_MODEL:
+            create_kwargs["reasoning_effort"] = "low"
+            try:
+                create_kwargs["include_reasoning"] = False
+            except Exception:
+                pass
+
+        try:
+            resp = client.chat.completions.create(**create_kwargs)
+        except Exception as e:
+            # include_reasoning မလက်ခံရင် ဖြုတ်ပြီး ပြန်စမ်း
+            err_str = str(e).lower()
+            if "include_reasoning" in err_str or "reasoning" in err_str:
+                create_kwargs.pop("include_reasoning", None)
+                create_kwargs.pop("reasoning_effort", None)
+                resp = client.chat.completions.create(**create_kwargs)
+            else:
+                raise
+
+        content = resp.choices[0].message.content.strip()
+        out_parts.append(content)
+
     return " ".join(out_parts).strip()
 
 
@@ -843,7 +875,7 @@ st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow
 st.markdown("<div class='main-sub'>Video → Transcript → VoxCPM2 / Edge TTS → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
-# ==================== ⭐ Groq API Key Panel (App ထဲမှာ ထည့်) ====================
+# ==================== Groq API Key Panel ====================
 with st.expander("🔑 Groq API Key ထည့်ရန်", expanded=(not st.session_state.groq_key)):
     st.markdown("""
     <div class="groq-box">
@@ -892,7 +924,6 @@ with st.expander("🔑 Groq API Key ထည့်ရန်", expanded=(not st.ses
         if st.session_state.groq_key:
             st.markdown("✅")
 
-# Status box
 if st.session_state.groq_key:
     masked = st.session_state.groq_key[:10] + "..." + st.session_state.groq_key[-4:]
     st.markdown(
@@ -901,9 +932,9 @@ if st.session_state.groq_key:
     )
 st.divider()
 
-# ==================== Groq Transcript Extractor ====================
+# ==================== Groq Transcript ====================
 with st.expander("🎬 Video → မြန်မာ Transcript (Groq AI)", expanded=False):
-    st.caption(f"⚡ Groq Cloud — Whisper {GROQ_WHISPER_MODEL} + LLaMA {GROQ_LLM_MODEL}")
+    st.caption(f"⚡ Groq — Whisper {GROQ_WHISPER_MODEL} + LLM {GROQ_LLM_MODEL}")
 
     if not st.session_state.groq_key:
         st.error("⚠️ အပေါ်က **🔑 Groq API Key ထည့်ရန်** panel မှာ Key အရင် ထည့်ပါ")
