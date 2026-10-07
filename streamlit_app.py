@@ -742,10 +742,13 @@ st.markdown("<div class='main-sub'>Video → AI Script Extractor → VoxCPM2 / E
 st.divider()
 
 # ==================== AI Script Generator Service (Free Internal Environment) ====================
-st.subheader("🤖 AI Script Generator (Zero API Key Setup)")
+st.subheader("🤖 AI Script Generator")
 with st.expander("✨ ဗီဒီယိုဖိုင်မှ ဇာတ်ညွှန်း အလိုအလျောက် ထုတ်ယူရန် (AI Transcribe)", expanded=True):
-    st.markdown("ဗီဒီယိုဖိုင် တင်ပြီး အောက်ပါ ခလုတ်ကို နှိပ်ရုံဖြင့် AI က ဇာတ်ညွှန်းကို မြန်မာဘာသာဖြင့် အလိုအလျောက် ထုတ်ပေးပါမည်။ (API Key ထည့်စရာ မလိုပါ)")
+    st.markdown("ဗီဒီယိုဖိုင် တင်ပြီး အောက်ပါ ခလုတ်ကို နှိပ်ရုံဖြင့် AI က ဇာတ်ညွှန်းကို မြန်မာဘာသာဖြင့် အလိုအလျောက် ထုတ်ပေးပါမည်။")
     
+    # Optional API Key input if system env is not set
+    manual_api_key = st.text_input("🔑 Google Gemini API Key (Optional)", type="password", placeholder="API Key ထည့်ရန် (လိုအပ်မှသာ)", help="Environment တွင် Key မရှိပါက ဤနေရာတွင် ထည့်နိုင်ပါသည်။")
+
     ai_target_lang = st.selectbox(
         "ထွက်လာမည့် ဘာသာစကား (Output Language)",
         ["မြန်မာဘာသာ (Burmese)", "မူရင်းဘာသာအတိုင်း (Original)", "English", "中文 (Chinese)", "ไทย (Thai)"],
@@ -768,8 +771,12 @@ with st.expander("✨ ဗီဒီယိုဖိုင်မှ ဇာတ်ည
                     with open(temp_vid_path, "wb") as f:
                         f.write(ai_vid_upload.read())
                     
-                    # Uses genai.Client() with environment credentials automatically
-                    client = genai.Client()
+                    # Use manual api key if provided, else rely on default env
+                    if manual_api_key and manual_api_key.strip():
+                        client = genai.Client(api_key=manual_api_key.strip())
+                    else:
+                        client = genai.Client()
+
                     uploaded_file = client.files.upload(file=temp_vid_path)
                     
                     while uploaded_file.state.name == "PROCESSING":
