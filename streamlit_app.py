@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import streamlit.components.v1 as components
 import os, re, hashlib, ffmpeg, shutil, subprocess, asyncio, time
@@ -765,17 +764,13 @@ with st.expander("✨ ဗီဒီယိုဖိုင်မှ ဇာတ်ည
         else:
             with st.spinner("🤖 AI မှ ဗီဒီယိုကို နားထောင်၍ ဇာတ်ညွှန်း ရေးသားနေပါပြီ... ခဏစောင့်ပါ..."):
                 try:
-                    # Save temp file for Gemini API
                     temp_vid_path = "temp_ai_vid.mp4"
                     with open(temp_vid_path, "wb") as f:
                         f.write(ai_vid_upload.read())
                     
-                    # Using Google GenAI SDK (gemini-2.5-flash)
                     client = genai.Client()
-                    
                     uploaded_file = client.files.upload(file=temp_vid_path)
                     
-                    # Wait for file processing if needed
                     while uploaded_file.state.name == "PROCESSING":
                         time.sleep(2)
                         uploaded_file = client.files.get(name=uploaded_file.name)
@@ -806,14 +801,12 @@ Do not add any bullet points, numbering, speaker names, introductions, or markdo
 
                     if response and response.text:
                         clean_text = response.text.strip()
-                        # Format lines nicely into session script
                         st.session_state.script = clean_text
                         st.success("✅ AI ဇာတ်ညွှန်း ထုတ်ယူမှု အောင်မြင်ပါပြီ! အောက်ပါ Script Box သို့ ရောက်သွားပါပြီ။")
                         st.rerun()
                     else:
                         st.error("AI မှ အဖြေ မပြန်ခဲ့ပါ။")
 
-                    # Cleanup uploaded file from gemini
                     try:
                         client.files.delete(name=uploaded_file.name)
                     except:
@@ -888,7 +881,6 @@ div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeh
 </style>
 """, unsafe_allow_html=True)
 
-# Auto-detect paste
 if pasted_now and pasted_now.strip():
     clean = pasted_now.strip()
     if clean != st.session_state.get("last_paste", ""):
@@ -1068,5 +1060,3 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             on_click=_on_download_clear,
             use_container_width=True,
         )
-
-```
