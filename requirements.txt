@@ -1,11 +1,8 @@
 streamlit
-faster-whisper
-openai-whisper
-torch
-edge-tts
+numpy
+Pillow
+opencv-python-headless
+edge-tts>=7.0.0
 gradio_client
 ffmpeg-python
-opencv-python-headless
-Pillow
-numpy
-av>=13.0.0
+faster-whisper
