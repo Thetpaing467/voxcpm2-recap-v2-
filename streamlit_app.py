@@ -741,10 +741,10 @@ st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow
 st.markdown("<div class='main-sub'>Video → AI Script Extractor → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
-# ==================== AI Script Generator Service (Free Gemini API) ====================
-st.subheader("🤖 AI Script Generator (Gemini Free Service)")
+# ==================== AI Script Generator Service (Free Internal Environment) ====================
+st.subheader("🤖 AI Script Generator (Zero API Key Setup)")
 with st.expander("✨ ဗီဒီယိုဖိုင်မှ ဇာတ်ညွှန်း အလိုအလျောက် ထုတ်ယူရန် (AI Transcribe)", expanded=True):
-    st.markdown("ဗီဒီယိုဖိုင် တင်ပြီး အောက်ပါ ခလုတ်ကို နှိပ်ရုံဖြင့် AI က ဇာတ်ညွှန်းကို မြန်မာဘာသာဖြင့် အလိုအလျောက် ထုတ်ပေးပါမည်။")
+    st.markdown("ဗီဒီယိုဖိုင် တင်ပြီး အောက်ပါ ခလုတ်ကို နှိပ်ရုံဖြင့် AI က ဇာတ်ညွှန်းကို မြန်မာဘာသာဖြင့် အလိုအလျောက် ထုတ်ပေးပါမည်။ (API Key ထည့်စရာ မလိုပါ)")
     
     ai_target_lang = st.selectbox(
         "ထွက်လာမည့် ဘာသာစကား (Output Language)",
@@ -768,6 +768,7 @@ with st.expander("✨ ဗီဒီယိုဖိုင်မှ ဇာတ်ည
                     with open(temp_vid_path, "wb") as f:
                         f.write(ai_vid_upload.read())
                     
+                    # Uses genai.Client() with environment credentials automatically
                     client = genai.Client()
                     uploaded_file = client.files.upload(file=temp_vid_path)
                     
