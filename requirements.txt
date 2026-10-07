@@ -1,9 +1,8 @@
 streamlit
-numpy
-Pillow
-opencv-python-headless
-edge-tts>=7.0.0
+groq
+edge-tts
 gradio_client
 ffmpeg-python
-faster-whisper
-av>=12.0.0
+opencv-python-headless
+Pillow
+numpy
