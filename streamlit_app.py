@@ -803,9 +803,8 @@ def whisper_fast(video_path, model=None):
 
     if USE_FAST_VAD:
         try:
-            from faster_whisper.audio import decode_audio
             from faster_whisper.vad import get_speech_timestamps, VadOptions
-            audio = decode_audio("whisper_audio.wav", sampling_rate=16000)
+            audio = load_audio_np("whisper_audio.wav")
             ts = get_speech_timestamps(
                 audio, VadOptions(min_silence_duration_ms=700, speech_pad_ms=200))
             segs_vad = [(t["start"] / 16000.0, t["end"] / 16000.0) for t in ts]
@@ -818,7 +817,7 @@ def whisper_fast(video_path, model=None):
     try:
         model = model or get_fw_model()
         segments, _ = model.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
+            load_audio_np("whisper_audio.wav"), language=WHISPER_LANG,
             vad_filter=False, beam_size=1,
             condition_on_previous_text=False, temperature=0
         )
@@ -845,16 +844,22 @@ def get_transcribe_model(name):
                         cpu_threads=os.cpu_count() or 4)
 
 
+def load_audio_np(path):
+    """ffmpeg နဲ့ တိုက်ရိုက်ဖတ်ပြီး numpy ပြောင်း (PyAV version ပြဿနာ ကျော်)"""
+    out = subprocess.run(
+        ["ffmpeg", "-i", path, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
+        capture_output=True, check=True).stdout
+    return np.frombuffer(out, np.int16).astype(np.float32) / 32768.0
+
+
 def transcribe_script(video_path, model_name="small"):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", "transcribe_audio.wav"
-    ], capture_output=True, check=True)
+    audio = load_audio_np(video_path)
+    if audio.size == 0:
+        raise Exception("Audio မတွေ့ပါ")
 
     model = get_transcribe_model(model_name)
     segs, _ = model.transcribe(
-        "transcribe_audio.wav",
+        audio,
         language="my", task="transcribe",
         vad_filter=True, beam_size=5,
         condition_on_previous_text=False, temperature=0
