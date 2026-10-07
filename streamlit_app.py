@@ -31,8 +31,7 @@ TTS_WORKERS = 2
 PNG_WORKERS = 4
 
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
-WHISPER_MODEL = "tiny"                          # VAD အတွက် (မြန်)
-WHISPER_MODEL_TRANSCRIBE = "medium"             # ⭐ NEW — Transcript အတွက် (မြန်မာအတွက် တိကျ)
+WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
 
 BOX_WIDTH_RATIO = 1.0
@@ -837,70 +836,31 @@ def whisper_fast(video_path, model=None):
     return speech_segments
 
 
-# ==================== ⭐ NEW — Myanmar Transcript Extractor ====================
+# ==================== ⭐ Whisper — Video ကနေ မြန်မာ Script ထုတ်ရန် ====================
 
 @st.cache_resource(show_spinner=False)
-def get_transcribe_model():
-    """Transcript အတွက် faster-whisper model (medium) — cache"""
+def get_transcribe_model(name):
     from faster_whisper import WhisperModel
-    return WhisperModel(
-        WHISPER_MODEL_TRANSCRIBE,
-        device="cpu",
-        compute_type="int8",
-        cpu_threads=os.cpu_count() or 4,
-    )
+    return WhisperModel(name, device="cpu", compute_type="int8",
+                        cpu_threads=os.cpu_count() or 4)
 
 
-def extract_audio_for_asr(video_path, audio_path="asr_audio.wav"):
-    """Video → 16kHz mono wav"""
+def transcribe_script(video_path, model_name="small"):
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
         "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", audio_path
+        "-c:a", "pcm_s16le", "transcribe_audio.wav"
     ], capture_output=True, check=True)
-    return audio_path
 
-
-def transcribe_myanmar(video_path, progress_cb=None):
-    """
-    Video → မြန်မာ Transcript
-    return: {"text": str, "segments": list, "srt": str, "duration": float}
-    """
-    audio = extract_audio_for_asr(video_path)
-    model = get_transcribe_model()
-
-    segments_gen, info = model.transcribe(
-        audio,
-        language="my",
-        task="transcribe",
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=500),
-        condition_on_previous_text=False,
-        temperature=0,
+    model = get_transcribe_model(model_name)
+    segs, _ = model.transcribe(
+        "transcribe_audio.wav",
+        language="my", task="transcribe",
+        vad_filter=True, beam_size=5,
+        condition_on_previous_text=False, temperature=0
     )
-
-    total = float(getattr(info, "duration", 0.0) or 0.0)
-    seg_list = []
-    full_text_parts = []
-    srt_lines = []
-
-    for i, seg in enumerate(segments_gen, 1):
-        txt = seg.text.strip()
-        seg_list.append({"start": seg.start, "end": seg.end, "text": txt})
-        full_text_parts.append(txt)
-        srt_lines.append(
-            f"{i}\n{t2s(seg.start)} --> {t2s(seg.end)}\n{txt}\n"
-        )
-        if progress_cb:
-            progress_cb(seg.end, total, txt)
-
-    return {
-        "text": " ".join(full_text_parts).strip(),
-        "segments": seg_list,
-        "srt": "\n".join(srt_lines),
-        "duration": total,
-    }
+    lines = [s.text.strip() for s in segs if s.text.strip()]
+    return "\n\n".join(lines)
 
 
 def silence_cut_v2(input_video, output_video="input_cut.mp4"):
@@ -929,85 +889,6 @@ def silence_cut_v2(input_video, output_video="input_cut.mp4"):
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
-st.divider()
-
-# ==================== ⭐ NEW — Video → Myanmar Transcript ====================
-with st.expander("🎬 Video → မြန်မာ Transcript (Whisper AI)", expanded=False):
-    st.caption(f"Model: **{WHISPER_MODEL_TRANSCRIBE}** — Video upload ရုံနဲ့ မြန်မာ transcript ထုတ်ပေးမယ်")
-
-    tr_vid = st.file_uploader(
-        "Video for transcription",
-        type=["mp4", "mov", "avi", "mkv", "webm"],
-        key="tr_video_upload",
-        label_visibility="collapsed",
-    )
-
-    if tr_vid is not None:
-        st.success(f"✅ {tr_vid.name} — {tr_vid.size/(1024*1024):.1f} MB")
-
-        if st.button("🔍 Transcript ထုတ်", use_container_width=True, key="tr_btn"):
-            tr_path = "tr_input.mp4"
-            tr_vid.seek(0)
-            with open(tr_path, "wb") as f:
-                f.write(tr_vid.read())
-
-            prog = st.progress(0)
-            status = st.empty()
-
-            def _cb(cur, total, txt):
-                if total > 0:
-                    prog.progress(min(1.0, cur / total))
-                status.caption(f"⏳ {cur:.1f}s / {total:.1f}s — {txt[:50]}")
-
-            with st.spinner(f"Whisper ({WHISPER_MODEL_TRANSCRIBE}) မြန်မာ transcript ထုတ်နေသည်..."):
-                try:
-                    t0 = time.time()
-                    result = transcribe_myanmar(tr_path, progress_cb=_cb)
-                    elapsed = time.time() - t0
-                    prog.progress(1.0)
-                    status.empty()
-
-                    if not result["text"]:
-                        st.warning("⚠️ စကားပြော မတွေ့ပါ")
-                    else:
-                        st.success(f"✅ Done — ⏱️ {elapsed:.1f}s — {len(result['text'])} လုံး")
-
-                        st.text_area(
-                            "📝 Myanmar Transcript",
-                            value=result["text"],
-                            height=200,
-                            key="tr_output",
-                        )
-
-                        c_a, c_b, c_c = st.columns(3)
-                        with c_a:
-                            if st.button("📋 Script ထဲ ထည့်", use_container_width=True, key="tr_to_script"):
-                                st.session_state.script = result["text"]
-                                st.session_state.last_paste = result["text"]
-                                st.success("Script ထဲ ရောက်သွားပြီ!")
-                                st.rerun()
-                        with c_b:
-                            st.download_button(
-                                "📥 .txt",
-                                data=result["text"].encode("utf-8"),
-                                file_name="transcript.txt",
-                                mime="text/plain",
-                                use_container_width=True,
-                                key="tr_dl_txt",
-                            )
-                        with c_c:
-                            st.download_button(
-                                "📥 .srt",
-                                data=result["srt"].encode("utf-8"),
-                                file_name="transcript.srt",
-                                mime="text/plain",
-                                use_container_width=True,
-                                key="tr_dl_srt",
-                            )
-
-                except Exception as e:
-                    st.error(f"❌ Fail: {e}")
-
 st.divider()
 
 # ==================== Gemini Canvas ====================
@@ -1095,6 +976,25 @@ vid = st.file_uploader(
     key=f"video_up_{st.session_state.video_up_key}"
 )
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
+
+# ==================== ⭐ Whisper — Video ကနေ Script ထုတ်မယ် ====================
+if vid:
+    wm = st.selectbox("🎤 Whisper Model (မြန်မာစာအတွက် small / medium ကောင်း)",
+                      ["tiny", "base", "small", "medium"], index=2)
+    if st.button("📝 Video ကနေ Script ထုတ်မယ် (Whisper)", use_container_width=True):
+        vid.seek(0)
+        with open("input_tr.mp4", "wb") as f: f.write(vid.read())
+        with st.spinner("Whisper နဲ့ မြန်မာစာ ထုတ်နေသည်... (ပထမအကြိမ် model download ကြာနိုင်)"):
+            try:
+                txt = transcribe_script("input_tr.mp4", wm)
+                if not txt.strip():
+                    st.error("စကားသံ မတွေ့ပါ")
+                else:
+                    st.session_state.script = txt
+                    st.session_state.last_paste = ""
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Whisper: {e}")
 st.divider()
 
 use_neon = True
