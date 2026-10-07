@@ -45,11 +45,9 @@ EDGE_VOICES = {
 }
 EDGE_VOICE_FIXED = "male"
 
-# ⭐ Groq Models
 GROQ_WHISPER_MODEL = "whisper-large-v3"
 GROQ_LLM_MODEL = "llama-3.3-70b-versatile"
 
-# ⭐ Source language options
 SOURCE_LANGS = {
     "🇨🇳 တရုတ်": "zh",
     "🇬🇧 အင်္ဂလိပ်": "en",
@@ -102,6 +100,11 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 .step-timer{background:rgba(255,255,255,.05);border-left:4px solid #667eea;
  border-radius:10px;padding:12px 18px;margin:8px 0;color:#e8e8f0;font-size:.95rem}
 .step-timer b{color:#6ba8ff;font-size:1.05rem}
+.groq-box{background:linear-gradient(135deg,rgba(255,107,157,.15),rgba(198,107,255,.15));
+ border:2px solid rgba(198,107,255,.5);border-radius:16px;padding:18px;margin:10px 0}
+.groq-ok{background:linear-gradient(135deg,rgba(72,187,120,.15),rgba(56,161,105,.15));
+ border:2px solid rgba(72,187,120,.5);border-radius:16px;padding:14px;margin:10px 0;
+ text-align:center;font-weight:700;color:#7ee2a8}
 </style>
 """, unsafe_allow_html=True)
 
@@ -125,6 +128,7 @@ if not st.session_state.auth:
 # ==================== Session State Init ====================
 if "script" not in st.session_state: st.session_state.script = ""
 if "video_up_key" not in st.session_state: st.session_state.video_up_key = 0
+if "groq_key" not in st.session_state: st.session_state.groq_key = ""
 
 
 # ==================== Utility Functions ====================
@@ -277,7 +281,7 @@ def split_scr(t, mc=TTS_CHUNK):
     return out
 
 
-# ==================== Video Preview Border ====================
+# ==================== TikTok Border Preview ====================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     d = ImageDraw.Draw(img, "RGBA")
@@ -306,10 +310,9 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     return img
 
 
-# ==================== ⭐ Groq — Audio Extraction ====================
+# ==================== ⭐ Groq Client (session key ကနေ) ====================
 
 def extract_audio_for_asr(video_path, audio_path="asr_audio.wav"):
-    """Video → 16kHz mono wav (Whisper API အတွက်)"""
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
         "-ar", "16000", "-ac", "1",
@@ -319,15 +322,10 @@ def extract_audio_for_asr(video_path, audio_path="asr_audio.wav"):
 
 
 def split_audio_if_large(audio_path, max_mb=24):
-    """
-    Groq Free tier 25MB limit အတွက် audio ကို chunk ခွဲ
-    return: list of chunk paths
-    """
     size_mb = os.path.getsize(audio_path) / (1024 * 1024)
     if size_mb <= max_mb:
         return [audio_path]
 
-    # wav 16kHz mono = ~32KB/sec → 24MB ≈ 750 sec (12.5 min)
     pr = ffmpeg.probe(audio_path)
     dur = float(pr['format']['duration'])
     n_chunks = int(size_mb / max_mb) + 1
@@ -348,42 +346,31 @@ def split_audio_if_large(audio_path, max_mb=24):
     return chunks
 
 
-# ==================== ⭐ Groq Client ====================
-
-def get_groq_api_key():
-    """Streamlit Secrets (သို့) Env ကနေ API key ရှာ"""
-    key = os.environ.get("GROQ_API_KEY", "").strip()
-    if key:
-        return key
-    try:
-        key = st.secrets.get("GROQ_API_KEY", "").strip()
-        if key:
-            return key
-    except Exception:
-        pass
-    return ""
-
-
-@st.cache_resource(show_spinner=False)
 def get_groq_client():
+    """
+    ⭐ Session state ထဲက key ကို သုံး — Secrets မလို
+    """
     from groq import Groq
-    api_key = get_groq_api_key()
-    if not api_key:
-        raise Exception(
-            "GROQ_API_KEY မတွေ့ပါ။ Streamlit Cloud → Settings → Secrets မှာ "
-            "GROQ_API_KEY = \"gsk_...\" ထည့်ပါ။"
-        )
-    return Groq(api_key=api_key)
+    key = st.session_state.get("groq_key", "").strip()
+    if not key:
+        raise Exception("Groq API Key မထည့်ရသေးပါ — အပေါ်မှာ ထည့်ပါ")
+    return Groq(api_key=key)
 
 
-# ==================== ⭐ Groq Whisper Transcription ====================
+def test_groq_key(key):
+    """Key မှန်/မမှန် စမ်းသပ်"""
+    from groq import Groq
+    try:
+        client = Groq(api_key=key.strip())
+        # Light test — models list ကို ခေါ်
+        client.models.list()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
 
 def groq_transcribe_chunk(audio_path, source_lang):
-    """
-    Groq Whisper API နဲ့ audio chunk တစ်ခုကို transcribe
-    """
     client = get_groq_client()
-
     kwargs = {
         "file": (os.path.basename(audio_path), open(audio_path, "rb")),
         "model": GROQ_WHISPER_MODEL,
@@ -392,21 +379,16 @@ def groq_transcribe_chunk(audio_path, source_lang):
     }
     if source_lang:
         kwargs["language"] = source_lang
-
     try:
         result = client.audio.transcriptions.create(**kwargs)
     finally:
         kwargs["file"][1].close()
-
     if isinstance(result, str):
         return result.strip()
     return (getattr(result, "text", "") or "").strip()
 
 
 def groq_transcribe_video(video_path, source_lang, progress_cb=None):
-    """
-    Groq Whisper API နဲ့ video → source language transcript
-    """
     audio = extract_audio_for_asr(video_path, "groq_audio.wav")
     chunks = split_audio_if_large(audio)
 
@@ -418,21 +400,14 @@ def groq_transcribe_video(video_path, source_lang, progress_cb=None):
         if txt:
             texts.append(txt)
 
-    # chunk ဖိုင်တွေ ရှင်းလင်း
     for ch in chunks:
         if ch != audio:
             try: os.remove(ch)
             except: pass
-
     return " ".join(texts).strip()
 
 
-# ==================== ⭐ Groq LLM Translation ====================
-
 def groq_translate_to_myanmar(text, source_lang_label="", progress_cb=None):
-    """
-    Groq LLaMA နဲ့ source text → မြန်မာစာ ဘာသာပြန်
-    """
     client = get_groq_client()
 
     system_prompt = (
@@ -445,10 +420,8 @@ def groq_translate_to_myanmar(text, source_lang_label="", progress_cb=None):
         "- Keep the meaning accurate and natural.\n"
         "- Use proper Burmese punctuation (။ ၊).\n"
         "- Preserve names as-is (transliterate naturally into Burmese if possible).\n"
-        "- If the input has multiple sentences, keep them as separate sentences.\n"
     )
 
-    # chunk ခွဲ (LLM token limit အတွက်)
     MAX_CHARS = 2500
     chunks = [text[i:i+MAX_CHARS] for i in range(0, len(text), MAX_CHARS)]
 
@@ -456,7 +429,6 @@ def groq_translate_to_myanmar(text, source_lang_label="", progress_cb=None):
     for i, ch in enumerate(chunks):
         if progress_cb:
             progress_cb(i, len(chunks), f"🇲🇲 ဘာသာပြန် [{i+1}/{len(chunks)}]...")
-
         resp = client.chat.completions.create(
             model=GROQ_LLM_MODEL,
             messages=[
@@ -467,48 +439,35 @@ def groq_translate_to_myanmar(text, source_lang_label="", progress_cb=None):
             max_tokens=4000,
         )
         out_parts.append(resp.choices[0].message.content.strip())
-
     return " ".join(out_parts).strip()
 
 
-# ==================== ⭐ Main Pipeline ====================
-
 def extract_myanmar_transcript(video_path, source_lang, source_lang_label,
                                 progress_cb=None):
-    """
-    Video → (transcribe + translate) → မြန်မာ Transcript
-    """
-    # ၁။ Whisper — transcribe
     source_text = groq_transcribe_video(video_path, source_lang, progress_cb=None)
-
     if not source_text:
         raise Exception("စကားပြော မတွေ့ပါ — audio ထဲမှာ အသံ မရှိပါ")
 
-    # ၂။ Source = မြန်မာ ဆိုရင် ဘာသာပြန် မလိုဘူး
     if source_lang == "my":
         return {
             "source_text": source_text,
             "text": source_text,
-            "srt": _text_to_srt(source_text, 0.0),
+            "srt": _text_to_srt(source_text),
         }
 
-    # ၃။ LLM — မြန်မာ ဘာသာပြန်
     mm_text = groq_translate_to_myanmar(
         source_text, source_lang_label, progress_cb=progress_cb
     )
-
     if not mm_text:
         raise Exception("ဘာသာပြန် မအောင်မြင်ပါ")
-
     return {
         "source_text": source_text,
         "text": mm_text,
-        "srt": _text_to_srt(mm_text, 0.0),
+        "srt": _text_to_srt(mm_text),
     }
 
 
-def _text_to_srt(text, dur):
-    """ရိုးရှင်း SRT (timestamp မပါဘဲ)"""
+def _text_to_srt(text):
     sents = [s.strip() for s in re.split(r"[။!?]\s*", text) if s.strip()]
     if not sents:
         return ""
@@ -518,7 +477,7 @@ def _text_to_srt(text, dur):
     return "\n".join(lines)
 
 
-# ==================== TTS Functions ====================
+# ==================== TTS ====================
 
 def tts_demo(chunks, ref, space, cb=None):
     cl = Client(space); files = []; rf = handle_file(ref) if ref else None
@@ -560,7 +519,6 @@ async def _edge_tts_async(text, out_file, voice):
 
 def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
-
     small = []
     for c in chunks:
         for x in split_scr(c, EDGE_CHUNK):
@@ -625,7 +583,6 @@ def tts_free(chunks, out, cb=None):
 
 def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
     chunks = split_scr(text, TTS_CHUNK)
-
     if not use_voxcpm:
         return tts_free(chunks, out, cb=cb)
 
@@ -656,17 +613,15 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
     return out
 
 
-# ==================== Video Processing (Silence Cut + Render) ====================
+# ==================== Video Processing ====================
 
 def whisper_fast_for_vad(video_path):
-    """VAD — faster-whisper မရှိရင် ffmpeg silencedetect သုံး"""
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
         "-ar", "16000", "-ac", "1",
         "-c:a", "pcm_s16le", "vad_audio.wav"
     ], capture_output=True, check=True)
 
-    # silencedetect နဲ့ စကားပြော ရှာတာ
     r = subprocess.run([
         "ffmpeg", "-i", "vad_audio.wav",
         "-af", "silencedetect=noise=-30dB:d=0.5",
@@ -681,7 +636,6 @@ def whisper_fast_for_vad(video_path):
     pr = ffmpeg.probe("vad_audio.wav")
     total_dur = float(pr['format']['duration'])
 
-    # စကားပြော segment တွေ = silence မဟုတ်တဲ့ အပိုင်း
     speech = []
     prev = 0.0
     for s_start in silences:
@@ -783,7 +737,6 @@ def final_render(video_in, audio_in, output_video, tempo,
         CYAN = np.array([255, 255, 0], np.float32)
         MAGENTA = np.array([110, 30, 255], np.float32)
         IDLE = 0.14
-
         Si = (S.astype(np.int64)) % P
         P_arr = np.arange(P, dtype=np.float32)
 
@@ -890,24 +843,75 @@ st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow
 st.markdown("<div class='main-sub'>Video → Transcript → VoxCPM2 / Edge TTS → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
-# ==================== ⭐ Groq Transcript Extractor ====================
+# ==================== ⭐ Groq API Key Panel (App ထဲမှာ ထည့်) ====================
+with st.expander("🔑 Groq API Key ထည့်ရန်", expanded=(not st.session_state.groq_key)):
+    st.markdown("""
+    <div class="groq-box">
+        <b style="color:#C66BFF;font-size:1.1rem">🔑 Groq API Key ထည့်ပါ</b><br>
+        <span style="color:#b8b8d0;font-size:.9rem">
+        1. <a href="https://console.groq.com/keys" target="_blank" style="color:#6ba8ff">console.groq.com/keys</a> ဖွင့်<br>
+        2. Sign up → Create API Key → Copy (<code style="color:#7ee2a8">gsk_...</code>)<br>
+        3. အောက်မှာ Paste လုပ်ပြီး Save နှိပ်
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    new_key = st.text_input(
+        "Groq API Key",
+        value=st.session_state.groq_key,
+        type="password",
+        placeholder="gsk_xxxxxxxxxxxxxxxxxxxxx",
+        label_visibility="collapsed",
+        key="groq_key_input",
+    )
+
+    cc1, cc2, cc3 = st.columns([2, 2, 1])
+    with cc1:
+        if st.button("💾 Save Key", use_container_width=True, type="primary"):
+            k = new_key.strip()
+            if not k:
+                st.error("Key ထည့်ပါ")
+            elif not k.startswith("gsk_"):
+                st.warning("Key က gsk_ နဲ့ စရမယ် — စစ်ပါ")
+                st.session_state.groq_key = k
+                st.rerun()
+            else:
+                with st.spinner("စစ်ဆေးနေသည်..."):
+                    ok, err = test_groq_key(k)
+                if ok:
+                    st.session_state.groq_key = k
+                    st.success("✅ API Key မှန်ပါတယ်!")
+                    st.rerun()
+                else:
+                    st.error(f"❌ Key မှားနေတယ်: {err[:150]}")
+    with cc2:
+        if st.button("🗑️ Clear Key", use_container_width=True):
+            st.session_state.groq_key = ""
+            st.rerun()
+    with cc3:
+        if st.session_state.groq_key:
+            st.markdown("✅")
+
+# Status box
+if st.session_state.groq_key:
+    masked = st.session_state.groq_key[:10] + "..." + st.session_state.groq_key[-4:]
+    st.markdown(
+        f"<div class='groq-ok'>✅ Groq API Key — <code>{masked}</code></div>",
+        unsafe_allow_html=True
+    )
+st.divider()
+
+# ==================== Groq Transcript Extractor ====================
 with st.expander("🎬 Video → မြန်မာ Transcript (Groq AI)", expanded=False):
     st.caption(f"⚡ Groq Cloud — Whisper {GROQ_WHISPER_MODEL} + LLaMA {GROQ_LLM_MODEL}")
 
-    # API key check
-    if not get_groq_api_key():
-        st.error(
-            "⚠️ **GROQ_API_KEY** မတွေ့ပါ။\n\n"
-            "**Streamlit Cloud → Settings → Secrets** မှာ ထည့်ပါ:\n\n"
-            "```toml\nGROQ_API_KEY = \"gsk_...\"\n```\n\n"
-            "Key ယူရန်: https://console.groq.com/keys"
-        )
+    if not st.session_state.groq_key:
+        st.error("⚠️ အပေါ်က **🔑 Groq API Key ထည့်ရန်** panel မှာ Key အရင် ထည့်ပါ")
     else:
-        # Language selector
         src_label = st.selectbox(
             "🎙️ Video ထဲက ဘာသာစကား",
             options=list(SOURCE_LANGS.keys()),
-            index=0,  # Default: တရုတ်
+            index=0,
             key="src_lang_sel",
         )
         source_lang = SOURCE_LANGS[src_label]
@@ -919,7 +923,6 @@ with st.expander("🎬 Video → မြန်မာ Transcript (Groq AI)", expan
         else:
             st.info(f"🌐 {src_label} → 🇲🇲 မြန်မာ (transcribe + translate)")
 
-        # Video upload
         tr_vid = st.file_uploader(
             "Video for transcription",
             type=["mp4", "mov", "avi", "mkv", "webm"],
@@ -962,7 +965,6 @@ with st.expander("🎬 Video → မြန်မာ Transcript (Groq AI)", expan
                         else:
                             st.success(f"✅ Done — ⏱️ {elapsed:.1f}s — {len(mm_text)} လုံး")
 
-                            # Source text (collapse)
                             if source_lang != "my" and src_text:
                                 with st.expander(f"📄 မူရင်းစာ ({src_label})"):
                                     st.text_area(
@@ -1016,7 +1018,7 @@ with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", 
     st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
     st.caption("Canvas ဖွင့် → Transcript Copy → အောက်က box ထဲ Paste လုပ်ပါ")
 
-# ==================== Big Paste Box ====================
+# ==================== Paste Box ====================
 st.markdown("""
 <div style="text-align:center;margin:8px 0 4px">
   <span style="font-size:1.1rem;font-weight:700;
