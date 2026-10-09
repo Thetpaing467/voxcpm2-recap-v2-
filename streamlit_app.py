@@ -26,7 +26,7 @@ USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 300      # သေးလေ subtitle sync ပိုတိကျ
 EDGE_CHUNK = 200
-TTS_WORKERS = 2
+TTS_WORKERS = 3
 PNG_WORKERS = 4
 
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
@@ -396,18 +396,65 @@ def final_render(video_in, audio_in, output_video, tempo,
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    cap = cv2.VideoCapture(video_in)
-    i = 0; j = 0; k = 0; p = 0
+    import threading, queue
+    q_in = queue.Queue(maxsize=8)
+    q_out = queue.Queue(maxsize=8)
+    stop = threading.Event()
+    err = []
+
+    def qput(q, item):
+        while not stop.is_set():
+            try:
+                q.put(item, timeout=0.5); return True
+            except queue.Full:
+                pass
+        return False
+
+    def qget(q):
+        while True:
+            try:
+                return q.get(timeout=0.5)
+            except queue.Empty:
+                if stop.is_set(): return None
+
+    def reader():          # Decode thread
+        cap = cv2.VideoCapture(video_in)
+        i = 0; p = 0
+        try:
+            while not stop.is_set():
+                if not cap.grab(): break
+                t_in = i / fps
+                i += 1
+                if segments:
+                    while p < len(segments) and segments[p][1] < t_in: p += 1
+                    if not (p < len(segments) and segments[p][0] <= t_in): continue
+                ok, fr = cap.retrieve()
+                if not ok: break
+                if not qput(q_in, fr): break
+        except Exception as e:
+            err.append(e); stop.set()
+        finally:
+            cap.release()
+            qput(q_in, None)
+
+    def writer():          # ffmpeg pipe write thread
+        try:
+            while True:
+                bts = qget(q_out)
+                if bts is None: break
+                proc.stdin.write(bts)
+        except Exception as e:
+            err.append(e); stop.set()
+
+    th_r = threading.Thread(target=reader, daemon=True)
+    th_w = threading.Thread(target=writer, daemon=True)
+    th_r.start(); th_w.start()
+
+    j = 0; k = 0
     try:
         while True:
-            if not cap.grab(): break
-            t_in = i / fps
-            i += 1
-            if segments:
-                while p < len(segments) and segments[p][1] < t_in: p += 1
-                if not (p < len(segments) and segments[p][0] <= t_in): continue
-            ok, fr = cap.retrieve()
-            if not ok: break
+            fr = qget(q_in)
+            if fr is None: break
             t = j / fps
             fr = fr[cy:cy + ch, cx:cx + cw]
             if mirror: fr = fr[:, ::-1]
@@ -423,13 +470,19 @@ def final_render(video_in, audio_in, output_video, tempo,
                 reg = fr[sb["y0"]:sb["y1"]].astype(np.float32) * sb["inv"] + sb["pre"]
                 fr[sb["y0"]:sb["y1"]] = reg.astype(np.uint8)
 
-            proc.stdin.write(fr.tobytes())
+            if not qput(q_out, fr.tobytes()): break
             j += 1
+    except Exception as e:
+        err.append(e); stop.set()
     finally:
-        cap.release()
+        if not stop.is_set(): qput(q_out, None)
+        th_w.join()
+        stop.set()
+        th_r.join()
         try: proc.stdin.close()
         except: pass
         proc.wait()
+    if err: raise err[0]
     if proc.returncode != 0:
         raise Exception("Final render: ffmpeg fail")
     return output_video
@@ -552,7 +605,7 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
                 if os.path.exists(dst): os.remove(dst)
                 run_async(lambda: _edge_tts_async(c, dst, voice_id))
                 if os.path.exists(dst) and os.path.getsize(dst) > 0:
-                    time.sleep(0.7)
+                    time.sleep(0.3)
                     return (i, dst)
             except Exception:
                 pass
