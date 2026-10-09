@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import os, re, hashlib, ffmpeg, shutil, subprocess, asyncio, time
 import concurrent.futures
 import numpy as np
@@ -25,8 +24,8 @@ FINAL_PRESET = "ultrafast"
 FINAL_CRF = 20
 USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
-TTS_CHUNK = 600
-EDGE_CHUNK = 400
+TTS_CHUNK = 300      # သေးလေ subtitle sync ပိုတိကျ
+EDGE_CHUNK = 200
 TTS_WORKERS = 2
 PNG_WORKERS = 4
 
@@ -38,10 +37,6 @@ BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
 CORNER_RADIUS = 20
 
-TIKTOK_CYAN = "#25F4EE"
-TIKTOK_MAGENTA = "#FE2C55"
-TIKTOK_BLACK = "#000000"
-
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
     "male":   "my-MM-ThihaNeural",
@@ -51,21 +46,13 @@ EDGE_VOICE_FIXED = "male"
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
 
-# ==================== Helper — Download နှိပ်ရင် ရှင်းမယ့် Function ====================
 def _on_download_clear():
-    """Download နှိပ်လိုက်တာနဲ့ Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
-    # Script + Paste
+    """Download နှိပ်ရင် Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.paste_big = ""
-
-    # Preview cache
     st.session_state.pkey = None
-
-    # ⭐ Video uploader ကို key rotate လုပ်ပြီး ရှင်း
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
-
-    # ⭐ Ref Audio ကို မထိဘူး — ရှိနေမယ်
 
 
 st.markdown("""
@@ -129,6 +116,10 @@ def vid_info(p):
     return int(v['width']), int(v['height']), float(pr['format']['duration'])
 
 
+def audio_dur(p):
+    return float(ffmpeg.probe(p)['format']['duration'])
+
+
 def t2s(s):
     ms = int(round((s - int(s)) * 1000)); tot = int(s)
     if ms >= 1000: tot += 1; ms = 0
@@ -146,8 +137,8 @@ def s2t(ts):
 
 
 def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
-                box_width_ratio=BOX_WIDTH_RATIO,
-                padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
+               box_width_ratio=BOX_WIDTH_RATIO,
+               padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
     img = Image.new("RGBA", (W, H), (0,0,0,0))
     d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
@@ -192,28 +183,41 @@ def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
     return out
 
 
-def scr_to_srt(scr, dur, path, mc=30):
-    sents = [s.strip()+"။" for s in scr.replace("။","။|").split("|") if s.strip()]
-    if not sents: return None
+def split_for_sub(text, mc=30):
     parts = []
+    sents = [s.strip() + "။" for s in text.replace("။", "။|").split("|") if s.strip()]
     for s in sents:
-        s = s.replace("။။","။")
-        if len(s) <= mc: parts.append(s)
-        else:
-            cur = ""
-            for w in s.split():
-                if len(cur)+len(w)+1 <= mc: cur = cur+" "+w if cur else w
-                else:
-                    if cur: parts.append(cur.strip())
-                    cur = w
-            if cur: parts.append(cur.strip())
-    if not parts: return None
-    tot = sum(len(p) for p in parts); cur = 0.0
+        s = s.replace("။။", "။")
+        if len(s) <= mc:
+            parts.append(s); continue
+        cur = ""
+        for w in s.split():
+            if len(cur) + len(w) + 1 <= mc: cur = cur + " " + w if cur else w
+            else:
+                if cur: parts.append(cur.strip())
+                cur = w
+        if cur: parts.append(cur.strip())
+    return parts
+
+
+def scr_to_srt_timed(pieces, total, path, mc=30):
+    """pieces = [(text, audio_seconds)] — chunk တစ်ခုချင်းစီမှာ အချိန် reset ဖြစ်လို့ drift မရှိ"""
+    raw = sum(d for _, d in pieces)
+    if raw <= 0: return None
+    k = total / raw
+    cur, idx, wrote = 0.0, 1, False
     with open(path, "w", encoding="utf-8") as f:
-        for i, p in enumerate(parts, 1):
-            d = (len(p)/tot)*dur
-            f.write(f"{i}\n{t2s(cur)} --> {t2s(cur+d)}\n{p}\n\n"); cur += d
-    return path
+        for text, d in pieces:
+            parts = split_for_sub(text, mc)
+            d *= k
+            if not parts:
+                cur += d; continue
+            tot = sum(len(p) for p in parts)
+            for p in parts:
+                dd = len(p) / tot * d
+                f.write(f"{idx}\n{t2s(cur)} --> {t2s(cur+dd)}\n{p}\n\n")
+                cur += dd; idx += 1; wrote = True
+    return path if wrote else None
 
 
 def parse_srt(path):
@@ -232,41 +236,6 @@ def parse_srt(path):
         idx = ls.index(ts); txt = " ".join(ls[idx+1:]).strip()
         if txt: segs.append({"start": a, "end": b, "text": txt})
     return segs
-
-
-def overlay(vp, sp, op, fp, fs=30, pos_y=100, bh=100, ba=100,
-            box_width_ratio=BOX_WIDTH_RATIO):
-    W, H, _ = vid_info(vp); segs = parse_srt(sp)
-    if not segs: raise Exception("SRT empty")
-    os.makedirs("subtitle_pngs", exist_ok=True)
-
-    def render_one(args):
-        i, s = args
-        p = f"subtitle_pngs/s_{i:04d}.png"
-        render_png(s["text"], p, fp, W, H, fs, pos_y, bh, ba,
-                   box_width_ratio=box_width_ratio)
-        return i, {"p": p, "a": s["start"], "b": s["end"]}
-
-    pngs = [None] * len(segs)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=PNG_WORKERS) as ex:
-        for idx, item in ex.map(render_one, enumerate(segs)):
-            pngs[idx] = item
-
-    cmd = ["ffmpeg","-y","-i",vp] + sum([["-i",x["p"]] for x in pngs], [])
-    flt, cur = [], "[0:v]"
-    for i, x in enumerate(pngs):
-        lbl = f"[v{i}]"
-        flt.append(f"{cur}[{i+1}:v]overlay=0:0:enable='between(t,{x['a']:.3f},{x['b']:.3f})'{lbl}")
-        cur = lbl
-    cmd += ["-filter_complex",";".join(flt),"-map",cur,"-map","0:a?",
-            "-c:v","libx264","-crf",str(ENC_CRF),"-preset",ENC_PRESET,
-            "-tune","fastdecode","-c:a","copy",op]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-500:]}")
-    for x in pngs:
-        try: os.remove(x["p"])
-        except: pass
-    return op
 
 
 def normalize_script(t):
@@ -304,137 +273,6 @@ def split_scr(t, mc=TTS_CHUNK):
             else: cur = s
     if cur: out.append(cur)
     return out
-
-
-def video_bypass(input_video, output_video="bypass.mp4",
-                 crop_ratio=0.95, mirror=True):
-    W, H, dur = vid_info(input_video)
-    filters = []
-
-    if crop_ratio != 1.0:
-        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
-        if cw % 2 != 0: cw -= 1
-        if ch % 2 != 0: ch -= 1
-        cx = (W - cw) // 2; cy = (H - ch) // 2
-        filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
-
-    if mirror:
-        filters.append("hflip")
-
-    vf = ",".join(filters) if filters else "null"
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_video,
-        "-vf", vf,
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-        "-c:a", "copy", output_video
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
-    return output_video
-
-
-def bypass_and_neon(input_video, output_video,
-                    crop_ratio=0.95, mirror=True, thickness=30):
-    W, H, dur = vid_info(input_video)
-    pad = thickness
-    filters = []
-
-    if crop_ratio != 1.0:
-        cw = int(W * crop_ratio); ch = int(H * crop_ratio)
-        if cw % 2 != 0: cw -= 1
-        if ch % 2 != 0: ch -= 1
-        cx = (W - cw) // 2; cy = (H - ch) // 2
-        filters.append(f"crop={cw}:{ch}:{cx}:{cy}")
-
-    if mirror:
-        filters.append("hflip")
-
-    filters.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
-    filters.append(f"drawbox=x=0:y=0:w={W}:h={H}:color={TIKTOK_BLACK}@1.0:t={pad}:replace=0")
-    filters.append(f"drawbox=x=0:y=0:w={W}:h={H}:color={TIKTOK_CYAN}@1.0:t={max(3, pad//3)}:replace=0")
-    filters.append(f"drawbox=x={pad}:y={pad}:w={W-2*pad}:h={H-2*pad}:color={TIKTOK_MAGENTA}@1.0:t={max(3, pad//3)}:replace=0")
-
-    vf = ",".join(filters)
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_video,
-        "-vf", vf,
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-        "-c:a", "copy", output_video
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
-    return output_video
-
-
-def bypass_and_neon_chase(input_video, output_video,
-                          crop_ratio=0.95, mirror=True,
-                          thickness=30, speed=1.0, tail=0.35):
-    base = "bypass_base.mp4"
-    video_bypass(input_video, base, crop_ratio, mirror)
-
-    W, H, _ = vid_info(base)
-    pr = ffmpeg.probe(base)
-    vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
-    n, d = vs['r_frame_rate'].split('/')
-    fps = float(n) / float(d)
-
-    th = thickness
-    P = 2 * (W + H)
-
-    yy, xx = np.mgrid[0:H, 0:W]
-    ring = (xx < th) | (xx >= W - th) | (yy < th) | (yy >= H - th)
-    ys, xs = np.nonzero(ring)
-    dt, db, dl, dr = ys, H - 1 - ys, xs, W - 1 - xs
-    m = np.minimum.reduce([dt, db, dl, dr])
-    S = np.where(m == dt, xs,
-        np.where(m == dr, W + ys,
-        np.where(m == db, 2 * W + H + (W - xs),
-                 2 * W + 2 * H - ys))).astype(np.float32)
-
-    BASE = np.array([15, 15, 15], np.float32)
-    CYAN = np.array([238, 244, 37], np.float32)
-    MAGENTA = np.array([85, 44, 254], np.float32)
-
-    def comet(head):
-        dist = (head - S) % P
-        a = np.clip(1.0 - dist / (tail * P), 0, 1)
-        return (a ** 1.5)[:, None]
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo", "-pix_fmt", "bgr24",
-        "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
-        "-i", base,
-        "-map", "0:v", "-map", "1:a?",
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-        "-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest",
-        output_video
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
-
-    cap = cv2.VideoCapture(base)
-    i = 0
-    while True:
-        ok, fr = cap.read()
-        if not ok: break
-        t = i / fps
-        head = (t * speed * P / 4.0) % P
-        c = BASE + CYAN * comet(head) + MAGENTA * comet(head + P / 2)
-        fr[ys, xs] = np.clip(c, 0, 255).astype(np.uint8)
-        proc.stdin.write(fr.tobytes())
-        i += 1
-    cap.release()
-    proc.stdin.close()
-    proc.wait()
-    if proc.returncode != 0:
-        raise Exception("Chase Neon: ffmpeg fail")
-    return output_video
 
 
 def keep_count(video_in, segments):
@@ -608,37 +446,26 @@ def mux_audio(video_in, audio_in, output_video, tempo):
     return output_video
 
 
-def prepare_video_job(video_in, script_text, use_sub, fw_model,
-                      pos_y, use_neon, thickness, speed):
+def prepare_video_job(video_in, fw_model):
+    """Whisper/VAD နဲ့ speech segments ပဲ ရှာ (TTS နဲ့ တပြိုင်နက် run)"""
     segments = whisper_fast(video_in, fw_model)
     if not segments: raise Exception("Speech မတွေ့")
     kept, vfps = keep_count(video_in, segments)
     if kept == 0: raise Exception("Speech မတွေ့")
-    vdur = kept / vfps
-    render_err = None
-    try:
-        sp = scr_to_srt(script_text, vdur, "sub.srt") if use_sub else None
-        final_render(video_in, None, "video_only.mp4", 1.0,
-                     srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
-                     bh=BH, ba=BA, use_neon=use_neon,
-                     thickness=thickness, speed=speed, segments=segments)
-    except Exception as e:
-        render_err = str(e)
-    return {"segments": segments, "vdur": vdur, "render_err": render_err}
+    return {"segments": segments, "vdur": kept / vfps}
 
 
 # ==================== Preview ====================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
+    import math
     d = ImageDraw.Draw(img, "RGBA")
     W, H = img.size
     inner_c = max(3, thickness // 3)
 
-    d.rectangle([0, 0, W - 1, H - 1],
-                outline=(0, 0, 0, 255), width=thickness)
+    d.rectangle([0, 0, W - 1, H - 1], outline=(0, 0, 0, 255), width=thickness)
 
     if animated_phase > 0:
-        import math
         phase = (math.sin(animated_phase * math.pi) + 1) / 2
         cyan_r = int(37 * (1 - phase) + 254 * phase)
         cyan_g = int(244 * (1 - phase) + 44 * phase)
@@ -652,7 +479,6 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     offset = thickness
     d.rectangle([offset, offset, W - 1 - offset, H - 1 - offset],
                 outline=(254, 44, 85, 255), width=inner_c)
-
     return img
 
 
@@ -746,19 +572,22 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
+    # chunk တစ်ခုချင်းရဲ့ အမှန်တကယ် အသံအရှည်
+    pieces = [(chunks[i], audio_dur(a)) for i, a in enumerate(results) if a]
+
     with open("edge_concat.txt", "w", encoding="utf-8") as f:
         for a in good: f.write(f"file '{a}'\n")
 
     ffmpeg.input("edge_concat.txt", format="concat", safe=0).output(
         out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
     ).run(overwrite_output=True)
-    return out_path
+    return out_path, pieces
 
 
 def tts_free(chunks, out, cb=None):
-    edge_tts_run(chunks, out, cb=cb)
+    out, pieces = edge_tts_run(chunks, out, cb=cb)
     st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
-    return out
+    return out, pieces
 
 
 def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
@@ -786,12 +615,14 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
         st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS သီဟ Auto")
         return tts_free(chunks, out, cb=cb)
 
+    pieces = [(chunks[i], audio_dur(f)) for i, f in enumerate(files)]
+
     with open("concat.txt", "w", encoding="utf-8") as f:
         for a in files: f.write(f"file '{a}'\n")
     ffmpeg.input("concat.txt", format="concat", safe=0).output(
         out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
     ).run(overwrite_output=True)
-    return out
+    return out, pieces
 
 
 @st.cache_resource(show_spinner=False)
@@ -843,40 +674,16 @@ def whisper_fast(video_path, model=None):
     return speech_segments
 
 
-def silence_cut_v2(input_video, output_video="input_cut.mp4"):
-    t0 = time.time()
-    speech_segments = whisper_fast(input_video)
-    whisper_time = time.time() - t0
-
-    if not speech_segments: raise Exception("Speech မတွေ့")
-
-    select_exprs = [f"between(t,{s:.3f},{e:.3f})" for s, e in speech_segments]
-    select_str = "+".join(select_exprs)
-
-    cmd = ["ffmpeg", "-y", "-i", input_video,
-           "-vf", f"select='{select_str}',setpts=N/FRAME_RATE/TB",
-           "-af", f"aselect='{select_str}',asetpts=N/SR/TB",
-           "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
-           "-c:a", "aac", "-b:a", "128k", output_video]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0: raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
-
-    total = sum(e - s for s, e in speech_segments)
-    return {"segments": len(speech_segments), "duration": total, "whisper_time": whisper_time}
-
-
 # ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
-# ==================== Gemini Canvas ====================
 with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
     st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
     st.caption("Canvas ဖွင့် → Transcript Copy → အောက်က box ထဲ Paste လုပ်ပါ")
 
-# ==================== ⭐ Big Paste Box (Auto-detect) ====================
 st.markdown("""
 <div style="text-align:center;margin:8px 0 4px">
   <span style="font-size:1.1rem;font-weight:700;
@@ -920,7 +727,6 @@ div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeh
 </style>
 """, unsafe_allow_html=True)
 
-# Auto-detect paste
 if pasted_now and pasted_now.strip():
     clean = pasted_now.strip()
     if clean != st.session_state.get("last_paste", ""):
@@ -933,9 +739,8 @@ if pasted_now and pasted_now.strip():
         st.success(f"✅ Script ထဲ Auto ရောက်သွားပြီ — {len(result)} လုံး")
         st.rerun()
 
-# ==================== Script Display ====================
 script = st.text_area("Script", value=st.session_state.script, height=180,
-                       label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
+                      label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
 st.session_state.script = script
 
 c1, c2 = st.columns([3, 1])
@@ -953,7 +758,7 @@ vid = st.file_uploader(
     "📹",
     type=["mp4","mov","avi","mkv"],
     label_visibility="collapsed",
-    key=f"video_up_{st.session_state.video_up_key}"   # ⭐ dynamic key
+    key=f"video_up_{st.session_state.video_up_key}"
 )
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
@@ -997,7 +802,7 @@ if vid:
             if use_neon:
                 phase = 0.5 if neon_animated else 0.0
                 comp = draw_tiktok_border_preview(comp, thickness=neon_thickness,
-                                                   animated_phase=phase)
+                                                  animated_phase=phase)
 
             pw = 720
             comp.resize((pw, int(H * (pw / W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
@@ -1014,13 +819,12 @@ use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True)
 if use_voxcpm:
     st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS သီဟ Auto")
     ref = st.file_uploader("🎤 Ref Audio (VoxCPM2) — Optional",
-                            type=["wav","mp3","m4a"], key="ref_up")
+                           type=["wav","mp3","m4a"], key="ref_up")
     if ref:
         with open("ref.wav", "wb") as f: f.write(ref.read())
         st.session_state.ref = "ref.wav"
         st.success("✅ Ref Audio")
     else:
-        # Ref မရှိရင် disk ပေါ်မှာ ရှိမရှိ စစ်
         if os.path.exists("ref.wav"):
             st.session_state.ref = "ref.wav"
             st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
@@ -1039,22 +843,22 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     if not script_n.strip(): st.error("Script မှာ စာမပါပါ"); st.stop()
     vid.seek(0)
     with open("input.mp4", "wb") as f: f.write(vid.read())
-    _, _, vdur = vid_info("input.mp4")
 
     fw_model = None
     if not USE_FAST_VAD:
         try: fw_model = get_fw_model()
         except Exception: pass
+
+    # Whisper/VAD ကို TTS နဲ့ တပြိုင်နက် run
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    job = job_pool.submit(prepare_video_job, "input.mp4", script_n, use_sub, fw_model,
-                          pos_y, use_neon, neon_thickness, neon_speed)
+    job = job_pool.submit(prepare_video_job, "input.mp4", fw_model)
 
     t0 = time.time()
     pb = st.progress(0); txt = st.empty()
     def cb(i, tot, c): pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}]")
     try:
-        tts_all(script_n, "voice.mp3", ref=st.session_state.get("ref"),
-                cb=cb, use_voxcpm=use_voxcpm)
+        _, pieces = tts_all(script_n, "voice.mp3", ref=st.session_state.get("ref"),
+                            cb=cb, use_voxcpm=use_voxcpm)
     except Exception as e:
         st.error(f"TTS: {e}"); st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
@@ -1067,17 +871,23 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     job_pool.shutdown(wait=False)
     segments, vdur = info["segments"], info["vdur"]
 
-    adur = float(ffmpeg.probe("voice.mp3")['format']['duration'])
-    tempo = max(0.5, min(2.0, adur/vdur))
+    adur = audio_dur("voice.mp3")
+    tempo = max(0.5, min(2.0, adur / vdur))
+    eff = adur / tempo     # atempo ပြီးနောက် အသံအရှည်အမှန်
 
     with st.spinner("🎬 Finalizing..."):
         try:
-            if info["render_err"]: raise Exception(info["render_err"])
+            sp = scr_to_srt_timed(pieces, eff, "sub.srt") if use_sub else None
+            final_render("input.mp4", None, "video_only.mp4", 1.0,
+                         srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
+                         bh=BH, ba=BA, use_neon=use_neon,
+                         thickness=neon_thickness, speed=neon_speed,
+                         segments=segments)
             mux_audio("video_only.mp4", "voice.mp3", "final.mp4", tempo)
         except Exception as e:
             st.warning(f"⚠️ Fail: {e}")
             simple_merge("input.mp4", "voice.mp3", "final.mp4", tempo, segments)
-    step_times["🎬 Render (စောင့်ချိန်)"] = time.time() - t0
+    step_times["🎬 Render"] = time.time() - t0
 
     total_elapsed = time.time() - total_start
 
