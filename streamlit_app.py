@@ -381,7 +381,7 @@ def final_render(video_in, audio_in, output_video, tempo,
 
     cmd = [
         "ffmpeg", "-y",
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
     ]
     if audio_in:
@@ -440,9 +440,9 @@ def final_render(video_in, audio_in, output_video, tempo,
     def writer():          # ffmpeg pipe write thread
         try:
             while True:
-                fr_ = qget(q_out)
-                if fr_ is None: break
-                proc.stdin.write(cv2.cvtColor(fr_, cv2.COLOR_BGR2YUV_I420))
+                bts = qget(q_out)
+                if bts is None: break
+                proc.stdin.write(bts)
         except Exception as e:
             err.append(e); stop.set()
 
@@ -470,7 +470,7 @@ def final_render(video_in, audio_in, output_video, tempo,
                 reg = fr[sb["y0"]:sb["y1"]].astype(np.float32) * sb["inv"] + sb["pre"]
                 fr[sb["y0"]:sb["y1"]] = reg.astype(np.uint8)
 
-            if not qput(q_out, fr): break
+            if not qput(q_out, fr.tobytes()): break
             j += 1
     except Exception as e:
         err.append(e); stop.set()
@@ -931,11 +931,12 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with st.spinner("🎬 Finalizing..."):
         try:
             sp = scr_to_srt_timed(pieces, eff, "sub.srt") if use_sub else None
-            final_render("input.mp4", "voice.mp3", "final.mp4", tempo,
+            final_render("input.mp4", None, "video_only.mp4", 1.0,
                          srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
                          bh=BH, ba=BA, use_neon=use_neon,
                          thickness=neon_thickness, speed=neon_speed,
                          segments=segments)
+            mux_audio("video_only.mp4", "voice.mp3", "final.mp4", tempo)
         except Exception as e:
             st.warning(f"⚠️ Fail: {e}")
             simple_merge("input.mp4", "voice.mp3", "final.mp4", tempo, segments)
