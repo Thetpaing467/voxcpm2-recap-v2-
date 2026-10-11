@@ -1,9 +1,9 @@
 streamlit
 ffmpeg-python
-edge-tts>=7.0.0
-Pillow
+opencv-python
 numpy
-opencv-python-headless
+Pillow
+edge-tts>=7.0.0
 gradio_client
 faster-whisper
 onnxruntime
