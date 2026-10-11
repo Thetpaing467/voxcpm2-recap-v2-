@@ -509,14 +509,10 @@ def prepare_video_job(video_in, fw_model):
 
 def cartoonize_frame(frame, strength=1.0):
     """ဖရိမ်တစ်ခုကို ကာတွန်းစတိုင်ပြောင်းပါ (CPU)"""
-    # strength: 0.0 = မူရင်း, 1.0 = ကာတွန်း အပြည့်
     if strength <= 0:
         return frame
 
-    # ၁။ အရောင်ကို ချောမွေ့စေပါ
     color = cv2.bilateralFilter(frame, 9, 250, 250)
-
-    # ၂။ အစွန်းတွေ ရှာပါ
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.medianBlur(gray, 5)
     edges = cv2.adaptiveThreshold(
@@ -524,11 +520,8 @@ def cartoonize_frame(frame, strength=1.0):
         cv2.ADAPTIVE_THRESH_MEAN_C,
         cv2.THRESH_BINARY, 9, 9
     )
-
-    # ၃။ ပေါင်းစပ်ပါ
     cartoon = cv2.bitwise_and(color, color, mask=edges)
 
-    # ၄။ မူရင်းနဲ့ ရောပါ (strength အတိုင်း)
     if strength < 1.0:
         cartoon = cv2.addWeighted(cartoon, strength, frame, 1.0 - strength, 0)
 
@@ -543,7 +536,6 @@ def cartoonize_video(video_in, video_out, strength=1.0, progress_cb=None):
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # ယာယီ ဗီဒီယို (အသံမပါ)
     tmp = video_out.replace(".mp4", "_tmp.mp4")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(tmp, fourcc, fps, (w, h))
@@ -561,7 +553,6 @@ def cartoonize_video(video_in, video_out, strength=1.0, progress_cb=None):
     cap.release()
     out.release()
 
-    # မူရင်းအသံကို ပြန်ပေါင်းထည့်
     cmd = [
         "ffmpeg", "-y",
         "-i", tmp,
@@ -689,11 +680,17 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
             time.sleep(3 * (attempt + 1))
         return (i, None)
 
-    results = [None] * len(chunks); done = 0; skipped = []
+    results = [None] * len(chunks)
+    done = 0
+    skipped = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         for idx, dst in ex.map(tts_one, enumerate(chunks)):
-            results[idx] = dst; done += 1            if dst is None: skipped.append(idx)
-            if cb: cb(done - 1, len(chunks), chunks[idx])
+            results[idx] = dst
+            done += 1
+            if dst is None:
+                skipped.append(idx)
+            if cb:
+                cb(done - 1, len(chunks), chunks[idx])
 
     good = [a for a in results if a]
     if not good:
@@ -891,7 +888,7 @@ vid = st.file_uploader(
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# ==================== Step 2.5 — Cartoon Style (အသစ်) ====================
+# ==================== Step 2.5 — Cartoon Style ====================
 st.subheader("🎨 Step 2.5 — Cartoon Style")
 use_cartoon = st.toggle("ကာတွန်းစတိုင် ပြောင်းမလား?", value=False)
 
@@ -904,7 +901,6 @@ if use_cartoon:
         help="0.3 = မူရင်းနဲ့ နီးစပ် | 1.0 = ကာတွန်း အပြည့်"
     )
 
-    # Preview — ပထမဖရိမ်ကို ကာတွန်းပြောင်းပြပါ
     if vid and os.path.exists("preview.mp4"):
         if st.button("👁️ ကာတွန်း Preview ကြည့်", use_container_width=True):
             cap = cv2.VideoCapture("preview.mp4")
@@ -912,11 +908,10 @@ if use_cartoon:
             cap.release()
             if ok:
                 c_fr = cartoonize_frame(fr, cartoon_strength)
-                # ဘေး-by-ဘေး နှိုင်းယှဉ်
-                h, w = fr.shape[:2]
                 combo = np.hstack([fr, c_fr])
                 combo_rgb = cv2.cvtColor(combo, cv2.COLOR_BGR2RGB)
-                st.image(combo_rgb, caption="ဘယ် — မူရင်း  |  ညာ — ကာတွန်း",
+                st.image(combo_rgb,
+                         caption="ဘယ် — မူရင်း  |  ညာ — ကာတွန်း",
                          use_container_width=True)
 st.divider()
 
@@ -1001,7 +996,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     vid.seek(0)
     with open("input.mp4", "wb") as f: f.write(vid.read())
 
-    # ===== Cartoon Style (အသစ်) =====
+    # ===== Cartoon Style =====
     video_for_render = "input.mp4"
     if use_cartoon:
         t0_ct = time.time()
