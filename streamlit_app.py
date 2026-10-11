@@ -24,7 +24,7 @@ FINAL_PRESET = "ultrafast"
 FINAL_CRF = 20
 USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
-TTS_CHUNK = 300      # သေးလေ subtitle sync ပိုတိကျ
+TTS_CHUNK = 300
 EDGE_CHUNK = 200
 TTS_WORKERS = 3
 PNG_WORKERS = 4
@@ -47,7 +47,6 @@ st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="cen
 
 
 def _on_download_clear():
-    """Download နှိပ်ရင် Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.paste_big = ""
@@ -201,7 +200,6 @@ def split_for_sub(text, mc=30):
 
 
 def scr_to_srt_timed(pieces, total, path, mc=30):
-    """pieces = [(text, audio_seconds)] — chunk တစ်ခုချင်းစီမှာ အချိန် reset ဖြစ်လို့ drift မရှိ"""
     raw = sum(d for _, d in pieces)
     if raw <= 0: return None
     k = total / raw
@@ -417,7 +415,7 @@ def final_render(video_in, audio_in, output_video, tempo,
             except queue.Empty:
                 if stop.is_set(): return None
 
-    def reader():          # Decode thread
+    def reader():
         cap = cv2.VideoCapture(video_in)
         i = 0; p = 0
         try:
@@ -437,7 +435,7 @@ def final_render(video_in, audio_in, output_video, tempo,
             cap.release()
             qput(q_in, None)
 
-    def writer():          # ffmpeg pipe write thread
+    def writer():
         try:
             while True:
                 bts = qget(q_out)
@@ -500,12 +498,34 @@ def mux_audio(video_in, audio_in, output_video, tempo):
 
 
 def prepare_video_job(video_in, fw_model):
-    """Whisper/VAD နဲ့ speech segments ပဲ ရှာ (TTS နဲ့ တပြိုင်နက် run)"""
     segments = whisper_fast(video_in, fw_model)
     if not segments: raise Exception("Speech မတွေ့")
     kept, vfps = keep_count(video_in, segments)
     if kept == 0: raise Exception("Speech မတွေ့")
     return {"segments": segments, "vdur": kept / vfps}
+
+
+# ==================== Face Swap ====================
+
+@st.cache_resource(show_spinner=False)
+def get_faceswap_models():
+    """Face swap မော်ဒယ်များကို တစ်ကြိမ်တည်း load လုပ်ပါ"""
+    from face_swaper_king import load_face_analyzer, load_swapper, load_gfpgan
+    app = load_face_analyzer()
+    swapper = load_swapper()
+    gfpgan = load_gfpgan()
+    return app, swapper, gfpgan
+
+
+def run_face_swap(face_img, video_in, video_out, enhance=True):
+    """ဗီဒီယိုတစ်ခုလုံးရဲ့ မျက်နှာကို လဲလှယ်ပါ"""
+    from face_swaper_king import swap_video
+    app, swapper, gfpgan = get_faceswap_models()
+    swap_video(
+        app, swapper, face_img, video_in, video_out,
+        gfpgan=gfpgan if enhance else None
+    )
+    return video_out
 
 
 # ==================== Preview ====================
@@ -625,7 +645,6 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
-    # chunk တစ်ခုချင်းရဲ့ အမှန်တကယ် အသံအရှည်
     pieces = [(chunks[i], audio_dur(a)) for i, a in enumerate(results) if a]
 
     with open("edge_concat.txt", "w", encoding="utf-8") as f:
@@ -816,6 +835,28 @@ vid = st.file_uploader(
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
+# ==================== Step 2.5 — Face Swap (အသစ်) ====================
+st.subheader("🎭 Step 2.5 — Face Swap")
+use_faceswap = st.toggle("မျက်နှာလဲလှယ်မလား?", value=False)
+if use_faceswap:
+    st.warning("⚠️ Face Swap သည် CPU ပေါ်တွင် အလွန်နှေးသည် (တစ်စက္ကန့် ၁-၂ ဖရိမ်)။ ဗီဒီယိုရှည်ပါက အချိန် ကြာနိုင်သည်။")
+    face_img = st.file_uploader(
+        "🎭 မျက်နှာဓာတ်ပုံ (အစားထိုးမည့် မျက်နှာ)",
+        type=["jpg","jpeg","png"],
+        key="face_up"
+    )
+    enhance = st.toggle("✨ GFPGAN ဖြင့် အရည်အသွေး မြှင့်တင်မလား?", value=True)
+    if face_img:
+        with open("face.png", "wb") as f: f.write(face_img.read())
+        st.session_state.face = "face.png"
+        st.image(face_img, width=150)
+        st.success("✅ မျက်နှာဓာတ်ပုံ ရပါပြီ")
+    else:
+        st.session_state.face = None
+else:
+    st.session_state.face = None
+st.divider()
+
 use_neon = True
 neon_animated = True
 neon_thickness = 15
@@ -897,14 +938,33 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     vid.seek(0)
     with open("input.mp4", "wb") as f: f.write(vid.read())
 
+    # ===== Face Swap (အသစ်) =====
+    video_for_render = "input.mp4"
+    if use_faceswap and st.session_state.get("face"):
+        t0_fs = time.time()
+        with st.spinner("🎭 Face Swap လုပ်နေသည်... (နှေးနိုင်သည်)"):
+            try:
+                run_face_swap(
+                    st.session_state.face,
+                    "input.mp4",
+                    "input_swapped.mp4",
+                    enhance=enhance
+                )
+                video_for_render = "input_swapped.mp4"
+                st.success(f"✅ Face Swap ပြီး — {time.time()-t0_fs:.1f}s")
+            except Exception as e:
+                st.error(f"❌ Face Swap Fail: {e}")
+                st.warning("⚠️ Face Swap မပါဘဲ ဆက်လုပ်မည်")
+                video_for_render = "input.mp4"
+        step_times["🎭 Face Swap"] = time.time() - t0_fs
+
     fw_model = None
     if not USE_FAST_VAD:
         try: fw_model = get_fw_model()
         except Exception: pass
 
-    # Whisper/VAD ကို TTS နဲ့ တပြိုင်နက် run
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    job = job_pool.submit(prepare_video_job, "input.mp4", fw_model)
+    job = job_pool.submit(prepare_video_job, video_for_render, fw_model)
 
     t0 = time.time()
     pb = st.progress(0); txt = st.empty()
@@ -926,12 +986,12 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     adur = audio_dur("voice.mp3")
     tempo = max(0.5, min(2.0, adur / vdur))
-    eff = adur / tempo     # atempo ပြီးနောက် အသံအရှည်အမှန်
+    eff = adur / tempo
 
     with st.spinner("🎬 Finalizing..."):
         try:
             sp = scr_to_srt_timed(pieces, eff, "sub.srt") if use_sub else None
-            final_render("input.mp4", None, "video_only.mp4", 1.0,
+            final_render(video_for_render, None, "video_only.mp4", 1.0,
                          srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
                          bh=BH, ba=BA, use_neon=use_neon,
                          thickness=neon_thickness, speed=neon_speed,
@@ -939,7 +999,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             mux_audio("video_only.mp4", "voice.mp3", "final.mp4", tempo)
         except Exception as e:
             st.warning(f"⚠️ Fail: {e}")
-            simple_merge("input.mp4", "voice.mp3", "final.mp4", tempo, segments)
+            simple_merge(video_for_render, "voice.mp3", "final.mp4", tempo, segments)
     step_times["🎬 Render"] = time.time() - t0
 
     total_elapsed = time.time() - total_start
