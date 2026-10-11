@@ -1,9 +1,10 @@
 streamlit
 ffmpeg-python
-opencv-python
-numpy
+opencv-python-headless
 Pillow
+numpy
 edge-tts>=7.0.0
-gradio_client
+openai-whisper
 faster-whisper
-onnxruntime
+gradio_client
+google-genai
