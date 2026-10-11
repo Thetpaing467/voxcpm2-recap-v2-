@@ -8,4 +8,6 @@ openai-whisper
 faster-whisper
 gradio_client
 google-genai
-Face-Swaper-King[video]
+opencv-python
+numpy
+Pillow
