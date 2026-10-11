@@ -505,38 +505,37 @@ def prepare_video_job(video_in, fw_model):
     return {"segments": segments, "vdur": kept / vfps}
 
 
-# ==================== Colored Sketch Style (OpenCV — CPU) ====================
+# ==================== Sketch Style (OpenCV — CPU, အဖြူအမဲ) ====================
 
-def colored_sketch_frame(frame, strength=1.0, color_boost=1.15):
-    """အရောင်နဲ့ ခဲတံ ရောစပ်ထားသော ပုံစံ (CPU)"""
+def sketch_frame(frame, strength=1.0):
+    """ဖရိမ်တစ်ခုကို ခဲတံပုံစံ (အဖြူအမဲ) ပြောင်းပါ (CPU)"""
     if strength <= 0:
         return frame
 
-    # ၁။ ခဲတံမျဉ်းကြောင်း (အဖြူအမဲ)
+    # ၁။ မီးခိုးရောင် ပြောင်း
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # ၂။ မှောက်ပြန် (Invert)
     inv = 255 - gray
+
+    # ၃။ Blur လုပ်ပါ
     blur = cv2.GaussianBlur(inv, (21, 21), 0)
-    sketch_gray = cv2.divide(gray, 255 - blur, scale=256)
-    sketch_3ch = cv2.cvtColor(sketch_gray, cv2.COLOR_GRAY2BGR)
 
-    # ၂။ အရောင်ကို ချောမွေ့စေပါ
-    color = cv2.bilateralFilter(frame, 9, 250, 250)
+    # ၄။ Color Dodge (ခဲတံဆွဲသလို ဖြစ်စေရန်)
+    sketch = cv2.divide(gray, 255 - blur, scale=256)
 
-    # ၃။ အရောင်ကို ခဲတံနဲ့ ပေါင်းပါ (Color Dodge)
-    colored = cv2.divide(color, 255 - sketch_3ch, scale=256)
+    # ၅။ 3-channel ပြန်ပြောင်း (ဗီဒီယိုအတွက်)
+    sketch_bgr = cv2.cvtColor(sketch, cv2.COLOR_GRAY2BGR)
 
-    # ၄။ အရောင် တောက်ပစေရန်
-    colored = cv2.convertScaleAbs(colored, alpha=color_boost, beta=8)
-
-    # ၅။ မူရင်းနဲ့ ရောပါ (strength အတိုင်း)
+    # ၆။ မူရင်းနဲ့ ရောပါ (strength အတိုင်း)
     if strength < 1.0:
-        colored = cv2.addWeighted(colored, strength, frame, 1.0 - strength, 0)
+        sketch_bgr = cv2.addWeighted(sketch_bgr, strength, frame, 1.0 - strength, 0)
 
-    return colored
+    return sketch_bgr
 
 
-def colored_sketch_video(video_in, video_out, strength=1.0, progress_cb=None):
-    """ဗီဒီယိုတစ်ခုလုံးကို Colored Sketch ပြောင်းပါ"""
+def sketch_video(video_in, video_out, strength=1.0, progress_cb=None):
+    """ဗီဒီယိုတစ်ခုလုံးကို ခဲတံပုံစံ (အဖြူအမဲ) ပြောင်းပါ"""
     cap = cv2.VideoCapture(video_in)
     fps = cap.get(cv2.CAP_PROP_FPS)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -552,7 +551,7 @@ def colored_sketch_video(video_in, video_out, strength=1.0, progress_cb=None):
         ret, frame = cap.read()
         if not ret:
             break
-        out.write(colored_sketch_frame(frame, strength))
+        out.write(sketch_frame(frame, strength))
         i += 1
         if progress_cb and i % 30 == 0:
             progress_cb(i, total)
@@ -895,9 +894,9 @@ vid = st.file_uploader(
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# ==================== Step 2.5 — Colored Sketch ====================
-st.subheader("🎨 Step 2.5 — Colored Sketch")
-use_sketch = st.toggle("Colored Sketch ပြောင်းမလား?", value=False)
+# ==================== Step 2.5 — Sketch (အဖြူအမဲ) ====================
+st.subheader("🎨 Step 2.5 — Sketch")
+use_sketch = st.toggle("Sketch (အဖြူအမဲ) ပြောင်းမလား?", value=False)
 
 sketch_strength = 1.0
 if use_sketch:
@@ -914,11 +913,11 @@ if use_sketch:
             ok, fr = cap.read()
             cap.release()
             if ok:
-                s_fr = colored_sketch_frame(fr, sketch_strength)
+                s_fr = sketch_frame(fr, sketch_strength)
                 combo = np.hstack([fr, s_fr])
                 combo_rgb = cv2.cvtColor(combo, cv2.COLOR_BGR2RGB)
                 st.image(combo_rgb,
-                         caption="ဘယ် — မူရင်း  |  ညာ — Colored Sketch",
+                         caption="ဘယ် — မူရင်း  |  ညာ — Sketch (အဖြူအမဲ)",
                          use_container_width=True)
 st.divider()
 
@@ -1003,7 +1002,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     vid.seek(0)
     with open("input.mp4", "wb") as f: f.write(vid.read())
 
-    # ===== Colored Sketch =====
+    # ===== Sketch (အဖြူအမဲ) =====
     video_for_render = "input.mp4"
     if use_sketch:
         t0_sk = time.time()
@@ -1013,10 +1012,10 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             pb_sk.progress(min(1.0, i / max(1, total)))
             txt_sk.caption(f"🎨 Sketch {i}/{total}")
         try:
-            with st.spinner("🎨 Colored Sketch ပြောင်းနေသည်..."):
-                colored_sketch_video("input.mp4", "input_sketch.mp4",
-                                     strength=sketch_strength,
-                                     progress_cb=cb_sk)
+            with st.spinner("🎨 Sketch ပြောင်းနေသည်..."):
+                sketch_video("input.mp4", "input_sketch.mp4",
+                             strength=sketch_strength,
+                             progress_cb=cb_sk)
             video_for_render = "input_sketch.mp4"
             st.success(f"✅ Sketch ပြီး — {time.time()-t0_sk:.1f}s")
         except Exception as e:
