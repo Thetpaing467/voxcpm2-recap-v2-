@@ -24,7 +24,7 @@ FINAL_PRESET = "ultrafast"
 FINAL_CRF = 20
 USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
-TTS_CHUNK = 300
+TTS_CHUNK = 300      # သေးလေ subtitle sync ပိုတိကျ
 EDGE_CHUNK = 200
 TTS_WORKERS = 3
 PNG_WORKERS = 4
@@ -47,11 +47,25 @@ st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="cen
 
 
 def _on_download_clear():
+    """Download နှိပ်ရင် Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.paste_big = ""
     st.session_state.pkey = None
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
+
+
+def _on_paste():
+    """Paste box ထဲ စာဝင်တာနဲ့ Script ထဲ ကူး (callback ထဲမှာမို့ widget value ပြင်လို့ရ)"""
+    clean = (st.session_state.get("paste_big", "") or "").strip()
+    if not clean:
+        return
+    lines = [l.strip().strip('"\u201c\u201d').strip() for l in clean.splitlines()]
+    result = "\n\n".join(l for l in lines if l)
+    st.session_state.script = result
+    st.session_state.last_paste = clean
+    st.session_state.paste_big = ""
+    st.session_state.paste_msg = f"✅ Script ထဲ Auto ရောက်သွားပြီ — {len(result)} လုံး"
 
 
 st.markdown("""
@@ -105,7 +119,7 @@ if not st.session_state.auth:
 # ==================== Session State Init ====================
 if "script" not in st.session_state: st.session_state.script = ""
 if "video_up_key" not in st.session_state: st.session_state.video_up_key = 0
-if "selected_filter" not in st.session_state: st.session_state.selected_filter = "မူရင်း"
+if "paste_big" not in st.session_state: st.session_state.paste_big = ""
 
 
 # ==================== Utility Functions ====================
@@ -134,6 +148,244 @@ def s2t(ts):
         h, mi, se, ms = m.groups()
         return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3,'0'))/1000
     return None
+
+
+# ==================== Cartoon Styles ====================
+CARTOON_WORK_W = 560   # filter လုပ်မယ့် အကျယ် (မြန်ဖို့ downscale → ပြန် upscale)
+_PAT = {}
+
+
+def _halftone_pat(h, w, cell):
+    key = (h, w, cell)
+    p = _PAT.get(key)
+    if p is None:
+        if len(_PAT) > 6: _PAT.clear()
+        g = np.mgrid[0:h, 0:w].astype(np.float32)
+        k = 2.0 * np.pi / cell
+        p = ((np.cos(g[1] * k) + np.cos(g[0] * k)) / 4.0 + 0.5).astype(np.float32)
+        _PAT[key] = p
+    return p
+
+
+def _gray(img):
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+
+def _edges(img, blur=5, block=9, c=7):
+    g = cv2.medianBlur(_gray(img), blur)
+    return cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                 cv2.THRESH_BINARY, block, c)
+
+
+def _smooth(img, n=2, d=7, sc=45, ss=7):
+    for _ in range(n):
+        img = cv2.bilateralFilter(img, d, sc, ss)
+    return img
+
+
+def _quant(img, levels):
+    step = max(1, 256 // levels)
+    q = (img.astype(np.int16) // step) * step + step // 2
+    return np.clip(q, 0, 255).astype(np.uint8)
+
+
+def _sat(img, s=1.3, v=1.0):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[..., 1] *= s
+    hsv[..., 2] *= v
+    return cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+
+def _with_edges(color, edges):
+    return cv2.bitwise_and(color, color, mask=edges)
+
+
+def _g2b(g):
+    return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+
+
+def st_classic(img):
+    c = _quant(_smooth(img, 3), 10)
+    return _with_edges(_sat(c, 1.2), _edges(img, 7, 9, 7))
+
+
+def st_anime(img):
+    c = _quant(_smooth(img, 2, 7, 40, 7), 18)
+    c = _sat(c, 1.25, 1.05)
+    return _with_edges(c, _edges(img, 5, 11, 9))
+
+
+def st_cel(img):
+    s = _smooth(img, 2)
+    hsv = cv2.cvtColor(s, cv2.COLOR_BGR2HSV)
+    hsv[..., 2] = _quant(hsv[..., 2], 4)
+    hsv[..., 1] = _quant(hsv[..., 1], 6)
+    c = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    return _with_edges(c, _edges(img, 7, 7, 5))
+
+
+def st_comic(img):
+    c = _sat(_quant(_smooth(img, 2), 5), 1.6)
+    h, w = c.shape[:2]
+    dark = 1.0 - _gray(img).astype(np.float32) / 255.0
+    ink = (_halftone_pat(h, w, 6) > (1.0 - dark)) & (dark > 0.35)
+    c = c.copy()
+    c[ink] = (c[ink] * 0.55).astype(np.uint8)
+    return _with_edges(c, _edges(img, 7, 7, 5))
+
+
+def st_popart(img):
+    g = _quant(_gray(cv2.bilateralFilter(img, 7, 50, 7)), 4)
+    g = cv2.normalize(g, None, 0, 255, cv2.NORM_MINMAX)
+    c = cv2.applyColorMap(g, cv2.COLORMAP_PLASMA)
+    return _with_edges(c, _edges(img, 7, 9, 8))
+
+
+def st_manga(img):
+    g = _gray(img)
+    g = cv2.convertScaleAbs(g, alpha=1.25, beta=-15)
+    h, w = g.shape
+    dark = 1.0 - g.astype(np.float32) / 255.0
+    ink = _halftone_pat(h, w, 5) > (1.0 - dark)
+    out = np.where(ink, 0, 255).astype(np.uint8)
+    out = cv2.bitwise_and(out, _edges(img, 5, 9, 8))
+    return _g2b(out)
+
+
+def st_ink(img):
+    g = cv2.medianBlur(_gray(img), 7)
+    out = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                cv2.THRESH_BINARY, 11, 6)
+    return _g2b(out)
+
+
+def st_sketch(img):
+    g = _gray(img)
+    inv = 255 - g
+    b = cv2.GaussianBlur(inv, (0, 0), 9)
+    return _g2b(cv2.divide(g, 255 - b, scale=256))
+
+
+def st_colorpencil(img):
+    sk = st_sketch(img).astype(np.float32) / 255.0
+    col = _sat(_smooth(img, 2), 1.1).astype(np.float32)
+    out = col * (0.35 + 0.65 * sk)
+    out = out * 0.6 + 255.0 * 0.4 * sk
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def st_watercolor(img):
+    c = _smooth(img, 3, 9, 60, 9)
+    c = cv2.medianBlur(c, 7)
+    c = cv2.GaussianBlur(c, (0, 0), 1.2)
+    c = _sat(c, 1.15, 1.05)
+    paper = cv2.GaussianBlur(np.random.normal(0, 6, c.shape).astype(np.float32), (0, 0), 1.0)
+    c = c.astype(np.float32) * 0.9 + 255.0 * 0.1 + paper
+    soft = cv2.GaussianBlur(_gray(img), (0, 0), 1.0)
+    edge = cv2.Canny(soft, 40, 110).astype(np.float32)[..., None] / 255.0
+    c = c * (1.0 - 0.25 * edge)
+    return np.clip(c, 0, 255).astype(np.uint8)
+
+
+def st_oil(img):
+    c = cv2.edgePreservingFilter(img, flags=1, sigma_s=40, sigma_r=0.3)
+    c = cv2.medianBlur(c, 5)
+    return _sat(_quant(c, 22), 1.25)
+
+
+def st_pastel(img):
+    c = _smooth(img, 3)
+    c = _sat(c, 0.75)
+    c = cv2.addWeighted(c, 0.75, np.full_like(c, 255), 0.25, 0)
+    e = _edges(img, 7, 9, 7)
+    soft = cv2.addWeighted(c, 1.0, _g2b(255 - e), -0.35, 0)
+    return np.clip(soft, 0, 255).astype(np.uint8)
+
+
+def st_neon(img):
+    g = cv2.GaussianBlur(_gray(img), (5, 5), 0)
+    e = cv2.dilate(cv2.Canny(g, 60, 140), np.ones((2, 2), np.uint8))
+    col = _sat(_smooth(img, 1), 2.2, 1.4)
+    line = cv2.bitwise_and(col, col, mask=e)
+    glow = cv2.GaussianBlur(line, (0, 0), 5)
+    out = cv2.addWeighted(line, 1.0, glow, 1.6, 0)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def st_chalk(img):
+    g = cv2.GaussianBlur(_gray(img), (5, 5), 0)
+    e = cv2.dilate(cv2.Canny(g, 50, 130), np.ones((2, 2), np.uint8))
+    bg = np.full_like(img, (52, 62, 40))
+    soft = _g2b(cv2.GaussianBlur(_gray(img), (0, 0), 3))
+    bg = cv2.addWeighted(bg, 0.8, soft, 0.2, 0)
+    bg[e > 0] = (240, 240, 235)
+    return bg
+
+
+def st_pixel(img):
+    h, w = img.shape[:2]
+    sw = max(24, w // 8)
+    sh = max(16, int(h * sw / w))
+    small = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
+    small = _sat(_quant(small, 8), 1.3)
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+
+def st_retro(img):
+    c = st_classic(img)
+    k = np.array([[0.131, 0.534, 0.272],
+                  [0.168, 0.686, 0.349],
+                  [0.189, 0.769, 0.393]], np.float32)
+    c = cv2.transform(c, k)
+    noise = np.random.normal(0, 10, c.shape).astype(np.float32)
+    return np.clip(c.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+
+CARTOON_STYLES = [
+    ("none",        "⚪ မူရင်း (Cartoon မလုပ်)", None),
+    ("classic",     "🎨 Classic Cartoon",        st_classic),
+    ("anime",       "🌸 Anime",                  st_anime),
+    ("cel",         "🧊 Cel Shading (Game)",     st_cel),
+    ("comic",       "💥 Comic Book (Halftone)",  st_comic),
+    ("popart",      "🟣 Pop Art",                st_popart),
+    ("manga",       "📖 Manga B&W (Screentone)", st_manga),
+    ("ink",         "🖋️ Ink Drawing",            st_ink),
+    ("sketch",      "✏️ Pencil Sketch",          st_sketch),
+    ("colorpencil", "🖍️ Color Pencil",           st_colorpencil),
+    ("watercolor",  "💧 Watercolor",             st_watercolor),
+    ("oil",         "🖼️ Oil Painting",           st_oil),
+    ("pastel",      "🍬 Pastel Soft",            st_pastel),
+    ("neon",        "🌈 Neon Outline",           st_neon),
+    ("chalk",       "🧑‍🏫 Chalkboard",             st_chalk),
+    ("pixel",       "👾 Pixel Art",              st_pixel),
+    ("retro",       "📺 Retro Toon (Sepia)",     st_retro),
+]
+CARTOON_MAP = {k: f for k, _, f in CARTOON_STYLES}
+CARTOON_LABELS = {k: l for k, l, _ in CARTOON_STYLES}
+
+
+def apply_cartoon(frame, key):
+    """BGR uint8 frame → Cartoon BGR uint8 frame (shape အတူတူ၊ error ဖြစ်ရင် original ပြန်)"""
+    fn = CARTOON_MAP.get(key)
+    if fn is None:
+        return frame
+    try:
+        h, w = frame.shape[:2]
+        sc = min(1.0, CARTOON_WORK_W / float(w))
+        small = frame
+        if sc < 1.0:
+            small = cv2.resize(frame, (max(8, int(w * sc)), max(8, int(h * sc))),
+                               interpolation=cv2.INTER_AREA)
+        small = np.ascontiguousarray(small)
+        out = fn(small)
+        if out.ndim == 2:
+            out = _g2b(out)
+        if out.shape[0] != h or out.shape[1] != w:
+            out = cv2.resize(out, (w, h), interpolation=cv2.INTER_LINEAR)
+        return np.ascontiguousarray(out.astype(np.uint8))
+    except Exception:
+        return frame
+
 
 
 def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
@@ -201,6 +453,7 @@ def split_for_sub(text, mc=30):
 
 
 def scr_to_srt_timed(pieces, total, path, mc=30):
+    """pieces = [(text, audio_seconds)] — chunk တစ်ခုချင်းစီမှာ အချိန် reset ဖြစ်လို့ drift မရှိ"""
     raw = sum(d for _, d in pieces)
     if raw <= 0: return None
     k = total / raw
@@ -305,7 +558,7 @@ def simple_merge(video_in, audio_in, output_video, tempo, segments=None):
 def final_render(video_in, audio_in, output_video, tempo,
                  srt_path=None, fp=FONT_FILE, fs=FS, pos_y=100, bh=BH, ba=BA,
                  use_neon=True, thickness=15, speed=0.4, tail=0.5,
-                 crop_ratio=0.95, mirror=True, segments=None):
+                 crop_ratio=0.95, mirror=True, segments=None, cartoon="none"):
     W0, H0, _ = vid_info(video_in)
     pr = ffmpeg.probe(video_in)
     vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
@@ -416,7 +669,7 @@ def final_render(video_in, audio_in, output_video, tempo,
             except queue.Empty:
                 if stop.is_set(): return None
 
-    def reader():
+    def reader():          # Decode thread
         cap = cv2.VideoCapture(video_in)
         i = 0; p = 0
         try:
@@ -436,7 +689,7 @@ def final_render(video_in, audio_in, output_video, tempo,
             cap.release()
             qput(q_in, None)
 
-    def writer():
+    def writer():          # ffmpeg pipe write thread
         try:
             while True:
                 bts = qget(q_out)
@@ -449,6 +702,8 @@ def final_render(video_in, audio_in, output_video, tempo,
     th_w = threading.Thread(target=writer, daemon=True)
     th_r.start(); th_w.start()
 
+    use_cartoon = bool(cartoon) and cartoon != "none" and cartoon in CARTOON_MAP
+
     j = 0; k = 0
     try:
         while True:
@@ -458,6 +713,9 @@ def final_render(video_in, audio_in, output_video, tempo,
             fr = fr[cy:cy + ch, cx:cx + cw]
             if mirror: fr = fr[:, ::-1]
             fr = np.ascontiguousarray(fr)
+
+            if use_cartoon:
+                fr = apply_cartoon(fr, cartoon)      # Cartoon filter (neon/subtitle မတိုင်ခင်)
 
             if use_neon:
                 head = (t * speed * P / 4.0) % P
@@ -499,307 +757,12 @@ def mux_audio(video_in, audio_in, output_video, tempo):
 
 
 def prepare_video_job(video_in, fw_model):
+    """Whisper/VAD နဲ့ speech segments ပဲ ရှာ (TTS နဲ့ တပြိုင်နက် run)"""
     segments = whisper_fast(video_in, fw_model)
     if not segments: raise Exception("Speech မတွေ့")
     kept, vfps = keep_count(video_in, segments)
     if kept == 0: raise Exception("Speech မတွေ့")
     return {"segments": segments, "vdur": kept / vfps}
-
-
-# ==================== Filters & Cartoon Styles (OpenCV — CPU) ====================
-
-def _gray(frame):
-    return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-def _edges(gray, block=9, c=9):
-    g = cv2.medianBlur(gray, 5)
-    return cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                  cv2.THRESH_BINARY, block, c)
-
-def _sketch_gray(frame):
-    g = _gray(frame)
-    inv = 255 - g
-    blur = cv2.GaussianBlur(inv, (21, 21), 0)
-    return cv2.divide(g, 255 - blur, scale=256)
-
-# ---- Filters ----
-
-def f_original(f): return f
-
-def f_sketch(f):
-    return cv2.cvtColor(_sketch_gray(f), cv2.COLOR_GRAY2BGR)
-
-def f_colored_sketch(f):
-    sk = cv2.cvtColor(_sketch_gray(f), cv2.COLOR_GRAY2BGR)
-    color = cv2.bilateralFilter(f, 9, 250, 250)
-    out = cv2.divide(color, 255 - sk, scale=256)
-    return cv2.convertScaleAbs(out, alpha=1.15, beta=8)
-
-def f_cartoon(f):
-    color = cv2.bilateralFilter(f, 9, 250, 250)
-    return cv2.bitwise_and(color, color, mask=_edges(_gray(f)))
-
-def f_comic(f):
-    color = cv2.bilateralFilter(f, 9, 300, 300)
-    quant = (color // 64) * 64
-    return cv2.bitwise_and(quant, quant, mask=_edges(_gray(f)))
-
-def f_watercolor(f):
-    return cv2.stylization(cv2.bilateralFilter(f, 9, 250, 250),
-                           sigma_s=60, sigma_r=0.07)
-
-def f_oil(f):
-    try:
-        return cv2.xphoto.oilPainting(f, 7, 1)
-    except Exception:
-        return cv2.stylization(f, sigma_s=60, sigma_r=0.07)
-
-def f_old_film(f):
-    g = _gray(f)
-    sepia = cv2.applyColorMap(g, cv2.COLORMAP_BONE)
-    noise = np.random.randint(0, 30, f.shape, dtype=np.uint8)
-    return cv2.add(sepia, noise)
-
-def f_neon(f):
-    edges = cv2.dilate(cv2.Canny(_gray(f), 50, 150),
-                       np.ones((2, 2), np.uint8), iterations=1)
-    colored = np.zeros_like(f)
-    colored[:, :, 2] = edges
-    colored[:, :, 0] = edges
-    colored[:, :, 1] = edges // 3
-    return cv2.addWeighted(f, 0.3, colored, 1.5, 0)
-
-def f_pixel(f, ps=8):
-    h, w = f.shape[:2]
-    small = cv2.resize(f, (max(1, w // ps), max(1, h // ps)),
-                       interpolation=cv2.INTER_LINEAR)
-    return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-
-def f_vintage(f):
-    sepia = cv2.applyColorMap(_gray(f), cv2.COLORMAP_PINK)
-    return cv2.addWeighted(f, 0.4, sepia, 0.8, 0)
-
-def f_bw(f):
-    return cv2.cvtColor(_gray(f), cv2.COLOR_GRAY2BGR)
-
-def f_warm(f):
-    b, g, r = cv2.split(f)
-    r = cv2.add(r, 30); b = cv2.subtract(b, 20)
-    return cv2.merge([b, g, r])
-
-def f_cool(f):
-    b, g, r = cv2.split(f)
-    b = cv2.add(b, 30); r = cv2.subtract(r, 20)
-    return cv2.merge([b, g, r])
-
-# ---- Cartoon Styles ----
-
-def c_classic(f):
-    color = cv2.bilateralFilter(f, 9, 250, 250)
-    return cv2.bitwise_and(color, color, mask=_edges(_gray(f)))
-
-def c_anime(f):
-    """ဂျပန်ကာတွန်း စတိုင် — အရောင် တောက်ပပြီး မျဉ်းကြောင်း ထူ"""
-    color = cv2.bilateralFilter(f, 9, 200, 200)
-    color = cv2.convertScaleAbs(color, alpha=1.2, beta=10)
-    g = _gray(f)
-    edges = cv2.Canny(g, 60, 140)
-    edges = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
-    edges_3 = cv2.cvtColor(255 - edges, cv2.COLOR_GRAY2BGR)
-    return cv2.multiply(color, edges_3, scale=1/255.0).astype(np.uint8)
-
-def c_manga(f):
-    """ဂျပန်ကာတွန်းစာအုပ် (အဖြူအမဲ) — မျဉ်းကြောင်း ထူ"""
-    g = _gray(f)
-    g = cv2.medianBlur(g, 5)
-    edges = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                  cv2.THRESH_BINARY, 9, 7)
-    return cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-
-def c_comic_book(f):
-    """အနောက်တိုင်း ကာတွန်းစာအုပ် — အရောင် အနည်းငယ် + မျဉ်းကြောင်း ထူ"""
-    color = cv2.bilateralFilter(f, 9, 300, 300)
-    quant = (color // 80) * 80
-    g = _gray(f)
-    edges = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                  cv2.THRESH_BINARY, 9, 6)
-    edges_3 = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-    return cv2.bitwise_and(quant, edges_3)
-
-def c_pixel_art(f, ps=6):
-    h, w = f.shape[:2]
-    small = cv2.resize(f, (max(1, w // ps), max(1, h // ps)),
-                       interpolation=cv2.INTER_LINEAR)
-    return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-
-def c_pop_art(f):
-    """Pop Art — အရောင် ၄ ရောင် ပဲ သုံး"""
-    color = cv2.bilateralFilter(f, 9, 250, 250)
-    quant = (color // 64) * 64
-    quant = quant + 32
-    return np.clip(quant, 0, 255).astype(np.uint8)
-
-def c_cel_shading(f):
-    """3D ကာတွန်း — အရောင် ၆ ဆင့်"""
-    color = cv2.bilateralFilter(f, 9, 200, 200)
-    quant = (color // 42) * 42
-    g = _gray(f)
-    edges = cv2.Canny(g, 80, 160)
-    edges_3 = cv2.cvtColor(255 - edges, cv2.COLOR_GRAY2BGR)
-    return cv2.multiply(quant, edges_3, scale=1/255.0).astype(np.uint8)
-
-def c_line_art(f):
-    """မျဉ်းကြောင်း သက်သက် — အဖြူနောက်ခံ"""
-    g = _gray(f)
-    inv = 255 - g
-    blur = cv2.GaussianBlur(inv, (15, 15), 0)
-    lines = cv2.divide(g, 255 - blur, scale=256)
-    return cv2.cvtColor(lines, cv2.COLOR_GRAY2BGR)
-
-def c_caricature(f):
-    """ပုံကြီးချဲ့ ကာတွန်း — အရောင် တောက်ပပြီး မျဉ်းကြောင်း ထူ"""
-    color = cv2.bilateralFilter(f, 15, 300, 300)
-    color = cv2.convertScaleAbs(color, alpha=1.3, beta=15)
-    g = _gray(f)
-    edges = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                  cv2.THRESH_BINARY, 7, 5)
-    edges_3 = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-    return cv2.bitwise_and(color, edges_3)
-
-def c_ghibli(f):
-    """ဂျီဘလီ စတိုင် — အရောင် နူးညံ့"""
-    color = cv2.bilateralFilter(f, 15, 150, 150)
-    color = cv2.convertScaleAbs(color, alpha=1.05, beta=20)
-    color = cv2.addWeighted(color, 0.85,
-                            np.full_like(color, (60, 80, 120)), 0.15, 0)
-    return color
-
-def c_disney(f):
-    """ဒစ္စနီ စတိုင် — အရောင် တောက်ပပြီး ချိုမြိန်"""
-    color = cv2.bilateralFilter(f, 9, 200, 200)
-    color = cv2.convertScaleAbs(color, alpha=1.15, beta=20)
-    b, g, r = cv2.split(color)
-    r = cv2.add(r, 15)
-    b = cv2.add(b, 10)
-    return cv2.merge([b, g, r])
-
-def c_simpsons(f):
-    """ဆင်းဆန်း စတိုင် — အဝါရောင် လွှမ်း"""
-    color = cv2.bilateralFilter(f, 9, 250, 250)
-    quant = (color // 64) * 64
-    b, g, r = cv2.split(quant)
-    r = cv2.add(r, 40)
-    g = cv2.add(g, 30)
-    return cv2.merge([b, g, r])
-
-def c_rick_morty(f):
-    """ရစ်ခ် စတိုင် — အရောင် လွန်ကဲ"""
-    color = cv2.bilateralFilter(f, 9, 300, 300)
-    color = cv2.convertScaleAbs(color, alpha=1.4, beta=20)
-    return color
-
-def c_south_park(f):
-    """ဆောက်ပါခ် စတိုင် — အရောင် ရိုးရိုး"""
-    color = cv2.bilateralFilter(f, 9, 150, 150)
-    quant = (color // 100) * 100
-    return np.clip(quant, 0, 255).astype(np.uint8)
-
-
-FILTERS = {
-    "မူရင်း": f_original,
-    "Sketch (ခဲတံ)": f_sketch,
-    "Colored Sketch": f_colored_sketch,
-    "Watercolor (ရေဆေး)": f_watercolor,
-    "Oil Painting (ဆီဆေး)": f_oil,
-    "Old Film (ရုပ်ရှင်ဟောင်း)": f_old_film,
-    "Neon (အလင်းတန်း)": f_neon,
-    "Vintage (ရှေးခေတ်)": f_vintage,
-    "Black & White": f_bw,
-    "Warm (အရောင်ပူ)": f_warm,
-    "Cool (အရောင်အေး)": f_cool,
-    "Pixel Art (ဂိမ်း)": f_pixel,
-}
-
-CARTOONS = {
-    "Classic Cartoon": c_classic,
-    "Anime (ဂျပန်)": c_anime,
-    "Manga (အဖြူအမဲ)": c_manga,
-    "Comic Book": c_comic_book,
-    "Pixel Art Cartoon": c_pixel_art,
-    "Pop Art": c_pop_art,
-    "Cel Shading (3D)": c_cel_shading,
-    "Line Art (မျဉ်းကြောင်း)": c_line_art,
-    "Caricature (ပုံကြီး)": c_caricature,
-    "Ghibli Style": c_ghibli,
-    "Disney Style": c_disney,
-    "Simpsons Style": c_simpsons,
-    "Rick & Morty": c_rick_morty,
-    "South Park": c_south_park,
-}
-
-ALL_STYLES = {}
-ALL_STYLES.update(FILTERS)
-ALL_STYLES.update(CARTOONS)
-
-
-def apply_style(frame, name):
-    fn = ALL_STYLES.get(name, f_original)
-    try:
-        return fn(frame)
-    except Exception:
-        return frame
-
-
-def style_video(video_in, video_out, style_name, progress_cb=None):
-    """ဗီဒီယိုတစ်ခုလုံးကို Style ပြောင်းပါ"""
-    if style_name == "မူရင်း":
-        shutil.copy(video_in, video_out)
-        return video_out
-
-    cap = cv2.VideoCapture(video_in)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    tmp = video_out.replace(".mp4", "_tmp.mp4")
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(tmp, fourcc, fps, (w, h))
-
-    i = 0
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        out.write(apply_style(frame, style_name))
-        i += 1
-        if progress_cb and i % 30 == 0:
-            progress_cb(i, total)
-
-    cap.release()
-    out.release()
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", tmp,
-        "-i", video_in,
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", AUDIO_BITRATE,
-        "-map", "0:v:0",
-        "-map", "1:a:0?",
-        "-shortest",
-        video_out
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="ignore")
-    try:
-        os.remove(tmp)
-    except:
-        pass
-    if r.returncode != 0:
-        raise Exception(f"Style mux: {(r.stderr or '')[-300:]}")
-    return video_out
 
 
 # ==================== Preview ====================
@@ -906,17 +869,12 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
             time.sleep(3 * (attempt + 1))
         return (i, None)
 
-    results = [None] * len(chunks)
-    done = 0
-    skipped = []
+    results = [None] * len(chunks); done = 0; skipped = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         for idx, dst in ex.map(tts_one, enumerate(chunks)):
-            results[idx] = dst
-            done += 1
-            if dst is None:
-                skipped.append(idx)
-            if cb:
-                cb(done - 1, len(chunks), chunks[idx])
+            results[idx] = dst; done += 1
+            if dst is None: skipped.append(idx)
+            if cb: cb(done - 1, len(chunks), chunks[idx])
 
     good = [a for a in results if a]
     if not good:
@@ -924,6 +882,7 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
+    # chunk တစ်ခုချင်းရဲ့ အမှန်တကယ် အသံအရှည်
     pieces = [(chunks[i], audio_dur(a)) for i, a in enumerate(results) if a]
 
     with open("edge_concat.txt", "w", encoding="utf-8") as f:
@@ -1028,7 +987,7 @@ def whisper_fast(video_path, model=None):
 # ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Cartoon Recap</div>", unsafe_allow_html=True)
 st.divider()
 
 with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
@@ -1046,11 +1005,11 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-pasted_now = st.text_area(
+st.text_area(
     "paste",
-    value="",
     height=80,
     key="paste_big",
+    on_change=_on_paste,
     label_visibility="collapsed",
     placeholder="📋  ဒီနေရာကို Long-press → Paste  (သို့)  Ctrl+V  —  ချက်ချင်း Script ထဲ ရောက်မယ်",
 )
@@ -1078,17 +1037,9 @@ div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeh
 </style>
 """, unsafe_allow_html=True)
 
-if pasted_now and pasted_now.strip():
-    clean = pasted_now.strip()
-    if clean != st.session_state.get("last_paste", ""):
-        st.session_state.last_paste = clean
-        lines = [l.strip().strip('"\u201c\u201d').strip()
-                 for l in clean.splitlines()]
-        result = "\n\n".join(l for l in lines if l)
-        st.session_state.script = result
-        st.session_state.paste_big = ""
-        st.success(f"✅ Script ထဲ Auto ရောက်သွားပြီ — {len(result)} လုံး")
-        st.rerun()
+_pm = st.session_state.pop("paste_msg", None)
+if _pm:
+    st.success(_pm)
 
 script = st.text_area("Script", value=st.session_state.script, height=180,
                       label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
@@ -1114,97 +1065,24 @@ vid = st.file_uploader(
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# ==================== Step 2.5 — Style & Filter ====================
-st.subheader("🎨 Step 2.5 — Style & Filter")
-use_style = st.toggle("Style / Filter သုံးမလား?", value=False)
-
-selected_style = "မူရင်း"
-if use_style:
-    st.info("✅ CPU နဲ့ အလုပ်လုပ်သည် — GPU မလိုပါ။ Preview ကြည့်ပြီး ကြိုက်တာ ရွေးပါ။")
-
-    # Preview အားလုံး ပြပါ
-    if vid and os.path.exists("preview.mp4"):
-        if st.button("👁️ Style / Filter အားလုံး Preview ကြည့်", use_container_width=True):
-            cap = cv2.VideoCapture("preview.mp4")
-            ok, fr = cap.read()
-            cap.release()
-            if ok:
-                st.markdown("### 🎬 Filter များ")
-                f_names = list(FILTERS.keys())
-                cols = st.columns(3)
-                for i, name in enumerate(f_names):
-                    with cols[i % 3]:
-                        try:
-                            out_fr = apply_style(fr.copy(), name)
-                            st.image(cv2.cvtColor(out_fr, cv2.COLOR_BGR2RGB),
-                                     caption=name, use_container_width=True)
-                        except Exception:
-                            st.image(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB),
-                                     caption=name + " (error)",
-                                     use_container_width=True)
-
-                st.markdown("### 🎨 Cartoon စတိုင်များ")
-                c_names = list(CARTOONS.keys())
-                cols2 = st.columns(3)
-                for i, name in enumerate(c_names):
-                    with cols2[i % 3]:
-                        try:
-                            out_fr = apply_style(fr.copy(), name)
-                            st.image(cv2.cvtColor(out_fr, cv2.COLOR_BGR2RGB),
-                                     caption=name, use_container_width=True)
-                        except Exception:
-                            st.image(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB),
-                                     caption=name + " (error)",
-                                     use_container_width=True)
-
-                st.success(f"✅ Preview ပြီး — Filter {len(f_names)} + Cartoon {len(c_names)}")
-
-    # ရွေးချယ်မှု
-    st.markdown("**🎨 Filter များ**")
-    f_names = list(FILTERS.keys())
-    f_default = f_names.index(st.session_state.selected_filter) \
-        if st.session_state.selected_filter in f_names else 0
-    selected_filter = st.selectbox("Filter ရွေးပါ", f_names,
-                                    index=f_default, key="f_select")
-
-    st.markdown("**🎬 Cartoon စတိုင်များ**")
-    c_names = list(CARTOONS.keys())
-    c_default = c_names.index(st.session_state.selected_filter) \
-        if st.session_state.selected_filter in c_names else 0
-    selected_cartoon = st.selectbox("Cartoon ရွေးပါ", c_names,
-                                     index=c_default, key="c_select")
-
-    # နောက်ဆုံး ရွေးချယ်မှု
-    final_choice = st.radio(
-        "🎯 ဘယ်ဟာ သုံးမလဲ?",
-        ["Filter", "Cartoon"],
-        horizontal=True,
-        key="choice_radio"
-    )
-    selected_style = selected_filter if final_choice == "Filter" else selected_cartoon
-    st.session_state.selected_filter = selected_style
-
-    # ရွေးထားတာကို ဘေး-by-ဘေး ပြပါ
-    if vid and os.path.exists("preview.mp4") and selected_style != "မူရင်း":
-        cap = cv2.VideoCapture("preview.mp4")
-        ok, fr = cap.read()
-        cap.release()
-        if ok:
-            try:
-                out_fr = apply_style(fr.copy(), selected_style)
-                combo = np.hstack([fr, out_fr])
-                combo_rgb = cv2.cvtColor(combo, cv2.COLOR_BGR2RGB)
-                st.image(combo_rgb,
-                         caption=f"ဘယ် — မူရင်း  |  ညာ — {selected_style}",
-                         use_container_width=True)
-            except Exception as e:
-                st.error(f"Style error: {e}")
-st.divider()
-
 use_neon = True
 neon_animated = True
 neon_thickness = 15
 neon_speed = 0.4
+
+# ==================== Step 3 — Cartoon Style ====================
+st.subheader("🎨 Step 3 — Cartoon Style")
+_style_keys = [k for k, _, _ in CARTOON_STYLES]
+cartoon_key = st.selectbox(
+    "Cartoon Style",
+    _style_keys,
+    index=_style_keys.index("classic"),
+    format_func=lambda k: CARTOON_LABELS.get(k, k),
+    label_visibility="collapsed",
+    key="cartoon_style",
+)
+st.caption("💡 Step 5 Preview မှာ ရွေးထားတဲ့ Style ကို ကြိုကြည့်လို့ရ — Style အားလုံးကိုလည်း တစ်ပြိုင်နက်ကြည့်လို့ရ")
+st.divider()
 
 # ==================== Step 4 — Subtitle ====================
 st.subheader("📝 Step 4 — Subtitle")
@@ -1217,6 +1095,7 @@ st.divider()
 # ==================== Step 5 — Preview ====================
 if vid:
     st.subheader("🖼️ Step 5 — Preview")
+    fr_full = None
     with st.spinner("Preview..."):
         pkey = (vid.name, vid.size)
         if st.session_state.get("pkey") != pkey or not os.path.exists("preview.mp4"):
@@ -1229,11 +1108,19 @@ if vid:
                    box_width_ratio=BOX_WIDTH_RATIO)
 
         cap = cv2.VideoCapture("preview.mp4")
+        nfr = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if nfr > 8:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, nfr // 4)
         ok, fr = cap.read()
+        if not ok:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, fr = cap.read()
         cap.release()
 
         if ok:
-            bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+            fr_full = fr
+            fr_c = apply_cartoon(fr, cartoon_key)       # Cartoon Preview
+            bg = Image.fromarray(cv2.cvtColor(fr_c, cv2.COLOR_BGR2RGB)).convert("RGBA")
             fg = Image.open("prev.png").convert("RGBA")
             comp = Image.alpha_composite(bg, fg)
 
@@ -1245,8 +1132,21 @@ if vid:
             pw = 720
             comp.resize((pw, int(H * (pw / W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
             st.image("prev_out.png", use_container_width=True)
+            st.caption(f"🎨 {CARTOON_LABELS.get(cartoon_key, '')}")
             if use_neon and neon_animated:
                 st.caption("🎬 Animated — Output Video မှာ အလင်းတန်း ပတ်ပြေးနေမည်")
+
+    if fr_full is not None:
+        if st.toggle("🖼️ Cartoon Style အားလုံး တစ်ပြိုင်နက် ကြည့်မယ်", value=False, key="gallery_on"):
+            tw = 320
+            th_ = max(16, int(fr_full.shape[0] * tw / fr_full.shape[1]))
+            thumb = cv2.resize(fr_full, (tw, th_), interpolation=cv2.INTER_AREA)
+            with st.spinner("Styles အားလုံး ပြင်နေ..."):
+                gcols = st.columns(2)
+                for n_i, (k_, l_, _f) in enumerate(CARTOON_STYLES):
+                    o_ = apply_cartoon(thumb, k_)
+                    gcols[n_i % 2].image(cv2.cvtColor(o_, cv2.COLOR_BGR2RGB),
+                                         caption=l_, use_container_width=True)
 st.divider()
 
 # ==================== Step 6 — Generate ====================
@@ -1282,35 +1182,14 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     vid.seek(0)
     with open("input.mp4", "wb") as f: f.write(vid.read())
 
-    # ===== Style / Filter =====
-    video_for_render = "input.mp4"
-    if use_style and selected_style != "မူရင်း":
-        t0_fl = time.time()
-        pb_fl = st.progress(0)
-        txt_fl = st.empty()
-        def cb_fl(i, total):
-            pb_fl.progress(min(1.0, i / max(1, total)))
-            txt_fl.caption(f"🎨 {selected_style} {i}/{total}")
-        try:
-            with st.spinner(f"🎨 {selected_style} ပြောင်းနေသည်..."):
-                style_video("input.mp4", "input_styled.mp4",
-                            selected_style,
-                            progress_cb=cb_fl)
-            video_for_render = "input_styled.mp4"
-            st.success(f"✅ {selected_style} ပြီး — {time.time()-t0_fl:.1f}s")
-        except Exception as e:
-            st.error(f"❌ Style Fail: {e}")
-            st.warning("⚠️ Style မပါဘဲ ဆက်လုပ်မည်")
-            video_for_render = "input.mp4"
-        step_times[f"🎨 {selected_style}"] = time.time() - t0_fl
-
     fw_model = None
     if not USE_FAST_VAD:
         try: fw_model = get_fw_model()
         except Exception: pass
 
+    # Whisper/VAD ကို TTS နဲ့ တပြိုင်နက် run
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    job = job_pool.submit(prepare_video_job, video_for_render, fw_model)
+    job = job_pool.submit(prepare_video_job, "input.mp4", fw_model)
 
     t0 = time.time()
     pb = st.progress(0); txt = st.empty()
@@ -1332,20 +1211,20 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     adur = audio_dur("voice.mp3")
     tempo = max(0.5, min(2.0, adur / vdur))
-    eff = adur / tempo
+    eff = adur / tempo     # atempo ပြီးနောက် အသံအရှည်အမှန်
 
-    with st.spinner("🎬 Finalizing..."):
+    with st.spinner(f"🎬 Finalizing — {CARTOON_LABELS.get(cartoon_key, '')}..."):
         try:
             sp = scr_to_srt_timed(pieces, eff, "sub.srt") if use_sub else None
-            final_render(video_for_render, None, "video_only.mp4", 1.0,
+            final_render("input.mp4", None, "video_only.mp4", 1.0,
                          srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
                          bh=BH, ba=BA, use_neon=use_neon,
                          thickness=neon_thickness, speed=neon_speed,
-                         segments=segments)
+                         segments=segments, cartoon=cartoon_key)
             mux_audio("video_only.mp4", "voice.mp3", "final.mp4", tempo)
         except Exception as e:
-            st.warning(f"⚠️ Fail: {e}")
-            simple_merge(video_for_render, "voice.mp3", "final.mp4", tempo, segments)
+            st.warning(f"⚠️ Fail: {e} — Cartoon/Subtitle/Neon မပါဘဲ Simple Merge နဲ့ ထုတ်ပေးမယ်")
+            simple_merge("input.mp4", "voice.mp3", "final.mp4", tempo, segments)
     step_times["🎬 Render"] = time.time() - t0
 
     total_elapsed = time.time() - total_start
