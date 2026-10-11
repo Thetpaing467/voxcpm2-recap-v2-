@@ -105,6 +105,7 @@ if not st.session_state.auth:
 # ==================== Session State Init ====================
 if "script" not in st.session_state: st.session_state.script = ""
 if "video_up_key" not in st.session_state: st.session_state.video_up_key = 0
+if "selected_filter" not in st.session_state: st.session_state.selected_filter = "မူရင်း"
 
 
 # ==================== Utility Functions ====================
@@ -505,37 +506,131 @@ def prepare_video_job(video_in, fw_model):
     return {"segments": segments, "vdur": kept / vfps}
 
 
-# ==================== Sketch Style (OpenCV — CPU, အဖြူအမဲ) ====================
+# ==================== Filters (OpenCV — CPU) ====================
 
-def sketch_frame(frame, strength=1.0):
-    """ဖရိမ်တစ်ခုကို ခဲတံပုံစံ (အဖြူအမဲ) ပြောင်းပါ (CPU)"""
-    if strength <= 0:
+def f_original(frame):
+    return frame
+
+def f_sketch(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    inv = 255 - gray
+    blur = cv2.GaussianBlur(inv, (21, 21), 0)
+    sketch = cv2.divide(gray, 255 - blur, scale=256)
+    return cv2.cvtColor(sketch, cv2.COLOR_GRAY2BGR)
+
+def f_colored_sketch(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    inv = 255 - gray
+    blur = cv2.GaussianBlur(inv, (21, 21), 0)
+    sketch_gray = cv2.divide(gray, 255 - blur, scale=256)
+    sketch_3ch = cv2.cvtColor(sketch_gray, cv2.COLOR_GRAY2BGR)
+    color = cv2.bilateralFilter(frame, 9, 250, 250)
+    colored = cv2.divide(color, 255 - sketch_3ch, scale=256)
+    return cv2.convertScaleAbs(colored, alpha=1.15, beta=8)
+
+def f_cartoon(frame):
+    color = cv2.bilateralFilter(frame, 9, 250, 250)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.medianBlur(gray, 5)
+    edges = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                  cv2.THRESH_BINARY, 9, 9)
+    return cv2.bitwise_and(color, color, mask=edges)
+
+def f_comic(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.medianBlur(gray, 5)
+    edges = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                  cv2.THRESH_BINARY, 9, 9)
+    color = cv2.bilateralFilter(frame, 9, 300, 300)
+    quant = (color // 64) * 64
+    return cv2.bitwise_and(quant, quant, mask=edges)
+
+def f_watercolor(frame):
+    color = cv2.bilateralFilter(frame, 9, 250, 250)
+    return cv2.stylization(color, sigma_s=60, sigma_r=0.07)
+
+def f_oil(frame):
+    try:
+        return cv2.xphoto.oilPainting(frame, 7, 1)
+    except Exception:
+        return cv2.stylization(frame, sigma_s=60, sigma_r=0.07)
+
+def f_old_film(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    sepia = cv2.applyColorMap(gray, cv2.COLORMAP_BONE)
+    noise = np.random.randint(0, 30, frame.shape, dtype=np.uint8)
+    return cv2.add(sepia, noise)
+
+def f_neon(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    edges = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
+    colored = np.zeros_like(frame)
+    colored[:, :, 2] = edges
+    colored[:, :, 0] = edges
+    colored[:, :, 1] = edges // 3
+    return cv2.addWeighted(frame, 0.3, colored, 1.5, 0)
+
+def f_pixel(frame, pixel_size=8):
+    h, w = frame.shape[:2]
+    small = cv2.resize(frame, (w // pixel_size, h // pixel_size),
+                       interpolation=cv2.INTER_LINEAR)
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+def f_vintage(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    sepia = cv2.applyColorMap(gray, cv2.COLORMAP_PINK)
+    return cv2.addWeighted(frame, 0.4, sepia, 0.8, 0)
+
+def f_bw(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+def f_warm(frame):
+    b, g, r = cv2.split(frame)
+    r = cv2.add(r, 30)
+    b = cv2.subtract(b, 20)
+    return cv2.merge([b, g, r])
+
+def f_cool(frame):
+    b, g, r = cv2.split(frame)
+    b = cv2.add(b, 30)
+    r = cv2.subtract(r, 20)
+    return cv2.merge([b, g, r])
+
+
+FILTERS = {
+    "မူရင်း": f_original,
+    "Sketch (ခဲတံ)": f_sketch,
+    "Colored Sketch": f_colored_sketch,
+    "Cartoon (ကာတွန်း)": f_cartoon,
+    "Comic (ကာတွန်းစာအုပ်)": f_comic,
+    "Watercolor (ရေဆေး)": f_watercolor,
+    "Oil Painting (ဆီဆေး)": f_oil,
+    "Old Film (ရုပ်ရှင်ဟောင်း)": f_old_film,
+    "Neon (အလင်းတန်း)": f_neon,
+    "Pixel Art (ဂိမ်း)": f_pixel,
+    "Vintage (ရှေးခေတ်)": f_vintage,
+    "Black & White": f_bw,
+    "Warm (အရောင်ပူ)": f_warm,
+    "Cool (အရောင်အေး)": f_cool,
+}
+
+
+def apply_filter(frame, name):
+    fn = FILTERS.get(name, f_original)
+    try:
+        return fn(frame)
+    except Exception:
         return frame
 
-    # ၁။ မီးခိုးရောင် ပြောင်း
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # ၂။ မှောက်ပြန် (Invert)
-    inv = 255 - gray
+def filter_video(video_in, video_out, filter_name, progress_cb=None):
+    """ဗီဒီယိုတစ်ခုလုံးကို Filter ပြောင်းပါ"""
+    if filter_name == "မူရင်း":
+        shutil.copy(video_in, video_out)
+        return video_out
 
-    # ၃။ Blur လုပ်ပါ
-    blur = cv2.GaussianBlur(inv, (21, 21), 0)
-
-    # ၄။ Color Dodge (ခဲတံဆွဲသလို ဖြစ်စေရန်)
-    sketch = cv2.divide(gray, 255 - blur, scale=256)
-
-    # ၅။ 3-channel ပြန်ပြောင်း (ဗီဒီယိုအတွက်)
-    sketch_bgr = cv2.cvtColor(sketch, cv2.COLOR_GRAY2BGR)
-
-    # ၆။ မူရင်းနဲ့ ရောပါ (strength အတိုင်း)
-    if strength < 1.0:
-        sketch_bgr = cv2.addWeighted(sketch_bgr, strength, frame, 1.0 - strength, 0)
-
-    return sketch_bgr
-
-
-def sketch_video(video_in, video_out, strength=1.0, progress_cb=None):
-    """ဗီဒီယိုတစ်ခုလုံးကို ခဲတံပုံစံ (အဖြူအမဲ) ပြောင်းပါ"""
     cap = cv2.VideoCapture(video_in)
     fps = cap.get(cv2.CAP_PROP_FPS)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -551,7 +646,7 @@ def sketch_video(video_in, video_out, strength=1.0, progress_cb=None):
         ret, frame = cap.read()
         if not ret:
             break
-        out.write(sketch_frame(frame, strength))
+        out.write(apply_filter(frame, filter_name))
         i += 1
         if progress_cb and i % 30 == 0:
             progress_cb(i, total)
@@ -578,7 +673,7 @@ def sketch_video(video_in, video_out, strength=1.0, progress_cb=None):
     except:
         pass
     if r.returncode != 0:
-        raise Exception(f"Sketch mux: {(r.stderr or '')[-300:]}")
+        raise Exception(f"Filter mux: {(r.stderr or '')[-300:]}")
     return video_out
 
 
@@ -894,31 +989,63 @@ vid = st.file_uploader(
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# ==================== Step 2.5 — Sketch (အဖြူအမဲ) ====================
-st.subheader("🎨 Step 2.5 — Sketch")
-use_sketch = st.toggle("Sketch (အဖြူအမဲ) ပြောင်းမလား?", value=False)
+# ==================== Step 2.5 — Filter (Preview + ရွေးချယ်) ====================
+st.subheader("🎨 Step 2.5 — Filter")
+use_filter = st.toggle("Filter သုံးမလား?", value=False)
 
-sketch_strength = 1.0
-if use_sketch:
-    st.info("✅ CPU နဲ့ အလုပ်လုပ်သည် — GPU မလိုပါ။ ဗီဒီယိုရှည်ပါက နှေးနိုင်သည်။")
-    sketch_strength = st.slider(
-        "🎨 Sketch အင်အား (Strength)",
-        min_value=0.3, max_value=1.0, value=1.0, step=0.1,
-        help="0.3 = မူရင်းနဲ့ နီးစပ် | 1.0 = ခဲတံ အပြည့်"
-    )
+selected_filter = "မူရင်း"
+if use_filter:
+    st.info("✅ CPU နဲ့ အလုပ်လုပ်သည် — GPU မလိုပါ။ Preview ကြည့်ပြီး ကြိုက်တာ ရွေးပါ။")
 
+    # Preview အားလုံး ပြပါ
     if vid and os.path.exists("preview.mp4"):
-        if st.button("👁️ Sketch Preview ကြည့်", use_container_width=True):
+        if st.button("👁️ Filter အားလုံး Preview ကြည့်", use_container_width=True):
             cap = cv2.VideoCapture("preview.mp4")
             ok, fr = cap.read()
             cap.release()
             if ok:
-                s_fr = sketch_frame(fr, sketch_strength)
-                combo = np.hstack([fr, s_fr])
+                st.markdown("### 🎬 Filter အားလုံး နှိုင်းယှဉ်ချက်")
+                cols = st.columns(3)
+                names = list(FILTERS.keys())
+                for i, name in enumerate(names):
+                    with cols[i % 3]:
+                        try:
+                            out_fr = apply_filter(fr.copy(), name)
+                            st.image(cv2.cvtColor(out_fr, cv2.COLOR_BGR2RGB),
+                                     caption=name, use_container_width=True)
+                        except Exception:
+                            st.image(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB),
+                                     caption=name + " (error)",
+                                     use_container_width=True)
+                st.success("✅ Preview ပြီး — အောက်မှာ ကြိုက်တာ ရွေးပါ")
+
+    # Filter ရွေးချယ်မှု
+    filter_names = list(FILTERS.keys())
+    default_idx = filter_names.index(st.session_state.selected_filter) \
+        if st.session_state.selected_filter in filter_names else 0
+    selected_filter = st.selectbox(
+        "🎨 Filter ရွေးပါ",
+        filter_names,
+        index=default_idx,
+        key="filter_select"
+    )
+    st.session_state.selected_filter = selected_filter
+
+    # ရွေးထားတဲ့ Filter ကို ဘေး-by-ဘေး ပြပါ
+    if vid and os.path.exists("preview.mp4") and selected_filter != "မူရင်း":
+        cap = cv2.VideoCapture("preview.mp4")
+        ok, fr = cap.read()
+        cap.release()
+        if ok:
+            try:
+                out_fr = apply_filter(fr.copy(), selected_filter)
+                combo = np.hstack([fr, out_fr])
                 combo_rgb = cv2.cvtColor(combo, cv2.COLOR_BGR2RGB)
                 st.image(combo_rgb,
-                         caption="ဘယ် — မူရင်း  |  ညာ — Sketch (အဖြူအမဲ)",
+                         caption=f"ဘယ် — မူရင်း  |  ညာ — {selected_filter}",
                          use_container_width=True)
+            except Exception as e:
+                st.error(f"Filter error: {e}")
 st.divider()
 
 use_neon = True
@@ -1002,27 +1129,27 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     vid.seek(0)
     with open("input.mp4", "wb") as f: f.write(vid.read())
 
-    # ===== Sketch (အဖြူအမဲ) =====
+    # ===== Filter =====
     video_for_render = "input.mp4"
-    if use_sketch:
-        t0_sk = time.time()
-        pb_sk = st.progress(0)
-        txt_sk = st.empty()
-        def cb_sk(i, total):
-            pb_sk.progress(min(1.0, i / max(1, total)))
-            txt_sk.caption(f"🎨 Sketch {i}/{total}")
+    if use_filter and selected_filter != "မူရင်း":
+        t0_fl = time.time()
+        pb_fl = st.progress(0)
+        txt_fl = st.empty()
+        def cb_fl(i, total):
+            pb_fl.progress(min(1.0, i / max(1, total)))
+            txt_fl.caption(f"🎨 {selected_filter} {i}/{total}")
         try:
-            with st.spinner("🎨 Sketch ပြောင်းနေသည်..."):
-                sketch_video("input.mp4", "input_sketch.mp4",
-                             strength=sketch_strength,
-                             progress_cb=cb_sk)
-            video_for_render = "input_sketch.mp4"
-            st.success(f"✅ Sketch ပြီး — {time.time()-t0_sk:.1f}s")
+            with st.spinner(f"🎨 {selected_filter} ပြောင်းနေသည်..."):
+                filter_video("input.mp4", "input_filtered.mp4",
+                             selected_filter,
+                             progress_cb=cb_fl)
+            video_for_render = "input_filtered.mp4"
+            st.success(f"✅ {selected_filter} ပြီး — {time.time()-t0_fl:.1f}s")
         except Exception as e:
-            st.error(f"❌ Sketch Fail: {e}")
-            st.warning("⚠️ Sketch မပါဘဲ ဆက်လုပ်မည်")
+            st.error(f"❌ Filter Fail: {e}")
+            st.warning("⚠️ Filter မပါဘဲ ဆက်လုပ်မည်")
             video_for_render = "input.mp4"
-        step_times["🎨 Sketch"] = time.time() - t0_sk
+        step_times[f"🎨 {selected_filter}"] = time.time() - t0_fl
 
     fw_model = None
     if not USE_FAST_VAD:
