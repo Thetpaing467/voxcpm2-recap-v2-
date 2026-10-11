@@ -505,26 +505,83 @@ def prepare_video_job(video_in, fw_model):
     return {"segments": segments, "vdur": kept / vfps}
 
 
-# ==================== Face Swap ====================
+# ==================== Cartoon Style (OpenCV — CPU) ====================
 
-@st.cache_resource(show_spinner=False)
-def get_faceswap_models():
-    """Face swap မော်ဒယ်များကို တစ်ကြိမ်တည်း load လုပ်ပါ"""
-    from face_swaper_king import load_face_analyzer, load_swapper, load_gfpgan
-    app = load_face_analyzer()
-    swapper = load_swapper()
-    gfpgan = load_gfpgan()
-    return app, swapper, gfpgan
+def cartoonize_frame(frame, strength=1.0):
+    """ဖရိမ်တစ်ခုကို ကာတွန်းစတိုင်ပြောင်းပါ (CPU)"""
+    # strength: 0.0 = မူရင်း, 1.0 = ကာတွန်း အပြည့်
+    if strength <= 0:
+        return frame
 
+    # ၁။ အရောင်ကို ချောမွေ့စေပါ
+    color = cv2.bilateralFilter(frame, 9, 250, 250)
 
-def run_face_swap(face_img, video_in, video_out, enhance=True):
-    """ဗီဒီယိုတစ်ခုလုံးရဲ့ မျက်နှာကို လဲလှယ်ပါ"""
-    from face_swaper_king import swap_video
-    app, swapper, gfpgan = get_faceswap_models()
-    swap_video(
-        app, swapper, face_img, video_in, video_out,
-        gfpgan=gfpgan if enhance else None
+    # ၂။ အစွန်းတွေ ရှာပါ
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.medianBlur(gray, 5)
+    edges = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY, 9, 9
     )
+
+    # ၃။ ပေါင်းစပ်ပါ
+    cartoon = cv2.bitwise_and(color, color, mask=edges)
+
+    # ၄။ မူရင်းနဲ့ ရောပါ (strength အတိုင်း)
+    if strength < 1.0:
+        cartoon = cv2.addWeighted(cartoon, strength, frame, 1.0 - strength, 0)
+
+    return cartoon
+
+
+def cartoonize_video(video_in, video_out, strength=1.0, progress_cb=None):
+    """ဗီဒီယိုတစ်ခုလုံးကို ကာတွန်းစတိုင်ပြောင်းပါ"""
+    cap = cv2.VideoCapture(video_in)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # ယာယီ ဗီဒီယို (အသံမပါ)
+    tmp = video_out.replace(".mp4", "_tmp.mp4")
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(tmp, fourcc, fps, (w, h))
+
+    i = 0
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        out.write(cartoonize_frame(frame, strength))
+        i += 1
+        if progress_cb and i % 30 == 0:
+            progress_cb(i, total)
+
+    cap.release()
+    out.release()
+
+    # မူရင်းအသံကို ပြန်ပေါင်းထည့်
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", tmp,
+        "-i", video_in,
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", AUDIO_BITRATE,
+        "-map", "0:v:0",
+        "-map", "1:a:0?",
+        "-shortest",
+        video_out
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       encoding="utf-8", errors="ignore")
+    try:
+        os.remove(tmp)
+    except:
+        pass
+    if r.returncode != 0:
+        raise Exception(f"Cartoon mux: {(r.stderr or '')[-300:]}")
     return video_out
 
 
@@ -635,8 +692,7 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     results = [None] * len(chunks); done = 0; skipped = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         for idx, dst in ex.map(tts_one, enumerate(chunks)):
-            results[idx] = dst; done += 1
-            if dst is None: skipped.append(idx)
+            results[idx] = dst; done += 1            if dst is None: skipped.append(idx)
             if cb: cb(done - 1, len(chunks), chunks[idx])
 
     good = [a for a in results if a]
@@ -835,26 +891,33 @@ vid = st.file_uploader(
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# ==================== Step 2.5 — Face Swap (အသစ်) ====================
-st.subheader("🎭 Step 2.5 — Face Swap")
-use_faceswap = st.toggle("မျက်နှာလဲလှယ်မလား?", value=False)
-if use_faceswap:
-    st.warning("⚠️ Face Swap သည် CPU ပေါ်တွင် အလွန်နှေးသည် (တစ်စက္ကန့် ၁-၂ ဖရိမ်)။ ဗီဒီယိုရှည်ပါက အချိန် ကြာနိုင်သည်။")
-    face_img = st.file_uploader(
-        "🎭 မျက်နှာဓာတ်ပုံ (အစားထိုးမည့် မျက်နှာ)",
-        type=["jpg","jpeg","png"],
-        key="face_up"
+# ==================== Step 2.5 — Cartoon Style (အသစ်) ====================
+st.subheader("🎨 Step 2.5 — Cartoon Style")
+use_cartoon = st.toggle("ကာတွန်းစတိုင် ပြောင်းမလား?", value=False)
+
+cartoon_strength = 1.0
+if use_cartoon:
+    st.info("✅ CPU နဲ့ အလုပ်လုပ်သည် — GPU မလိုပါ။ ဗီဒီယိုရှည်ပါက နှေးနိုင်သည်။")
+    cartoon_strength = st.slider(
+        "🎨 ကာတွန်း အင်အား (Strength)",
+        min_value=0.3, max_value=1.0, value=1.0, step=0.1,
+        help="0.3 = မူရင်းနဲ့ နီးစပ် | 1.0 = ကာတွန်း အပြည့်"
     )
-    enhance = st.toggle("✨ GFPGAN ဖြင့် အရည်အသွေး မြှင့်တင်မလား?", value=True)
-    if face_img:
-        with open("face.png", "wb") as f: f.write(face_img.read())
-        st.session_state.face = "face.png"
-        st.image(face_img, width=150)
-        st.success("✅ မျက်နှာဓာတ်ပုံ ရပါပြီ")
-    else:
-        st.session_state.face = None
-else:
-    st.session_state.face = None
+
+    # Preview — ပထမဖရိမ်ကို ကာတွန်းပြောင်းပြပါ
+    if vid and os.path.exists("preview.mp4"):
+        if st.button("👁️ ကာတွန်း Preview ကြည့်", use_container_width=True):
+            cap = cv2.VideoCapture("preview.mp4")
+            ok, fr = cap.read()
+            cap.release()
+            if ok:
+                c_fr = cartoonize_frame(fr, cartoon_strength)
+                # ဘေး-by-ဘေး နှိုင်းယှဉ်
+                h, w = fr.shape[:2]
+                combo = np.hstack([fr, c_fr])
+                combo_rgb = cv2.cvtColor(combo, cv2.COLOR_BGR2RGB)
+                st.image(combo_rgb, caption="ဘယ် — မူရင်း  |  ညာ — ကာတွန်း",
+                         use_container_width=True)
 st.divider()
 
 use_neon = True
@@ -938,25 +1001,27 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     vid.seek(0)
     with open("input.mp4", "wb") as f: f.write(vid.read())
 
-    # ===== Face Swap (အသစ်) =====
+    # ===== Cartoon Style (အသစ်) =====
     video_for_render = "input.mp4"
-    if use_faceswap and st.session_state.get("face"):
-        t0_fs = time.time()
-        with st.spinner("🎭 Face Swap လုပ်နေသည်... (နှေးနိုင်သည်)"):
-            try:
-                run_face_swap(
-                    st.session_state.face,
-                    "input.mp4",
-                    "input_swapped.mp4",
-                    enhance=enhance
-                )
-                video_for_render = "input_swapped.mp4"
-                st.success(f"✅ Face Swap ပြီး — {time.time()-t0_fs:.1f}s")
-            except Exception as e:
-                st.error(f"❌ Face Swap Fail: {e}")
-                st.warning("⚠️ Face Swap မပါဘဲ ဆက်လုပ်မည်")
-                video_for_render = "input.mp4"
-        step_times["🎭 Face Swap"] = time.time() - t0_fs
+    if use_cartoon:
+        t0_ct = time.time()
+        pb_ct = st.progress(0)
+        txt_ct = st.empty()
+        def cb_ct(i, total):
+            pb_ct.progress(min(1.0, i / max(1, total)))
+            txt_ct.caption(f"🎨 ကာတွန်း {i}/{total}")
+        try:
+            with st.spinner("🎨 ကာတွန်းစတိုင် ပြောင်းနေသည်..."):
+                cartoonize_video("input.mp4", "input_cartoon.mp4",
+                                 strength=cartoon_strength,
+                                 progress_cb=cb_ct)
+            video_for_render = "input_cartoon.mp4"
+            st.success(f"✅ ကာတွန်းပြီး — {time.time()-t0_ct:.1f}s")
+        except Exception as e:
+            st.error(f"❌ Cartoon Fail: {e}")
+            st.warning("⚠️ ကာတွန်းမပါဘဲ ဆက်လုပ်မည်")
+            video_for_render = "input.mp4"
+        step_times["🎨 Cartoon"] = time.time() - t0_ct
 
     fw_model = None
     if not USE_FAST_VAD:
