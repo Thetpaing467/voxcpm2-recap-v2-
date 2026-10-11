@@ -6,3 +6,5 @@ Pillow
 edge-tts>=7.0.0
 gradio_client
 faster-whisper
+torch
+torchvision
