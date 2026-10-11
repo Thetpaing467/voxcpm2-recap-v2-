@@ -505,31 +505,38 @@ def prepare_video_job(video_in, fw_model):
     return {"segments": segments, "vdur": kept / vfps}
 
 
-# ==================== Cartoon Style (OpenCV — CPU) ====================
+# ==================== Colored Sketch Style (OpenCV — CPU) ====================
 
-def cartoonize_frame(frame, strength=1.0):
-    """ဖရိမ်တစ်ခုကို ကာတွန်းစတိုင်ပြောင်းပါ (CPU)"""
+def colored_sketch_frame(frame, strength=1.0, color_boost=1.15):
+    """အရောင်နဲ့ ခဲတံ ရောစပ်ထားသော ပုံစံ (CPU)"""
     if strength <= 0:
         return frame
 
-    color = cv2.bilateralFilter(frame, 9, 250, 250)
+    # ၁။ ခဲတံမျဉ်းကြောင်း (အဖြူအမဲ)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray = cv2.medianBlur(gray, 5)
-    edges = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_MEAN_C,
-        cv2.THRESH_BINARY, 9, 9
-    )
-    cartoon = cv2.bitwise_and(color, color, mask=edges)
+    inv = 255 - gray
+    blur = cv2.GaussianBlur(inv, (21, 21), 0)
+    sketch_gray = cv2.divide(gray, 255 - blur, scale=256)
+    sketch_3ch = cv2.cvtColor(sketch_gray, cv2.COLOR_GRAY2BGR)
 
+    # ၂။ အရောင်ကို ချောမွေ့စေပါ
+    color = cv2.bilateralFilter(frame, 9, 250, 250)
+
+    # ၃။ အရောင်ကို ခဲတံနဲ့ ပေါင်းပါ (Color Dodge)
+    colored = cv2.divide(color, 255 - sketch_3ch, scale=256)
+
+    # ၄။ အရောင် တောက်ပစေရန်
+    colored = cv2.convertScaleAbs(colored, alpha=color_boost, beta=8)
+
+    # ၅။ မူရင်းနဲ့ ရောပါ (strength အတိုင်း)
     if strength < 1.0:
-        cartoon = cv2.addWeighted(cartoon, strength, frame, 1.0 - strength, 0)
+        colored = cv2.addWeighted(colored, strength, frame, 1.0 - strength, 0)
 
-    return cartoon
+    return colored
 
 
-def cartoonize_video(video_in, video_out, strength=1.0, progress_cb=None):
-    """ဗီဒီယိုတစ်ခုလုံးကို ကာတွန်းစတိုင်ပြောင်းပါ"""
+def colored_sketch_video(video_in, video_out, strength=1.0, progress_cb=None):
+    """ဗီဒီယိုတစ်ခုလုံးကို Colored Sketch ပြောင်းပါ"""
     cap = cv2.VideoCapture(video_in)
     fps = cap.get(cv2.CAP_PROP_FPS)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -545,7 +552,7 @@ def cartoonize_video(video_in, video_out, strength=1.0, progress_cb=None):
         ret, frame = cap.read()
         if not ret:
             break
-        out.write(cartoonize_frame(frame, strength))
+        out.write(colored_sketch_frame(frame, strength))
         i += 1
         if progress_cb and i % 30 == 0:
             progress_cb(i, total)
@@ -572,7 +579,7 @@ def cartoonize_video(video_in, video_out, strength=1.0, progress_cb=None):
     except:
         pass
     if r.returncode != 0:
-        raise Exception(f"Cartoon mux: {(r.stderr or '')[-300:]}")
+        raise Exception(f"Sketch mux: {(r.stderr or '')[-300:]}")
     return video_out
 
 
@@ -888,30 +895,30 @@ vid = st.file_uploader(
 if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# ==================== Step 2.5 — Cartoon Style ====================
-st.subheader("🎨 Step 2.5 — Cartoon Style")
-use_cartoon = st.toggle("ကာတွန်းစတိုင် ပြောင်းမလား?", value=False)
+# ==================== Step 2.5 — Colored Sketch ====================
+st.subheader("🎨 Step 2.5 — Colored Sketch")
+use_sketch = st.toggle("Colored Sketch ပြောင်းမလား?", value=False)
 
-cartoon_strength = 1.0
-if use_cartoon:
+sketch_strength = 1.0
+if use_sketch:
     st.info("✅ CPU နဲ့ အလုပ်လုပ်သည် — GPU မလိုပါ။ ဗီဒီယိုရှည်ပါက နှေးနိုင်သည်။")
-    cartoon_strength = st.slider(
-        "🎨 ကာတွန်း အင်အား (Strength)",
+    sketch_strength = st.slider(
+        "🎨 Sketch အင်အား (Strength)",
         min_value=0.3, max_value=1.0, value=1.0, step=0.1,
-        help="0.3 = မူရင်းနဲ့ နီးစပ် | 1.0 = ကာတွန်း အပြည့်"
+        help="0.3 = မူရင်းနဲ့ နီးစပ် | 1.0 = ခဲတံ အပြည့်"
     )
 
     if vid and os.path.exists("preview.mp4"):
-        if st.button("👁️ ကာတွန်း Preview ကြည့်", use_container_width=True):
+        if st.button("👁️ Sketch Preview ကြည့်", use_container_width=True):
             cap = cv2.VideoCapture("preview.mp4")
             ok, fr = cap.read()
             cap.release()
             if ok:
-                c_fr = cartoonize_frame(fr, cartoon_strength)
-                combo = np.hstack([fr, c_fr])
+                s_fr = colored_sketch_frame(fr, sketch_strength)
+                combo = np.hstack([fr, s_fr])
                 combo_rgb = cv2.cvtColor(combo, cv2.COLOR_BGR2RGB)
                 st.image(combo_rgb,
-                         caption="ဘယ် — မူရင်း  |  ညာ — ကာတွန်း",
+                         caption="ဘယ် — မူရင်း  |  ညာ — Colored Sketch",
                          use_container_width=True)
 st.divider()
 
@@ -996,27 +1003,27 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     vid.seek(0)
     with open("input.mp4", "wb") as f: f.write(vid.read())
 
-    # ===== Cartoon Style =====
+    # ===== Colored Sketch =====
     video_for_render = "input.mp4"
-    if use_cartoon:
-        t0_ct = time.time()
-        pb_ct = st.progress(0)
-        txt_ct = st.empty()
-        def cb_ct(i, total):
-            pb_ct.progress(min(1.0, i / max(1, total)))
-            txt_ct.caption(f"🎨 ကာတွန်း {i}/{total}")
+    if use_sketch:
+        t0_sk = time.time()
+        pb_sk = st.progress(0)
+        txt_sk = st.empty()
+        def cb_sk(i, total):
+            pb_sk.progress(min(1.0, i / max(1, total)))
+            txt_sk.caption(f"🎨 Sketch {i}/{total}")
         try:
-            with st.spinner("🎨 ကာတွန်းစတိုင် ပြောင်းနေသည်..."):
-                cartoonize_video("input.mp4", "input_cartoon.mp4",
-                                 strength=cartoon_strength,
-                                 progress_cb=cb_ct)
-            video_for_render = "input_cartoon.mp4"
-            st.success(f"✅ ကာတွန်းပြီး — {time.time()-t0_ct:.1f}s")
+            with st.spinner("🎨 Colored Sketch ပြောင်းနေသည်..."):
+                colored_sketch_video("input.mp4", "input_sketch.mp4",
+                                     strength=sketch_strength,
+                                     progress_cb=cb_sk)
+            video_for_render = "input_sketch.mp4"
+            st.success(f"✅ Sketch ပြီး — {time.time()-t0_sk:.1f}s")
         except Exception as e:
-            st.error(f"❌ Cartoon Fail: {e}")
-            st.warning("⚠️ ကာတွန်းမပါဘဲ ဆက်လုပ်မည်")
+            st.error(f"❌ Sketch Fail: {e}")
+            st.warning("⚠️ Sketch မပါဘဲ ဆက်လုပ်မည်")
             video_for_render = "input.mp4"
-        step_times["🎨 Cartoon"] = time.time() - t0_ct
+        step_times["🎨 Sketch"] = time.time() - t0_sk
 
     fw_model = None
     if not USE_FAST_VAD:
