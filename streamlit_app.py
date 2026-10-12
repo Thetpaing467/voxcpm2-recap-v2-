@@ -1,27 +1,21 @@
 import streamlit as st
 import os, re, hashlib, shutil, subprocess, asyncio, time
 import concurrent.futures
-import threading, queue, math
 import numpy as np
 import edge_tts
-
-# ---- edge-tts version ----
-EDGE_TTS_VERSION = getattr(edge_tts, "__version__", "unknown")
-
-# ---- ffmpeg-python ----
-try:
-    import ffmpeg
-except ImportError:
-    ffmpeg = None
-
 from PIL import Image, ImageDraw, ImageFont
 import cv2
+from gradio_client import Client, handle_file
 
-try:
-    from gradio_client import Client, handle_file
-    GRADIO_OK = True
-except Exception:
-    GRADIO_OK = False
+# ==================== Gemini TTS ====================
+from google import genai
+import base64
+import wave
+
+# 获取 Gemini API Key
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-3.8-flash-tts"
+GEMINI_VOICES = ["Kore", "Puck", "Charon", "Fenrir", "Aoede"]
 
 os.environ["HF_HOME"] = "/tmp/hf_cache"
 
@@ -34,6 +28,8 @@ PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
 FS, BH, BA = 30, 100, 200
+ENC_PRESET = "fast"
+ENC_CRF = 18
 FINAL_PRESET = "ultrafast"
 FINAL_CRF = 20
 USE_FAST_VAD = True
@@ -60,38 +56,14 @@ EDGE_VOICE_FIXED = "male"
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
 
-# ==================== Session State ====================
-def _init_state():
-    defaults = {
-        "auth": False,
-        "script": "",
-        "last_paste": "",
-        "paste_big": "",
-        "pkey": None,
-        "video_up_key": 0,
-        "ref": None,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-_init_state()
-
-
 def _on_download_clear():
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.paste_big = ""
     st.session_state.pkey = None
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
-    for f in ("preview.mp4", "prev.png", "prev_out.png"):
-        try:
-            if os.path.exists(f): os.remove(f)
-        except Exception:
-            pass
 
 
-# ==================== CSS ====================
 st.markdown("""
 <style>
 .stApp{background:linear-gradient(160deg,#0f0f23,#1a1a35,#0f0f23);color:#e8e8f0}
@@ -123,14 +95,14 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 </style>
 """, unsafe_allow_html=True)
 
+if "auth" not in st.session_state:
+    st.session_state.auth = False
 
-# ==================== Login ====================
 if not st.session_state.auth:
     st.markdown("<div class='main-title'>🔐 Private App</div>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        pwd = st.text_input("Password", type="password",
-                            label_visibility="collapsed", placeholder="Password")
+        pwd = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Password")
         if st.button("Login", use_container_width=True):
             if pwd == PASSWORD:
                 st.session_state.auth = True
@@ -140,22 +112,20 @@ if not st.session_state.auth:
     st.stop()
 
 
-# ==================== Utility ====================
+# ==================== Session State Init ====================
+if "script" not in st.session_state: st.session_state.script = ""
+if "video_up_key" not in st.session_state: st.session_state.video_up_key = 0
 
-def _require_ffmpeg_py():
-    if ffmpeg is None:
-        raise RuntimeError("`ffmpeg-python` package မရှိပါ — pip install ffmpeg-python")
 
+# ==================== Utility Functions ====================
 
 def vid_info(p):
-    _require_ffmpeg_py()
     pr = ffmpeg.probe(p)
     v = next(s for s in pr['streams'] if s['codec_type'] == 'video')
     return int(v['width']), int(v['height']), float(pr['format']['duration'])
 
 
 def audio_dur(p):
-    _require_ffmpeg_py()
     return float(ffmpeg.probe(p)['format']['duration'])
 
 
@@ -171,31 +141,27 @@ def s2t(ts):
     m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$', ts)
     if m:
         h, mi, se, ms = m.groups()
-        return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3, '0'))/1000
+        return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3,'0'))/1000
     return None
 
 
 def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
                box_width_ratio=BOX_WIDTH_RATIO,
                padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    img = Image.new("RGBA", (W, H), (0,0,0,0))
     d = ImageDraw.Draw(img)
-    try:
-        f = ImageFont.truetype(fp, fs)
-    except Exception:
-        f = ImageFont.load_default()
+    try: f = ImageFont.truetype(fp, fs)
+    except: f = ImageFont.load_default()
 
-    mc = max(15, int(W / (fs * 0.9)))
+    mc = max(15, int(W/(fs*0.9)))
     lines, cur = [], ""
     for w in text.split():
-        if len(cur) + len(w) + 1 <= mc:
-            cur = cur + " " + w if cur else w
+        if len(cur)+len(w)+1 <= mc: cur = cur+" "+w if cur else w
         else:
             if cur: lines.append(cur)
             cur = w
     if cur: lines.append(cur)
-    if not lines:
-        return None
+    if not lines: return out
 
     lh = int(fs * 1.3)
     text_h = len(lines) * lh
@@ -216,10 +182,10 @@ def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
         bb = d.textbbox((0, 0), ln, font=f)
         lw = bb[2] - bb[0]
         lx = box_x + (box_w - lw) // 2
-        for dx in [-2, -1, 0, 1, 2]:
-            for dy in [-2, -1, 0, 1, 2]:
-                d.text((lx + dx, ty + dy), ln, font=f, fill=(0, 0, 0, 255))
-        d.text((lx, ty), ln, font=f, fill=(255, 255, 255, 255))
+        for dx in [-2,-1,0,1,2]:
+            for dy in [-2,-1,0,1,2]:
+                d.text((lx+dx, ty+dy), ln, font=f, fill=(0,0,0,255))
+        d.text((lx, ty), ln, font=f, fill=(255,255,255,255))
         ty += lh
 
     img.save(out, "PNG")
@@ -235,8 +201,7 @@ def split_for_sub(text, mc=30):
             parts.append(s); continue
         cur = ""
         for w in s.split():
-            if len(cur) + len(w) + 1 <= mc:
-                cur = cur + " " + w if cur else w
+            if len(cur) + len(w) + 1 <= mc: cur = cur + " " + w if cur else w
             else:
                 if cur: parts.append(cur.strip())
                 cur = w
@@ -246,8 +211,7 @@ def split_for_sub(text, mc=30):
 
 def scr_to_srt_timed(pieces, total, path, mc=30):
     raw = sum(d for _, d in pieces)
-    if raw <= 0:
-        return None
+    if raw <= 0: return None
     k = total / raw
     cur, idx, wrote = 0.0, 1, False
     with open(path, "w", encoding="utf-8") as f:
@@ -266,24 +230,19 @@ def scr_to_srt_timed(pieces, total, path, mc=30):
 
 def parse_srt(path):
     with open(path, "r", encoding="utf-8") as f:
-        raw = f.read().replace("\r\n", "\n").replace("\r", "\n")
+        raw = f.read().replace("\r\n","\n").replace("\r","\n")
     segs = []
     for ck in re.split(r"\n\s*\n", raw.strip()):
         ls = [l for l in ck.split("\n") if l.strip()]
-        if len(ls) < 3:
-            continue
+        if len(ls) < 3: continue
         ts = next((l for l in ls if "-->" in l), None)
-        if not ts:
-            continue
+        if not ts: continue
         p = re.split(r"\s*-->\s*", ts)
-        if len(p) != 2:
-            continue
+        if len(p) != 2: continue
         a, b = s2t(p[0]), s2t(p[1])
-        if a is None or b is None:
-            continue
-        idx = ls.index(ts); txt = " ".join(ls[idx + 1:]).strip()
-        if txt:
-            segs.append({"start": a, "end": b, "text": txt})
+        if a is None or b is None: continue
+        idx = ls.index(ts); txt = " ".join(ls[idx+1:]).strip()
+        if txt: segs.append({"start": a, "end": b, "text": txt})
     return segs
 
 
@@ -293,10 +252,8 @@ def normalize_script(t):
     out = []
     for ln in t.splitlines():
         ln = re.sub(r"\s+", " ", ln).strip()
-        if not ln:
-            continue
-        if not ln.endswith(("။", "၊", "!", "?")):
-            ln += "။"
+        if not ln: continue
+        if not ln.endswith(("။", "၊", "!", "?")): ln += "။"
         out.append(ln)
     t = " ".join(out)
     t = re.sub(r"။(\s*။)+", "။", t)
@@ -309,29 +266,24 @@ def has_speech(t):
 
 def split_scr(t, mc=TTS_CHUNK):
     sents = []
-    for p in t.replace("။", "။|").split("|"):
+    for p in t.replace("။","။|").split("|"):
         p = p.strip()
-        if not p:
-            continue
+        if not p: continue
         sents.append(p if p.endswith("။") else p + "။")
     out, cur = [], ""
     for s in sents:
-        if len(cur) + len(s) <= mc:
-            cur += s
+        if len(cur)+len(s) <= mc: cur += s
         else:
             if cur: out.append(cur)
             if len(s) > mc:
-                for i in range(0, len(s), mc):
-                    out.append(s[i:i + mc])
+                for i in range(0, len(s), mc): out.append(s[i:i+mc])
                 cur = ""
-            else:
-                cur = s
+            else: cur = s
     if cur: out.append(cur)
     return out
 
 
 def keep_count(video_in, segments):
-    _require_ffmpeg_py()
     pr = ffmpeg.probe(video_in)
     vs = next(x for x in pr['streams'] if x['codec_type'] == 'video')
     n_, d_ = vs['r_frame_rate'].split('/')
@@ -353,8 +305,7 @@ def simple_merge(video_in, audio_in, output_video, tempo, segments=None):
            "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a"] + vf + [
            "-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
            "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest", output_video]
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="ignore")
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if r.returncode != 0:
         raise Exception(f"FFmpeg: {(r.stderr or '')[-300:]}")
     return output_video
@@ -365,7 +316,6 @@ def final_render(video_in, audio_in, output_video, tempo,
                  use_neon=True, thickness=15, speed=0.4, tail=0.5,
                  crop_ratio=0.95, mirror=True, segments=None):
     W0, H0, _ = vid_info(video_in)
-    _require_ffmpeg_py()
     pr = ffmpeg.probe(video_in)
     vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
     n, d = vs['r_frame_rate'].split('/')
@@ -392,12 +342,10 @@ def final_render(video_in, audio_in, output_video, tempo,
                        box_width_ratio=BOX_WIDTH_RATIO)
             rgba = cv2.imread(p, cv2.IMREAD_UNCHANGED)
             try: os.remove(p)
-            except Exception: pass
-            if rgba is None:
-                return None
+            except: pass
+            if rgba is None: return None
             rows = np.where(rgba[:, :, 3].any(axis=1))[0]
-            if len(rows) == 0:
-                return None
+            if len(rows) == 0: return None
             y0, y1 = int(rows[0]), int(rows[-1]) + 1
             crop = rgba[y0:y1]
             alpha = crop[:, :, 3:4].astype(np.float32) / 255.0
@@ -408,7 +356,6 @@ def final_render(video_in, audio_in, output_video, tempo,
         with concurrent.futures.ThreadPoolExecutor(max_workers=PNG_WORKERS) as ex:
             subs = [x for x in ex.map(prep, enumerate(segs)) if x]
 
-    neon_data = None
     if use_neon:
         th = thickness
         P = 2 * (W + H)
@@ -425,6 +372,7 @@ def final_render(video_in, audio_in, output_video, tempo,
         CYAN = np.array([255, 255, 0], np.float32)
         MAGENTA = np.array([110, 30, 255], np.float32)
         IDLE = 0.14
+
         Si = (S.astype(np.int64)) % P
         P_arr = np.arange(P, dtype=np.float32)
 
@@ -439,17 +387,13 @@ def final_render(video_in, audio_in, output_video, tempo,
             c_ = BASE + layer(head, CYAN) + layer(head + P / 2, MAGENTA)
             return np.clip(c_, 0, 255).astype(np.uint8)
 
-        neon_data = {"ys": ys, "xs": xs, "Si": Si, "P": P,
-                     "make_strip": make_strip}
-
     cmd = [
         "ffmpeg", "-y",
         "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
     ]
     if audio_in:
-        cmd += ["-i", audio_in, "-af", f"atempo={tempo}",
-                "-map", "0:v", "-map", "1:a"]
+        cmd += ["-i", audio_in, "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a"]
     else:
         cmd += ["-an"]
     cmd += ["-c:v", "libx264", "-crf", str(FINAL_CRF), "-preset", FINAL_PRESET,
@@ -457,10 +401,10 @@ def final_render(video_in, audio_in, output_video, tempo,
     if audio_in:
         cmd += ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest"]
     cmd += [output_video]
-
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    import threading, queue
     q_in = queue.Queue(maxsize=8)
     q_out = queue.Queue(maxsize=8)
     stop = threading.Event()
@@ -490,10 +434,8 @@ def final_render(video_in, audio_in, output_video, tempo,
                 t_in = i / fps
                 i += 1
                 if segments:
-                    while p < len(segments) and segments[p][1] < t_in:
-                        p += 1
-                    if not (p < len(segments) and segments[p][0] <= t_in):
-                        continue
+                    while p < len(segments) and segments[p][1] < t_in: p += 1
+                    if not (p < len(segments) and segments[p][0] <= t_in): continue
                 ok, fr = cap.retrieve()
                 if not ok: break
                 if not qput(q_in, fr): break
@@ -526,13 +468,11 @@ def final_render(video_in, audio_in, output_video, tempo,
             if mirror: fr = fr[:, ::-1]
             fr = np.ascontiguousarray(fr)
 
-            if use_neon and neon_data:
-                head = (t * speed * neon_data["P"] / 4.0) % neon_data["P"]
-                fr[neon_data["ys"], neon_data["xs"]] = \
-                    neon_data["make_strip"](head)[neon_data["Si"]]
+            if use_neon:
+                head = (t * speed * P / 4.0) % P
+                fr[ys, xs] = make_strip(head)[Si]
 
-            while k < len(subs) and subs[k]["b"] < t:
-                k += 1
+            while k < len(subs) and subs[k]["b"] < t: k += 1
             if k < len(subs) and subs[k]["a"] <= t:
                 sb = subs[k]
                 reg = fr[sb["y0"]:sb["y1"]].astype(np.float32) * sb["inv"] + sb["pre"]
@@ -548,7 +488,7 @@ def final_render(video_in, audio_in, output_video, tempo,
         stop.set()
         th_r.join()
         try: proc.stdin.close()
-        except Exception: pass
+        except: pass
         proc.wait()
     if err: raise err[0]
     if proc.returncode != 0:
@@ -561,8 +501,7 @@ def mux_audio(video_in, audio_in, output_video, tempo):
            "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a",
            "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE,
            "-shortest", output_video]
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="ignore")
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
     if r.returncode != 0:
         raise Exception(f"Mux: {(r.stderr or '')[-300:]}")
     return output_video
@@ -570,17 +509,16 @@ def mux_audio(video_in, audio_in, output_video, tempo):
 
 def prepare_video_job(video_in, fw_model):
     segments = whisper_fast(video_in, fw_model)
-    if not segments:
-        raise Exception("Speech မတွေ့")
+    if not segments: raise Exception("Speech မတွေ့")
     kept, vfps = keep_count(video_in, segments)
-    if kept == 0:
-        raise Exception("Speech မတွေ့")
+    if kept == 0: raise Exception("Speech မတွေ့")
     return {"segments": segments, "vdur": kept / vfps}
 
 
 # ==================== Preview ====================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
+    import math
     d = ImageDraw.Draw(img, "RGBA")
     W, H = img.size
     inner_c = max(3, thickness // 3)
@@ -604,17 +542,12 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     return img
 
 
-# ==================== Voice Clone (VoxCPM2) ====================
+# ==================== TTS Functions ====================
 
 def tts_demo(chunks, ref, space, cb=None):
-    if not GRADIO_OK:
-        raise Exception("gradio_client မရှိပါ")
-    cl = Client(space)
-    files = []
-    rf = handle_file(ref) if ref else None
+    cl = Client(space); files = []; rf = handle_file(ref) if ref else None
     for i, c in enumerate(chunks):
-        if cb:
-            cb(i, len(chunks), c)
+        if cb: cb(i, len(chunks), c)
         res = cl.predict(
             text_input=c,
             control_instruction="A warm young woman, calm and expressive",
@@ -624,249 +557,172 @@ def tts_demo(chunks, ref, space, cb=None):
             api_name="/generate"
         )
         p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_{i}.wav"
-        shutil.copy(p, dst)
-        files.append(dst)
+        dst = f"chunk_{i}.wav"; shutil.copy(p, dst); files.append(dst)
     return files
 
 
 def tts_burmese(chunks, ref, space, cb=None):
-    if not GRADIO_OK:
-        raise Exception("gradio_client မရှိပါ")
-    if not ref:
-        raise Exception("Reference Audio လိုပါ")
-    cl = Client(space)
-    files = []
+    cl = Client(space); files = []
+    if not ref: raise Exception("Reference Audio needed")
     rf = handle_file(ref)
     for i, c in enumerate(chunks):
-        if cb:
-            cb(i, len(chunks), c)
+        if cb: cb(i, len(chunks), c)
         res = cl.predict(
             target_text=c, ref_audio=rf,
             ref_text="မြန်မာ အသံနမူနာ", cfg_value=2.0,
             inference_timesteps=10, api_name="/tts"
         )
         p = res[0] if isinstance(res, (tuple, list)) else res
-        dst = f"chunk_b_{i}.wav"
-        shutil.copy(p, dst)
-        files.append(dst)
+        dst = f"chunk_b_{i}.wav"; shutil.copy(p, dst); files.append(dst)
     return files
 
 
-def voice_clone_run(chunks, ref, out_path, cb=None):
-    """VoxCPM2 Voice Clone — SPACES အားလုံး စမ်း"""
-    files = None
-    for s in SPACES:
-        try:
-            st.info(f"🎙️ Voice Clone — {s['space']}")
-            if s["type"] == "demo":
-                files = tts_demo(chunks, ref, s["space"], cb)
-            else:
-                files = tts_burmese(chunks, ref, s["space"], cb)
-            st.success("✅ Voice Clone — အောင်မြင်")
-            break
-        except Exception as e:
-            st.warning(f"⚠️ Voice Clone — Fail: {str(e)[:80]}")
-            files = None
-            continue
+# ==================== Gemini TTS ====================
 
-    if files is None:
-        raise Exception("Voice Clone — Space အားလုံး fail")
+def wave_file(filename, pcm, channels=1, rate=24000, sample_width=2):
+    with wave.open(filename, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(rate)
+        wf.writeframes(pcm)
 
-    pieces = [(chunks[i], audio_dur(f)) for i, f in enumerate(files)]
 
-    concat_file = "clone_concat.txt"
-    with open(concat_file, "w", encoding="utf-8") as f:
-        for a in files:
-            f.write(f"file '{os.path.abspath(a)}'\n")
-
-    _require_ffmpeg_py()
-    (
-        ffmpeg
-        .input(concat_file, format="concat", safe=0)
-        .output(out_path, acodec="libmp3lame",
-                audio_bitrate=AUDIO_BITRATE, ar=48000)
-        .overwrite_output()
-        .run(quiet=True)
+def gemini_tts_chunk(text, voice, out_path):
+    """Gemini TTS — single chunk"""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    interaction = client.interactions.create(
+        model=GEMINI_MODEL,
+        input=text,
+        response_format={"type": "audio"},
+        generation_config={
+            "speech_config": [{"voice": voice}]
+        }
     )
+    
+    audio_data = base64.b64decode(interaction.output_audio.data)
+    wave_file(out_path, audio_data)
+    return out_path
+
+
+def gemini_tts_run(chunks, out_path, voice="Kore", cb=None):
+    """Gemini TTS — full run with chunking"""
+    if not GEMINI_API_KEY:
+        raise Exception("GEMINI_API_KEY မရှိပါ — Google AI Studio ကနေ ရယူပါ")
+    
+    small = []
+    for c in chunks:
+        for x in split_scr(c, TTS_CHUNK):
+            if has_speech(x): small.append(x)
+    chunks = small
+    if not chunks: raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
+    
+    os.makedirs("gemini_cache", exist_ok=True)
+    wav_files = []
+    
+    for i, c in enumerate(chunks):
+        if cb: cb(i, len(chunks), c)
+        
+        key = hashlib.md5((voice + c).encode("utf-8")).hexdigest()
+        dst = f"gemini_cache/{key}.wav"
+        
+        if os.path.exists(dst) and os.path.getsize(dst) > 1024:
+            wav_files.append(dst)
+            continue
+        
+        try:
+            gemini_tts_chunk(c, voice, dst)
+            if os.path.exists(dst) and os.path.getsize(dst) > 1024:
+                wav_files.append(dst)
+        except Exception as e:
+            st.warning(f"⚠️ Gemini chunk {i} fail: {str(e)[:80]}")
+            continue
+    
+    if not wav_files:
+        raise Exception("Gemini TTS အသံ မထုတ်နိုင်ပါ")
+    
+    pieces = []
+    for i, c in enumerate(chunks):
+        if i < len(wav_files):
+            try:
+                pieces.append((c, audio_dur(wav_files[i])))
+            except: pass
+    
+    concat_file = "gemini_concat.txt"
+    with open(concat_file, "w", encoding="utf-8") as f:
+        for a in wav_files: f.write(f"file '{a}'\n")
+    
+    ffmpeg.input(concat_file, format="concat", safe=0).output(
+        out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
+    ).run(overwrite_output=True)
     return out_path, pieces
 
 
-# ==================== Edge TTS (Thiha) — Rock Solid ====================
+# ==================== Edge TTS ====================
 
 async def _edge_tts_async(text, out_file, voice):
-    communicate = edge_tts.Communicate(
-        text=text,
-        voice=voice,
-        rate="+0%",
-        volume="+0%",
-        pitch="+0Hz",
-    )
+    communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_file)
 
 
-def _run_async_in_thread(coro_fn, timeout=90):
-    """edge-tts ကို သီးသန့် thread + event loop မှာ run"""
-    result = {"ok": False, "err": None}
-
-    def _worker():
-        loop = None
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(
-                asyncio.wait_for(coro_fn(), timeout=timeout)
-            )
-            result["ok"] = True
-        except Exception as e:
-            result["err"] = e
-        finally:
-            if loop:
-                try:
-                    loop.run_until_complete(loop.shutdown_asyncgens())
-                except Exception:
-                    pass
-                try:
-                    loop.close()
-                except Exception:
-                    pass
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    t.join(timeout=timeout + 10)
-
-    if t.is_alive():
-        raise TimeoutError(f"edge-tts hang ({timeout}s)")
-    if not result["ok"]:
-        raise result["err"] or RuntimeError("edge-tts unknown error")
-
-
-def _is_valid_mp3(path, min_size=2048):
-    if not os.path.exists(path):
-        return False
-    if os.path.getsize(path) < min_size:
-        return False
-    try:
-        with open(path, "rb") as f:
-            header = f.read(4)
-        if header[:3] == b"ID3":
-            return True
-        if len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0:
-            return True
-        return False
-    except Exception:
-        return False
-
-
 def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
-    """Edge TTS Thiha — 8 retries + validation + silence fallback"""
     voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
 
     small = []
     for c in chunks:
         for x in split_scr(c, EDGE_CHUNK):
-            if has_speech(x):
-                small.append(x)
+            if has_speech(x): small.append(x)
     chunks = small
-    if not chunks:
-        raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
+    if not chunks: raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
 
-    os.makedirs("tts_cache", exist_ok=True)
+    def run_async(coro_fn):
+        try: asyncio.run(coro_fn())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(coro_fn())
+            loop.close()
 
     def tts_one(args):
         i, c = args
+        os.makedirs("tts_cache", exist_ok=True)
         key = hashlib.md5((voice_id + c).encode("utf-8")).hexdigest()
         dst = f"tts_cache/{key}.mp3"
-
-        if _is_valid_mp3(dst):
+        if os.path.exists(dst) and os.path.getsize(dst) > 0:
             return (i, dst)
-
-        last_err = None
-        for attempt in range(8):
+        for attempt in range(4):
             try:
-                if os.path.exists(dst):
-                    try: os.remove(dst)
-                    except Exception: pass
-
-                _run_async_in_thread(
-                    lambda: _edge_tts_async(c, dst, voice_id),
-                    timeout=90,
-                )
-
-                if _is_valid_mp3(dst):
-                    time.sleep(0.4)
+                if os.path.exists(dst): os.remove(dst)
+                run_async(lambda: _edge_tts_async(c, dst, voice_id))
+                if os.path.exists(dst) and os.path.getsize(dst) > 0:
+                    time.sleep(0.3)
                     return (i, dst)
-
-            except TimeoutError as e:
-                last_err = e
-            except Exception as e:
-                last_err = e
-
-            wait = min(2 * (attempt + 1), 10)
-            time.sleep(wait)
-
-        print(f"[Edge chunk {i}] final fail: {last_err}")
+            except Exception:
+                pass
+            time.sleep(3 * (attempt + 1))
         return (i, None)
 
-    results = [None] * len(chunks)
-    done = 0
-    failed = []
-
+    results = [None] * len(chunks); done = 0; skipped = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         for idx, dst in ex.map(tts_one, enumerate(chunks)):
-            results[idx] = dst
-            done += 1
-            if dst is None:
-                failed.append(idx)
-            if cb:
-                cb(done - 1, len(chunks), chunks[idx])
+            results[idx] = dst; done += 1
+            if dst is None: skipped.append(idx)
+            if cb: cb(done - 1, len(chunks), chunks[idx])
 
     good = [a for a in results if a]
     if not good:
-        raise Exception(
-            f"Edge TTS {EDGE_TTS_VERSION} (Thiha) — အသံမရပါ. Internet စစ်ပါ / ခဏနေ ပြန်စမ်းပါ"
-        )
+        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ (edge-tts>=7.0.0) / ခဏနေ ပြန်စမ်းပါ")
+    if skipped:
+        st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
-    # Fail chunk → silence
-    if failed:
-        st.warning(f"⚠️ Chunk {len(failed)} ခု fail — silence ထည့်ပြီး ဆက်")
-        for idx in failed:
-            words = len(chunks[idx].split())
-            dur = max(1.0, words * 0.4)
-            silence_path = f"tts_cache/silence_{idx}.mp3"
-            subprocess.run([
-                "ffmpeg", "-y", "-f", "lavfi",
-                "-i", "anullsrc=r=48000:cl=mono",
-                "-t", str(dur),
-                "-q:a", "9", "-acodec", "libmp3lame",
-                silence_path
-            ], capture_output=True)
-            if os.path.exists(silence_path):
-                results[idx] = silence_path
+    pieces = [(chunks[i], audio_dur(a)) for i, a in enumerate(results) if a]
 
-    pieces = []
-    for i, r in enumerate(results):
-        if r and os.path.exists(r):
-            try:
-                pieces.append((chunks[i], audio_dur(r)))
-            except Exception:
-                pass
+    with open("edge_concat.txt", "w", encoding="utf-8") as f:
+        for a in good: f.write(f"file '{a}'\n")
 
-    good_final = [r for r in results if r and os.path.exists(r)]
-    concat_file = "edge_concat.txt"
-    with open(concat_file, "w", encoding="utf-8") as f:
-        for a in good_final:
-            f.write(f"file '{os.path.abspath(a)}'\n")
-
-    _require_ffmpeg_py()
-    (
-        ffmpeg
-        .input(concat_file, format="concat", safe=0)
-        .output(out_path, acodec="libmp3lame",
-                audio_bitrate=AUDIO_BITRATE, ar=48000)
-        .overwrite_output()
-        .run(quiet=True)
-    )
+    ffmpeg.input("edge_concat.txt", format="concat", safe=0).output(
+        out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
+    ).run(overwrite_output=True)
     return out_path, pieces
 
 
@@ -876,26 +732,49 @@ def tts_free(chunks, out, cb=None):
     return out, pieces
 
 
-# ==================== TTS Router ====================
-
-def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
-    """
-    use_voxcpm=True  → Voice Clone (VoxCPM2)
-    use_voxcpm=False → Edge TTS (Thiha)
-    """
+def tts_all(text, out, ref=None, cb=None, use_voxcpm=True, use_gemini=False, gemini_voice="Kore"):
     chunks = split_scr(text, TTS_CHUNK)
 
-    if use_voxcpm:
+    # Gemini TTS (priority if enabled)
+    if use_gemini:
         try:
-            return voice_clone_run(chunks, ref, out, cb=cb)
+            out, pieces = gemini_tts_run(chunks, out, voice=gemini_voice, cb=cb)
+            st.success(f"✅ Gemini TTS — 🎙️ {gemini_voice}")
+            return out, pieces
         except Exception as e:
-            st.warning(f"⚠️ Voice Clone Fail: {str(e)[:100]} → Edge TTS (Thiha)")
-            return tts_free(chunks, out, cb=cb)
-    else:
+            st.warning(f"⚠️ Gemini TTS Fail: {str(e)[:80]} → VoxCPM2 / Edge TTS")
+
+    if not use_voxcpm:
         return tts_free(chunks, out, cb=cb)
 
+    files = None
+    for s in SPACES:
+        try:
+            st.info(f"🎙️ VoxCPM2 — {s['space']} — စမ်းနေသည်...")
+            if s["type"] == "demo":
+                files = tts_demo(chunks, ref, s["space"], cb)
+            else:
+                files = tts_burmese(chunks, ref, s["space"], cb)
+            st.success("✅ VoxCPM2 — အောင်မြင်")
+            break
+        except Exception as e:
+            st.warning(f"⚠️ VoxCPM2 — Fail: {str(e)[:80]}")
+            files = None
+            continue
 
-# ==================== Whisper ====================
+    if files is None:
+        st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS သီဟ Auto")
+        return tts_free(chunks, out, cb=cb)
+
+    pieces = [(chunks[i], audio_dur(f)) for i, f in enumerate(files)]
+
+    with open("concat.txt", "w", encoding="utf-8") as f:
+        for a in files: f.write(f"file '{a}'\n")
+    ffmpeg.input("concat.txt", format="concat", safe=0).output(
+        out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
+    ).run(overwrite_output=True)
+    return out, pieces
+
 
 @st.cache_resource(show_spinner=False)
 def get_fw_model():
@@ -929,32 +808,27 @@ def whisper_fast(video_path, model=None):
         model = model or get_fw_model()
         segments, _ = model.transcribe(
             "whisper_audio.wav", language=WHISPER_LANG,
-            vad_filter=True, beam_size=1,
+            vad_filter=False, beam_size=1,
             condition_on_previous_text=False, temperature=0
         )
         for seg in segments:
             speech_segments.append((seg.start, seg.end))
-        if speech_segments:
-            return speech_segments
-    except Exception as e:
-        st.warning(f"⚠️ faster-whisper: {str(e)[:80]}")
-
-    # Last resort
-    try:
-        dur = float(ffmpeg.probe("whisper_audio.wav")['format']['duration'])
-        st.warning("⚠️ VAD fail — video တစ်ခုလုံး speech")
-        return [(0.0, dur)]
     except Exception:
-        raise Exception("Speech segment ရှာမရပါ")
+        import whisper
+        model = whisper.load_model(WHISPER_MODEL)
+        result = model.transcribe(
+            "whisper_audio.wav", language=WHISPER_LANG,
+            condition_on_previous_text=False, beam_size=1, temperature=0
+        )
+        for seg in result["segments"]:
+            speech_segments.append((seg["start"], seg["end"]))
+    return speech_segments
 
 
 # ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown(
-    f"<div class='main-sub'>Voice Clone (VoxCPM2) · Edge TTS {EDGE_TTS_VERSION} သီဟ</div>",
-    unsafe_allow_html=True
-)
+st.markdown("<div class='main-sub'>Video → Script → Gemini / VoxCPM2 / Edge TTS → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
 with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
@@ -1021,8 +895,7 @@ script = st.text_area("Script", value=st.session_state.script, height=180,
 st.session_state.script = script
 
 c1, c2 = st.columns([3, 1])
-with c1:
-    st.caption(f"📝 {len(script):,}")
+with c1: st.caption(f"📝 {len(script):,}")
 with c2:
     if st.button("🗑️ Clear", use_container_width=True):
         st.session_state.script = ""
@@ -1030,16 +903,15 @@ with c2:
         st.rerun()
 st.divider()
 
-# ---- Step 2 — Video ----
+# ==================== Step 2 — Video ====================
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader(
     "📹",
-    type=["mp4", "mov", "avi", "mkv"],
+    type=["mp4","mov","avi","mkv"],
     label_visibility="collapsed",
     key=f"video_up_{st.session_state.video_up_key}"
 )
-if vid:
-    st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
+if vid: st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
 use_neon = True
@@ -1047,7 +919,7 @@ neon_animated = True
 neon_thickness = 15
 neon_speed = 0.4
 
-# ---- Step 4 — Subtitle ----
+# ==================== Step 4 — Subtitle ====================
 st.subheader("📝 Step 4 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
@@ -1055,17 +927,15 @@ if use_sub:
     pos_y = st.slider("📍 Position", 0, 100, 100, 1)
 st.divider()
 
-# ---- Step 5 — Preview ----
+# ==================== Step 5 — Preview ====================
 if vid:
     st.subheader("🖼️ Step 5 — Preview")
     with st.spinner("Preview..."):
         pkey = (vid.name, vid.size)
         if st.session_state.get("pkey") != pkey or not os.path.exists("preview.mp4"):
             vid.seek(0)
-            with open("preview.mp4", "wb") as f:
-                f.write(vid.read())
+            with open("preview.mp4", "wb") as f: f.write(vid.read())
             st.session_state.pkey = pkey
-
         W, H, _ = vid_info("preview.mp4")
 
         render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA,
@@ -1092,100 +962,75 @@ if vid:
                 st.caption("🎬 Animated — Output Video မှာ အလင်းတန်း ပတ်ပြေးနေမည်")
 st.divider()
 
-# ---- Step 6 — Generate ----
+# ==================== Step 6 — Generate ====================
 st.subheader("🚀 Step 6 — Generate")
 
-# ---- TTS Engine Selection ----
-engine = st.radio(
-    "🎙️ TTS Engine",
-    ["clone", "thiha"],
-    format_func=lambda x: {
-        "clone": "🎙️ Voice Clone (VoxCPM2) — Reference Audio လို",
-        "thiha": "⚡ Edge TTS (သီဟ / Thiha) — Auto",
-    }[x],
-    index=0,
-    horizontal=False,
-    key="tts_engine_pick",
-)
+# Gemini TTS toggle
+use_gemini = st.toggle("✨ Gemini TTS သုံးမလား? (Google AI Studio)", value=False)
 
-ref_path = None
-use_voxcpm = False
+if use_gemini:
+    if not GEMINI_API_KEY:
+        st.error("❌ GEMINI_API_KEY မရှိပါ — HF Space Settings → Secrets မှာ ထည့်ပါ")
+        st.stop()
+    st.info("✅ Gemini TTS — မြန်မာစကား support (Voice Clone မရ)")
+    gemini_voice = st.selectbox("🎙️ Gemini Voice", GEMINI_VOICES, index=0)
+else:
+    gemini_voice = "Kore"
 
-if engine == "clone":
-    st.info("✅ Voice Clone (VoxCPM2) — Fail/Busy ရင် Edge TTS သီဟ Auto")
-    ref = st.file_uploader(
-        "🎤 Reference Audio (မဖြစ်မနေ လို)",
-        type=["wav", "mp3", "m4a"],
-        key="ref_up",
-    )
+use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=not use_gemini)
+
+if use_voxcpm:
+    st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS သီဟ Auto")
+    ref = st.file_uploader("🎤 Ref Audio (VoxCPM2) — Optional",
+                           type=["wav","mp3","m4a"], key="ref_up")
     if ref:
-        with open("ref.wav", "wb") as f:
-            f.write(ref.read())
+        with open("ref.wav", "wb") as f: f.write(ref.read())
         st.session_state.ref = "ref.wav"
-        ref_path = "ref.wav"
-        st.success("✅ Reference Audio")
+        st.success("✅ Ref Audio")
     else:
         if os.path.exists("ref.wav"):
             st.session_state.ref = "ref.wav"
-            ref_path = "ref.wav"
-            st.caption("📎 Reference Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
+            st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
         else:
             st.session_state.ref = None
-            st.warning("⚠️ Reference Audio မထည့်ရင် Edge TTS သီဟ Auto ပြောင်း")
-    use_voxcpm = True
 else:
-    st.info("⚡ Edge TTS သီဟ (Thiha) — Myanmar voice (auto-fallback)")
+    st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
     st.session_state.ref = None
-    use_voxcpm = False
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
-    if not script.strip():
-        st.error("Script paste"); st.stop()
-    if vid is None:
-        st.error("Video Upload"); st.stop()
+    if not script.strip(): st.error("Script paste"); st.stop()
+    if vid is None: st.error("Video Upload"); st.stop()
 
-    total_start = time.time()
-    step_times = {}
+    total_start = time.time(); step_times = {}
     script_n = normalize_script(script)
-    if not script_n.strip():
-        st.error("Script မှာ စာမပါပါ"); st.stop()
-
+    if not script_n.strip(): st.error("Script မှာ စာမပါပါ"); st.stop()
     vid.seek(0)
-    with open("input.mp4", "wb") as f:
-        f.write(vid.read())
+    with open("input.mp4", "wb") as f: f.write(vid.read())
 
     fw_model = None
     if not USE_FAST_VAD:
-        try:
-            fw_model = get_fw_model()
-        except Exception:
-            pass
+        try: fw_model = get_fw_model()
+        except Exception: pass
 
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     job = job_pool.submit(prepare_video_job, "input.mp4", fw_model)
 
     t0 = time.time()
-    pb = st.progress(0)
-    txt = st.empty()
-
-    def cb(i, tot, c):
-        pb.progress(min(1.0, (i + 1) / tot))
-        txt.caption(f"[{i+1}/{tot}]")
-
+    pb = st.progress(0); txt = st.empty()
+    def cb(i, tot, c): pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}]")
     try:
-        _, pieces = tts_all(script_n, "voice.mp3", ref=ref_path,
-                            cb=cb, use_voxcpm=use_voxcpm)
+        _, pieces = tts_all(script_n, "voice.mp3", ref=st.session_state.get("ref"),
+                            cb=cb, use_voxcpm=use_voxcpm,
+                            use_gemini=use_gemini, gemini_voice=gemini_voice)
     except Exception as e:
-        st.error(f"TTS: {e}")
-        st.stop()
+        st.error(f"TTS: {e}"); st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
 
     t0 = time.time()
     try:
         info = job.result()
     except Exception as e:
-        st.error(f"❌ Cut: {e}")
-        st.stop()
+        st.error(f"❌ Cut: {e}"); st.stop()
     job_pool.shutdown(wait=False)
     segments, vdur = info["segments"], info["vdur"]
 
@@ -1217,10 +1062,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     """, unsafe_allow_html=True)
 
     for name, t in step_times.items():
-        st.markdown(
-            f"<div class='step-timer'>{name} — <b>{t:.1f}s</b></div>",
-            unsafe_allow_html=True
-        )
+        st.markdown(f"<div class='step-timer'>{name} — <b>{t:.1f}s</b></div>", unsafe_allow_html=True)
 
     st.success(f"✅ Done — ⏱️ {total_elapsed:.1f}s")
     st.video("final.mp4")
