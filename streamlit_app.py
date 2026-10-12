@@ -9,6 +9,9 @@ from gradio_client import Client, handle_file
 
 os.environ["HF_HOME"] = "/tmp/hf_cache"
 
+# ==================== edge-tts version check ====================
+EDGE_TTS_VERSION = getattr(edge_tts, "__version__", "unknown")
+
 SPACES = [
     {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
     {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
@@ -24,7 +27,7 @@ FINAL_PRESET = "ultrafast"
 FINAL_CRF = 20
 USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
-TTS_CHUNK = 300      # သေးလေ subtitle sync ပိုတိကျ
+TTS_CHUNK = 300
 EDGE_CHUNK = 200
 TTS_WORKERS = 3
 PNG_WORKERS = 4
@@ -47,7 +50,6 @@ st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="cen
 
 
 def _on_download_clear():
-    """Download နှိပ်ရင် Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.paste_big = ""
@@ -201,7 +203,6 @@ def split_for_sub(text, mc=30):
 
 
 def scr_to_srt_timed(pieces, total, path, mc=30):
-    """pieces = [(text, audio_seconds)] — chunk တစ်ခုချင်းစီမှာ အချိန် reset ဖြစ်လို့ drift မရှိ"""
     raw = sum(d for _, d in pieces)
     if raw <= 0: return None
     k = total / raw
@@ -417,7 +418,7 @@ def final_render(video_in, audio_in, output_video, tempo,
             except queue.Empty:
                 if stop.is_set(): return None
 
-    def reader():          # Decode thread
+    def reader():
         cap = cv2.VideoCapture(video_in)
         i = 0; p = 0
         try:
@@ -437,7 +438,7 @@ def final_render(video_in, audio_in, output_video, tempo,
             cap.release()
             qput(q_in, None)
 
-    def writer():          # ffmpeg pipe write thread
+    def writer():
         try:
             while True:
                 bts = qget(q_out)
@@ -500,7 +501,6 @@ def mux_audio(video_in, audio_in, output_video, tempo):
 
 
 def prepare_video_job(video_in, fw_model):
-    """Whisper/VAD နဲ့ speech segments ပဲ ရှာ (TTS နဲ့ တပြိုင်နက် run)"""
     segments = whisper_fast(video_in, fw_model)
     if not segments: raise Exception("Speech မတွေ့")
     kept, vfps = keep_count(video_in, segments)
@@ -575,8 +575,9 @@ async def _edge_tts_async(text, out_file, voice):
     await communicate.save(out_file)
 
 
-def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
-    voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
+def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS, voice_key=None):
+    voice_key = voice_key or EDGE_VOICE_FIXED
+    voice_id = EDGE_VOICES.get(voice_key, EDGE_VOICES["male"])
 
     small = []
     for c in chunks:
@@ -621,11 +622,13 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
     good = [a for a in results if a]
     if not good:
-        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ (edge-tts>=7.0.0) / ခဏနေ ပြန်စမ်းပါ")
+        raise Exception(
+            f"Edge TTS အသံမရပါ (v{EDGE_TTS_VERSION}) — "
+            "terminal မှာ `pip install --upgrade edge-tts` run ပြီး app restart ပါ / ခဏနေ ပြန်စမ်းပါ"
+        )
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
-    # chunk တစ်ခုချင်းရဲ့ အမှန်တကယ် အသံအရှည်
     pieces = [(chunks[i], audio_dur(a)) for i, a in enumerate(results) if a]
 
     with open("edge_concat.txt", "w", encoding="utf-8") as f:
@@ -637,17 +640,19 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     return out_path, pieces
 
 
-def tts_free(chunks, out, cb=None):
-    out, pieces = edge_tts_run(chunks, out, cb=cb)
-    st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
+def tts_free(chunks, out, cb=None, voice_key=None):
+    out, pieces = edge_tts_run(chunks, out, cb=cb, voice_key=voice_key)
+    vk = voice_key or EDGE_VOICE_FIXED
+    label = "👨 သီဟ (Thiha)" if vk == "male" else "👩 နီလာ (Nilar)"
+    st.success(f"✅ Edge TTS — {label}")
     return out, pieces
 
 
-def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
+def tts_all(text, out, ref=None, cb=None, use_voxcpm=True, voice_key=None):
     chunks = split_scr(text, TTS_CHUNK)
 
     if not use_voxcpm:
-        return tts_free(chunks, out, cb=cb)
+        return tts_free(chunks, out, cb=cb, voice_key=voice_key)
 
     files = None
     for s in SPACES:
@@ -665,8 +670,8 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
             continue
 
     if files is None:
-        st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS သီဟ Auto")
-        return tts_free(chunks, out, cb=cb)
+        st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS Auto")
+        return tts_free(chunks, out, cb=cb, voice_key=voice_key)
 
     pieces = [(chunks[i], audio_dur(f)) for i, f in enumerate(files)]
 
@@ -730,7 +735,8 @@ def whisper_fast(video_path, model=None):
 # ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS → Recap</div>", unsafe_allow_html=True)
+st.caption(f"🔧 edge-tts version: `{EDGE_TTS_VERSION}`")
 st.divider()
 
 with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
@@ -869,8 +875,17 @@ st.subheader("🚀 Step 6 — Generate")
 
 use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True)
 
+# Voice selector (Edge TTS အတွက်)
+edge_voice_key = st.radio(
+    "🎤 Edge TTS Voice (fallback)",
+    options=["male", "female"],
+    format_func=lambda x: "👨 သီဟ (Thiha)" if x == "male" else "👩 နီလာ (Nilar)",
+    horizontal=True,
+    index=0,
+)
+
 if use_voxcpm:
-    st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS သီဟ Auto")
+    st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS Auto")
     ref = st.file_uploader("🎤 Ref Audio (VoxCPM2) — Optional",
                            type=["wav","mp3","m4a"], key="ref_up")
     if ref:
@@ -884,7 +899,7 @@ if use_voxcpm:
         else:
             st.session_state.ref = None
 else:
-    st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
+    st.info("⚡ Edge TTS — ပဲ သုံးမယ်")
     st.session_state.ref = None
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
@@ -902,7 +917,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         try: fw_model = get_fw_model()
         except Exception: pass
 
-    # Whisper/VAD ကို TTS နဲ့ တပြိုင်နက် run
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     job = job_pool.submit(prepare_video_job, "input.mp4", fw_model)
 
@@ -911,7 +925,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     def cb(i, tot, c): pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}]")
     try:
         _, pieces = tts_all(script_n, "voice.mp3", ref=st.session_state.get("ref"),
-                            cb=cb, use_voxcpm=use_voxcpm)
+                            cb=cb, use_voxcpm=use_voxcpm, voice_key=edge_voice_key)
     except Exception as e:
         st.error(f"TTS: {e}"); st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
@@ -926,7 +940,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     adur = audio_dur("voice.mp3")
     tempo = max(0.5, min(2.0, adur / vdur))
-    eff = adur / tempo     # atempo ပြီးနောက် အသံအရှည်အမှန်
+    eff = adur / tempo
 
     with st.spinner("🎬 Finalizing..."):
         try:
