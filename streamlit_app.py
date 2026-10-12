@@ -17,7 +17,16 @@ SPACES = [
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-FS, BH, BA = 30, 100, 200
+# ---------- Subtitle style (အစိမ်းကွပ် + အနက်စာ) ----------
+SUB_TEXT_COLOR = "#000000"      # စာလုံးအရောင်
+SUB_STROKE_COLOR = "#00FF00"    # ကွပ်အရောင် (အစိမ်း)
+SUB_FS_RATIO = 5.5              # စာအရွယ်အစား (video width ရဲ့ %)
+SUB_STROKE_RATIO = 0.22         # ကွပ်အထူ (font size နဲ့ အချိုး)
+SUB_MAX_W_RATIO = 0.92          # စာကြောင်းအများဆုံး အကျယ် (video width အချိုး)
+SUB_LINE_GAP = 1.45             # စာကြောင်းအကြား
+SUB_MAXCHAR = 28                # subtitle တစ်ပိုင်း စာလုံးအရေအတွက်
+SUB_POS_DEFAULT = 50            # 0=အပေါ်, 50=အလယ်, 100=အောက်
+
 ENC_PRESET = "fast"
 ENC_CRF = 18
 FINAL_PRESET = "ultrafast"
@@ -32,10 +41,6 @@ PNG_WORKERS = 4
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
-
-BOX_WIDTH_RATIO = 1.0
-PADDING_Y = 15
-CORNER_RADIUS = 20
 
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
@@ -53,19 +58,6 @@ def _on_download_clear():
     st.session_state.paste_big = ""
     st.session_state.pkey = None
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
-
-
-def _on_paste():
-    """Paste box ထဲ စာဝင်တာနဲ့ Script ထဲ ကူး (callback ထဲမှာမို့ widget value ပြင်လို့ရ)"""
-    clean = (st.session_state.get("paste_big", "") or "").strip()
-    if not clean:
-        return
-    lines = [l.strip().strip('"\u201c\u201d').strip() for l in clean.splitlines()]
-    result = "\n\n".join(l for l in lines if l)
-    st.session_state.script = result
-    st.session_state.last_paste = clean
-    st.session_state.paste_big = ""
-    st.session_state.paste_msg = f"✅ Script ထဲ Auto ရောက်သွားပြီ — {len(result)} လုံး"
 
 
 st.markdown("""
@@ -119,7 +111,6 @@ if not st.session_state.auth:
 # ==================== Session State Init ====================
 if "script" not in st.session_state: st.session_state.script = ""
 if "video_up_key" not in st.session_state: st.session_state.video_up_key = 0
-if "paste_big" not in st.session_state: st.session_state.paste_big = ""
 
 
 # ==================== Utility Functions ====================
@@ -150,409 +141,57 @@ def s2t(ts):
     return None
 
 
-# ==================== Cartoon Styles ====================
-CARTOON_WORK_W = 560   # filter လုပ်မယ့် အကျယ် (မြန်ဖို့ downscale → ပြန် upscale)
-_PAT = {}
-
-
-def _halftone_pat(h, w, cell):
-    key = (h, w, cell)
-    p = _PAT.get(key)
-    if p is None:
-        if len(_PAT) > 6: _PAT.clear()
-        g = np.mgrid[0:h, 0:w].astype(np.float32)
-        k = 2.0 * np.pi / cell
-        p = ((np.cos(g[1] * k) + np.cos(g[0] * k)) / 4.0 + 0.5).astype(np.float32)
-        _PAT[key] = p
-    return p
-
-
-def _gray(img):
-    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-
-def _edges(img, blur=5, block=9, c=7):
-    g = cv2.medianBlur(_gray(img), blur)
-    return cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                 cv2.THRESH_BINARY, block, c)
-
-
-def _smooth(img, n=2, d=7, sc=45, ss=7):
-    for _ in range(n):
-        img = cv2.bilateralFilter(img, d, sc, ss)
-    return img
-
-
-def _quant(img, levels):
-    step = max(1, 256 // levels)
-    q = (img.astype(np.int16) // step) * step + step // 2
-    return np.clip(q, 0, 255).astype(np.uint8)
-
-
-def _sat(img, s=1.3, v=1.0):
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
-    hsv[..., 1] *= s
-    hsv[..., 2] *= v
-    return cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR)
-
-
-def _with_edges(color, edges):
-    return cv2.bitwise_and(color, color, mask=edges)
-
-
-def _g2b(g):
-    return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
-
-
-def st_classic(img):
-    c = _quant(_smooth(img, 3), 10)
-    return _with_edges(_sat(c, 1.2), _edges(img, 7, 9, 7))
-
-
-def st_anime(img):
-    c = _quant(_smooth(img, 2, 7, 40, 7), 18)
-    c = _sat(c, 1.25, 1.05)
-    return _with_edges(c, _edges(img, 5, 11, 9))
-
-
-def st_cel(img):
-    s = _smooth(img, 2)
-    hsv = cv2.cvtColor(s, cv2.COLOR_BGR2HSV)
-    hsv[..., 2] = _quant(hsv[..., 2], 4)
-    hsv[..., 1] = _quant(hsv[..., 1], 6)
-    c = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-    return _with_edges(c, _edges(img, 7, 7, 5))
-
-
-def st_comic(img):
-    c = _sat(_quant(_smooth(img, 2), 5), 1.6)
-    h, w = c.shape[:2]
-    dark = 1.0 - _gray(img).astype(np.float32) / 255.0
-    ink = (_halftone_pat(h, w, 6) > (1.0 - dark)) & (dark > 0.35)
-    c = c.copy()
-    c[ink] = (c[ink] * 0.55).astype(np.uint8)
-    return _with_edges(c, _edges(img, 7, 7, 5))
-
-
-def st_popart(img):
-    g = _quant(_gray(cv2.bilateralFilter(img, 7, 50, 7)), 4)
-    g = cv2.normalize(g, None, 0, 255, cv2.NORM_MINMAX)
-    c = cv2.applyColorMap(g, cv2.COLORMAP_PLASMA)
-    return _with_edges(c, _edges(img, 7, 9, 8))
-
-
-def st_manga(img):
-    g = _gray(img)
-    g = cv2.convertScaleAbs(g, alpha=1.25, beta=-15)
-    h, w = g.shape
-    dark = 1.0 - g.astype(np.float32) / 255.0
-    ink = _halftone_pat(h, w, 5) > (1.0 - dark)
-    out = np.where(ink, 0, 255).astype(np.uint8)
-    out = cv2.bitwise_and(out, _edges(img, 5, 9, 8))
-    return _g2b(out)
-
-
-def st_ink(img):
-    g = cv2.medianBlur(_gray(img), 7)
-    out = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                cv2.THRESH_BINARY, 11, 6)
-    return _g2b(out)
-
-
-def st_sketch(img):
-    g = _gray(img)
-    inv = 255 - g
-    b = cv2.GaussianBlur(inv, (0, 0), 9)
-    return _g2b(cv2.divide(g, 255 - b, scale=256))
-
-
-def st_colorpencil(img):
-    sk = st_sketch(img).astype(np.float32) / 255.0
-    col = _sat(_smooth(img, 2), 1.1).astype(np.float32)
-    out = col * (0.35 + 0.65 * sk)
-    out = out * 0.6 + 255.0 * 0.4 * sk
-    return np.clip(out, 0, 255).astype(np.uint8)
-
-
-def st_watercolor(img):
-    c = _smooth(img, 3, 9, 60, 9)
-    c = cv2.medianBlur(c, 7)
-    c = cv2.GaussianBlur(c, (0, 0), 1.2)
-    c = _sat(c, 1.15, 1.05)
-    paper = cv2.GaussianBlur(np.random.normal(0, 6, c.shape).astype(np.float32), (0, 0), 1.0)
-    c = c.astype(np.float32) * 0.9 + 255.0 * 0.1 + paper
-    soft = cv2.GaussianBlur(_gray(img), (0, 0), 1.0)
-    edge = cv2.Canny(soft, 40, 110).astype(np.float32)[..., None] / 255.0
-    c = c * (1.0 - 0.25 * edge)
-    return np.clip(c, 0, 255).astype(np.uint8)
-
-
-def st_oil(img):
-    c = cv2.edgePreservingFilter(img, flags=1, sigma_s=40, sigma_r=0.3)
-    c = cv2.medianBlur(c, 5)
-    return _sat(_quant(c, 22), 1.25)
-
-
-def st_pastel(img):
-    c = _smooth(img, 3)
-    c = _sat(c, 0.75)
-    c = cv2.addWeighted(c, 0.75, np.full_like(c, 255), 0.25, 0)
-    e = _edges(img, 7, 9, 7)
-    soft = cv2.addWeighted(c, 1.0, _g2b(255 - e), -0.35, 0)
-    return np.clip(soft, 0, 255).astype(np.uint8)
-
-
-def st_neon(img):
-    g = cv2.GaussianBlur(_gray(img), (5, 5), 0)
-    e = cv2.dilate(cv2.Canny(g, 60, 140), np.ones((2, 2), np.uint8))
-    col = _sat(_smooth(img, 1), 2.2, 1.4)
-    line = cv2.bitwise_and(col, col, mask=e)
-    glow = cv2.GaussianBlur(line, (0, 0), 5)
-    out = cv2.addWeighted(line, 1.0, glow, 1.6, 0)
-    return np.clip(out, 0, 255).astype(np.uint8)
-
-
-def st_chalk(img):
-    g = cv2.GaussianBlur(_gray(img), (5, 5), 0)
-    e = cv2.dilate(cv2.Canny(g, 50, 130), np.ones((2, 2), np.uint8))
-    bg = np.full_like(img, (52, 62, 40))
-    soft = _g2b(cv2.GaussianBlur(_gray(img), (0, 0), 3))
-    bg = cv2.addWeighted(bg, 0.8, soft, 0.2, 0)
-    bg[e > 0] = (240, 240, 235)
-    return bg
-
-
-def st_pixel(img):
-    h, w = img.shape[:2]
-    sw = max(24, w // 8)
-    sh = max(16, int(h * sw / w))
-    small = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
-    small = _sat(_quant(small, 8), 1.3)
-    return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-
-
-def st_retro(img):
-    c = st_classic(img)
-    k = np.array([[0.131, 0.534, 0.272],
-                  [0.168, 0.686, 0.349],
-                  [0.189, 0.769, 0.393]], np.float32)
-    c = cv2.transform(c, k)
-    noise = np.random.normal(0, 10, c.shape).astype(np.float32)
-    return np.clip(c.astype(np.float32) + noise, 0, 255).astype(np.uint8)
-
-
-CARTOON_STYLES = [
-    ("none",        "⚪ မူရင်း (Cartoon မလုပ်)", None),
-    ("classic",     "🎨 Classic Cartoon",        st_classic),
-    ("anime",       "🌸 Anime",                  st_anime),
-    ("cel",         "🧊 Cel Shading (Game)",     st_cel),
-    ("comic",       "💥 Comic Book (Halftone)",  st_comic),
-    ("popart",      "🟣 Pop Art",                st_popart),
-    ("manga",       "📖 Manga B&W (Screentone)", st_manga),
-    ("ink",         "🖋️ Ink Drawing",            st_ink),
-    ("sketch",      "✏️ Pencil Sketch",          st_sketch),
-    ("colorpencil", "🖍️ Color Pencil",           st_colorpencil),
-    ("watercolor",  "💧 Watercolor",             st_watercolor),
-    ("oil",         "🖼️ Oil Painting",           st_oil),
-    ("pastel",      "🍬 Pastel Soft",            st_pastel),
-    ("neon",        "🌈 Neon Outline",           st_neon),
-    ("chalk",       "🧑‍🏫 Chalkboard",             st_chalk),
-    ("pixel",       "👾 Pixel Art",              st_pixel),
-    ("retro",       "📺 Retro Toon (Sepia)",     st_retro),
-]
-CARTOON_MAP = {k: f for k, _, f in CARTOON_STYLES}
-CARTOON_LABELS = {k: l for k, l, _ in CARTOON_STYLES}
-
-
-# ==================== AI Cartoon (AnimeGAN ONNX) ====================
-MODEL_DIR = "models"          # ဒီ folder ထဲ AnimeGAN .onnx ဖိုင်တွေ ထည့်ထား (repo ထဲ commit)
-AI_MODEL_URLS = {}            # (optional) {"AnimeGANv2_Hayao.onnx": "https://..."} — auto download
-AI_LONG = 384                 # AI model ကို ပေးမယ့် ဘေးအရှည်ဆုံး pixel (CPU မှာ ဒီထက်မကြီးသင့်)
-_AI_SESS = {}
-_AI_STATE = {"err": None, "dl": False}
-
-
-def ensure_ai_models():
-    """AI_MODEL_URLS ရှိရင် models/ ထဲ တစ်ခါပဲ download (fail ရင် ကျော်)"""
-    if _AI_STATE["dl"]:
-        return
-    _AI_STATE["dl"] = True
-    if not AI_MODEL_URLS:
-        return
-    import urllib.request
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    for name, url in AI_MODEL_URLS.items():
-        dst = os.path.join(MODEL_DIR, name)
-        if os.path.exists(dst) and os.path.getsize(dst) > 0:
-            continue
-        try:
-            urllib.request.urlretrieve(url, dst)
-        except Exception as e:
-            _AI_STATE["err"] = f"Model download fail ({name}): {str(e)[:80]}"
-            try:
-                if os.path.exists(dst): os.remove(dst)
-            except Exception:
-                pass
-
-
-def ai_models():
-    """models/*.onnx ကို ရှာ → {style_key: path}"""
-    ensure_ai_models()
-    out = {}
-    try:
-        if os.path.isdir(MODEL_DIR):
-            for fn in sorted(os.listdir(MODEL_DIR)):
-                p = os.path.join(MODEL_DIR, fn)
-                if fn.lower().endswith(".onnx") and os.path.getsize(p) > 0:
-                    out["ai_" + re.sub(r"[^a-z0-9]+", "_", fn[:-5].lower()).strip("_")] = p
-    except Exception:
-        pass
-    return out
-
-
-def all_styles():
-    """Filter style (အမြဲ) + AI style (model ရှိမှ)"""
-    lst = list(CARTOON_STYLES)
-    for k, p in ai_models().items():
-        lst.append((k, "🤖 AI — " + os.path.basename(p)[:-5], None))
-    return lst
-
-
-def style_label(key):
-    for k, l, _ in all_styles():
-        if k == key:
-            return l
-    return key
-
-
-def is_cartoon(key):
-    return bool(key) and key != "none" and (key in CARTOON_MAP or key in ai_models())
-
-
-def _ai_session(path):
-    s = _AI_SESS.get(path)
-    if s is None:
-        import onnxruntime as ort
-        so = ort.SessionOptions()
-        so.intra_op_num_threads = max(1, os.cpu_count() or 2)
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        s = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
-        _AI_SESS[path] = s
-    return s
-
-
-def ai_cartoon(frame, path, long_side=AI_LONG):
-    """AnimeGAN ONNX (NHWC/NCHW နှစ်မျိုးလုံး) — fail ရင် original ပြန်"""
-    try:
-        sess = _ai_session(path)
-        inp = sess.get_inputs()[0]
-        shp = list(inp.shape)
-        nchw = len(shp) == 4 and shp[1] == 3
-        if nchw:
-            fh, fw = shp[2], shp[3]
-        else:
-            fh, fw = (shp[1], shp[2]) if len(shp) == 4 else (None, None)
-        h, w = frame.shape[:2]
-        if isinstance(fh, int) and isinstance(fw, int) and fh > 0 and fw > 0:
-            nh, nw = fh, fw
-        else:
-            sc = min(1.0, long_side / float(max(h, w)))
-            nw = max(32, int(w * sc) // 8 * 8)
-            nh = max(32, int(h * sc) // 8 * 8)
-        small = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
-        x = cv2.cvtColor(small, cv2.COLOR_BGR2RGB).astype(np.float32) / 127.5 - 1.0
-        x = x.transpose(2, 0, 1)[None] if nchw else x[None]
-        if "float16" in str(inp.type):
-            x = x.astype(np.float16)
-        y = np.asarray(sess.run(None, {inp.name: np.ascontiguousarray(x)})[0]).astype(np.float32)
-        y = np.squeeze(y, 0) if y.ndim == 4 else y
-        if y.ndim == 3 and y.shape[0] == 3 and y.shape[-1] != 3:
-            y = y.transpose(1, 2, 0)
-        y = np.clip((y + 1.0) * 127.5, 0, 255).astype(np.uint8)
-        out = cv2.cvtColor(y, cv2.COLOR_RGB2BGR)
-        if out.shape[0] != h or out.shape[1] != w:
-            out = cv2.resize(out, (w, h), interpolation=cv2.INTER_CUBIC)
-        return np.ascontiguousarray(out)
-    except Exception as e:
-        _AI_STATE["err"] = f"AI model error: {str(e)[:120]}"
-        return frame
-
-
-def apply_cartoon(frame, key, ai_long=AI_LONG):
-    """BGR uint8 frame → Cartoon BGR uint8 frame (shape အတူတူ၊ error ဖြစ်ရင် original ပြန်)"""
-    if key and key.startswith("ai_"):
-        p = ai_models().get(key)
-        return ai_cartoon(frame, p, ai_long) if p else frame
-    fn = CARTOON_MAP.get(key)
-    if fn is None:
-        return frame
-    try:
-        h, w = frame.shape[:2]
-        sc = min(1.0, CARTOON_WORK_W / float(w))
-        small = frame
-        if sc < 1.0:
-            small = cv2.resize(frame, (max(8, int(w * sc)), max(8, int(h * sc))),
-                               interpolation=cv2.INTER_AREA)
-        small = np.ascontiguousarray(small)
-        out = fn(small)
-        if out.ndim == 2:
-            out = _g2b(out)
-        if out.shape[0] != h or out.shape[1] != w:
-            out = cv2.resize(out, (w, h), interpolation=cv2.INTER_LINEAR)
-        return np.ascontiguousarray(out.astype(np.uint8))
-    except Exception:
-        return frame
-
-
-
-def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
-               box_width_ratio=BOX_WIDTH_RATIO,
-               padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
-    img = Image.new("RGBA", (W, H), (0,0,0,0))
+def hex2rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+
+def render_png(text, out, fp, W, H, fs, pos_y=SUB_POS_DEFAULT,
+               text_color=SUB_TEXT_COLOR, stroke_color=SUB_STROKE_COLOR,
+               stroke_ratio=SUB_STROKE_RATIO, max_w_ratio=SUB_MAX_W_RATIO):
+    """Box မပါ — အနက်စာလုံး + အစိမ်းရောင် အထူကွပ် (rounded outline) စာတန်း"""
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
     except: f = ImageFont.load_default()
 
-    mc = max(15, int(W/(fs*0.9)))
+    tc = hex2rgb(text_color) + (255,)
+    sc = hex2rgb(stroke_color) + (255,)
+    sw = max(3, int(fs * stroke_ratio))
+
+    # pixel အကျယ်နဲ့ စာကြောင်းခွဲ
+    max_w = int(W * max_w_ratio) - 2 * sw
     lines, cur = [], ""
     for w in text.split():
-        if len(cur)+len(w)+1 <= mc: cur = cur+" "+w if cur else w
+        test = cur + " " + w if cur else w
+        if d.textlength(test, font=f) <= max_w or not cur:
+            cur = test
         else:
-            if cur: lines.append(cur)
+            lines.append(cur)
             cur = w
     if cur: lines.append(cur)
     if not lines: return out
 
-    lh = int(fs * 1.3)
-    text_h = len(lines) * lh
-    box_w = int(W * box_width_ratio)
-    box_h = text_h + padding_y * 2
-    box_x = (W - box_w) // 2
-    max_y = H - box_h
-    box_y = int((pos_y / 100) * max_y)
-    box_y = max(0, min(box_y, max_y))
+    lh = int(fs * SUB_LINE_GAP)
+    pad = sw + 4
+    block_h = len(lines) * lh + pad * 2
+    max_y = max(0, H - block_h)
+    top = int((pos_y / 100) * max_y)
+    top = max(0, min(top, max_y))
 
-    d.rounded_rectangle(
-        [box_x, box_y, box_x + box_w, box_y + box_h],
-        radius=corner_radius, fill=(0, 0, 0, ba)
-    )
-
-    ty = box_y + padding_y
+    ty = top + pad
     for ln in lines:
-        bb = d.textbbox((0, 0), ln, font=f)
-        lw = bb[2] - bb[0]
-        lx = box_x + (box_w - lw) // 2
-        for dx in [-2,-1,0,1,2]:
-            for dy in [-2,-1,0,1,2]:
-                d.text((lx+dx, ty+dy), ln, font=f, fill=(0,0,0,255))
-        d.text((lx, ty), ln, font=f, fill=(255,255,255,255))
+        lw = d.textlength(ln, font=f)
+        lx = int((W - lw) / 2)
+        d.text((lx, ty), ln, font=f, fill=tc,
+               stroke_width=sw, stroke_fill=sc)
         ty += lh
 
     img.save(out, "PNG")
     return out
 
 
-def split_for_sub(text, mc=30):
+def split_for_sub(text, mc=SUB_MAXCHAR):
     parts = []
     sents = [s.strip() + "။" for s in text.replace("။", "။|").split("|") if s.strip()]
     for s in sents:
@@ -569,7 +208,7 @@ def split_for_sub(text, mc=30):
     return parts
 
 
-def scr_to_srt_timed(pieces, total, path, mc=30):
+def scr_to_srt_timed(pieces, total, path, mc=SUB_MAXCHAR):
     """pieces = [(text, audio_seconds)] — chunk တစ်ခုချင်းစီမှာ အချိန် reset ဖြစ်လို့ drift မရှိ"""
     raw = sum(d for _, d in pieces)
     if raw <= 0: return None
@@ -673,10 +312,11 @@ def simple_merge(video_in, audio_in, output_video, tempo, segments=None):
 
 
 def final_render(video_in, audio_in, output_video, tempo,
-                 srt_path=None, fp=FONT_FILE, fs=FS, pos_y=100, bh=BH, ba=BA,
+                 srt_path=None, fp=FONT_FILE, fs_ratio=SUB_FS_RATIO,
+                 pos_y=SUB_POS_DEFAULT,
+                 text_color=SUB_TEXT_COLOR, stroke_color=SUB_STROKE_COLOR,
                  use_neon=True, thickness=15, speed=0.4, tail=0.5,
-                 crop_ratio=0.95, mirror=True, segments=None, cartoon="none",
-                 ai_long=AI_LONG, ai_skip=1):
+                 crop_ratio=0.95, mirror=True, segments=None):
     W0, H0, _ = vid_info(video_in)
     pr = ffmpeg.probe(video_in)
     vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
@@ -691,6 +331,7 @@ def final_render(video_in, audio_in, output_video, tempo,
     else:
         cw, ch, cx, cy = W0, H0, 0, 0
     W, H = cw, ch
+    fs = max(12, int(W * fs_ratio / 100.0))
 
     subs = []
     if srt_path:
@@ -700,8 +341,8 @@ def final_render(video_in, audio_in, output_video, tempo,
         def prep(args):
             i, sg = args
             p = f"subtitle_pngs/s_{i:04d}.png"
-            render_png(sg["text"], p, fp, W, H, fs, pos_y, bh, ba,
-                       box_width_ratio=BOX_WIDTH_RATIO)
+            render_png(sg["text"], p, fp, W, H, fs, pos_y,
+                       text_color=text_color, stroke_color=stroke_color)
             rgba = cv2.imread(p, cv2.IMREAD_UNCHANGED)
             try: os.remove(p)
             except: pass
@@ -820,11 +461,6 @@ def final_render(video_in, audio_in, output_video, tempo,
     th_w = threading.Thread(target=writer, daemon=True)
     th_r.start(); th_w.start()
 
-    use_cartoon = is_cartoon(cartoon)
-    is_ai = use_cartoon and cartoon.startswith("ai_")
-    ai_skip = max(1, int(ai_skip))
-    ai_last = None
-
     j = 0; k = 0
     try:
         while True:
@@ -834,15 +470,6 @@ def final_render(video_in, audio_in, output_video, tempo,
             fr = fr[cy:cy + ch, cx:cx + cw]
             if mirror: fr = fr[:, ::-1]
             fr = np.ascontiguousarray(fr)
-
-            if use_cartoon:
-                if is_ai:
-                    # AI က နှေးလို့ N frame ကို တစ်ခါ run၊ ကြားထဲ ရှေ့ frame ရလဒ်ကို ပြန်သုံး
-                    if ai_last is None or j % ai_skip == 0:
-                        ai_last = apply_cartoon(fr, cartoon, ai_long)
-                    fr = ai_last.copy()              # neon က in-place ရေးလို့ copy လိုတယ်
-                else:
-                    fr = apply_cartoon(fr, cartoon)  # Cartoon filter (neon/subtitle မတိုင်ခင်)
 
             if use_neon:
                 head = (t * speed * P / 4.0) % P
@@ -1114,7 +741,7 @@ def whisper_fast(video_path, model=None):
 # ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Cartoon Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
 with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
@@ -1132,11 +759,11 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-st.text_area(
+pasted_now = st.text_area(
     "paste",
+    value="",
     height=80,
     key="paste_big",
-    on_change=_on_paste,
     label_visibility="collapsed",
     placeholder="📋  ဒီနေရာကို Long-press → Paste  (သို့)  Ctrl+V  —  ချက်ချင်း Script ထဲ ရောက်မယ်",
 )
@@ -1164,9 +791,17 @@ div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeh
 </style>
 """, unsafe_allow_html=True)
 
-_pm = st.session_state.pop("paste_msg", None)
-if _pm:
-    st.success(_pm)
+if pasted_now and pasted_now.strip():
+    clean = pasted_now.strip()
+    if clean != st.session_state.get("last_paste", ""):
+        st.session_state.last_paste = clean
+        lines = [l.strip().strip('"\u201c\u201d').strip()
+                 for l in clean.splitlines()]
+        result = "\n\n".join(l for l in lines if l)
+        st.session_state.script = result
+        st.session_state.paste_big = ""
+        st.success(f"✅ Script ထဲ Auto ရောက်သွားပြီ — {len(result)} လုံး")
+        st.rerun()
 
 script = st.text_area("Script", value=st.session_state.script, height=180,
                       label_visibility="collapsed", placeholder="မြန်မာ Script paste...")
@@ -1197,44 +832,24 @@ neon_animated = True
 neon_thickness = 15
 neon_speed = 0.4
 
-# ==================== Step 3 — Cartoon Style ====================
-st.subheader("🎨 Step 3 — Cartoon Style")
-_styles_now = all_styles()
-_style_keys = [k for k, _, _ in _styles_now]
-_style_lbl = {k: l for k, l, _ in _styles_now}
-if st.session_state.get("cartoon_style") not in _style_keys:
-    st.session_state.pop("cartoon_style", None)
-cartoon_key = st.selectbox(
-    "Cartoon Style",
-    _style_keys,
-    index=_style_keys.index("classic"),
-    format_func=lambda k: _style_lbl.get(k, k),
-    label_visibility="collapsed",
-    key="cartoon_style",
-)
-st.caption("💡 Step 5 Preview မှာ ရွေးထားတဲ့ Style ကို ကြိုကြည့်လို့ရ — Style အားလုံးကိုလည်း တစ်ပြိုင်နက်ကြည့်လို့ရ")
-
-ai_long = AI_LONG
-ai_skip = 2
-if cartoon_key.startswith("ai_"):
-    ai_long = st.select_slider("🤖 AI Resolution (သေးလေ မြန်လေ)", options=[256, 320, 384, 448, 512], value=AI_LONG)
-    ai_skip = st.slider("🤖 AI ကို frame ဘယ်နှစ်ခုမှာ တစ်ခါ run (များလေ မြန်လေ)", 1, 4, 2)
-if not [k for k in _style_keys if k.startswith("ai_")]:
-    st.caption("🤖 AI Cartoon (AnimeGAN) ထည့်ချင်ရင် `models/` folder ထဲ `.onnx` ဖိုင် ထည့်ပါ")
-st.divider()
-
 # ==================== Step 4 — Subtitle ====================
 st.subheader("📝 Step 4 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
-pos_y = 100
+pos_y = SUB_POS_DEFAULT
+fs_ratio = SUB_FS_RATIO
+text_color = SUB_TEXT_COLOR
+stroke_color = SUB_STROKE_COLOR
 if use_sub:
-    pos_y = st.slider("📍 Position", 0, 100, 100, 1)
+    pos_y = st.slider("📍 Position (0=အပေါ် · 50=အလယ် · 100=အောက်)", 0, 100, SUB_POS_DEFAULT, 1)
+    fs_ratio = st.slider("🔠 စာအရွယ်အစား", 3.0, 10.0, SUB_FS_RATIO, 0.5)
+    cc1, cc2 = st.columns(2)
+    with cc1: text_color = st.color_picker("စာလုံးအရောင်", SUB_TEXT_COLOR)
+    with cc2: stroke_color = st.color_picker("ကွပ်အရောင်", SUB_STROKE_COLOR)
 st.divider()
 
 # ==================== Step 5 — Preview ====================
 if vid:
     st.subheader("🖼️ Step 5 — Preview")
-    fr_full = None
     with st.spinner("Preview..."):
         pkey = (vid.name, vid.size)
         if st.session_state.get("pkey") != pkey or not os.path.exists("preview.mp4"):
@@ -1243,27 +858,21 @@ if vid:
             st.session_state.pkey = pkey
         W, H, _ = vid_info("preview.mp4")
 
-        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA,
-                   box_width_ratio=BOX_WIDTH_RATIO)
-
         cap = cv2.VideoCapture("preview.mp4")
-        nfr = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        if nfr > 8:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, nfr // 4)
         ok, fr = cap.read()
-        if not ok:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ok, fr = cap.read()
         cap.release()
 
         if ok:
-            fr_full = fr
-            _t_ai = time.time()
-            fr_c = apply_cartoon(fr, cartoon_key, ai_long)       # Cartoon Preview
-            _t_ai = time.time() - _t_ai
-            bg = Image.fromarray(cv2.cvtColor(fr_c, cv2.COLOR_BGR2RGB)).convert("RGBA")
-            fg = Image.open("prev.png").convert("RGBA")
-            comp = Image.alpha_composite(bg, fg)
+            bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+            if use_sub:
+                prev_fs = max(12, int(W * fs_ratio / 100.0))
+                render_png("အထင်သေးရင် အရက်ကွဲတတ်တယ်နော်!", "prev.png", FONT_FILE,
+                           W, H, prev_fs, pos_y,
+                           text_color=text_color, stroke_color=stroke_color)
+                fg = Image.open("prev.png").convert("RGBA")
+                comp = Image.alpha_composite(bg, fg)
+            else:
+                comp = bg
 
             if use_neon:
                 phase = 0.5 if neon_animated else 0.0
@@ -1273,33 +882,8 @@ if vid:
             pw = 720
             comp.resize((pw, int(H * (pw / W))), Image.LANCZOS).convert("RGB").save("prev_out.png")
             st.image("prev_out.png", use_container_width=True)
-            st.caption(f"🎨 {_style_lbl.get(cartoon_key, '')}")
-            if cartoon_key.startswith("ai_"):
-                try:
-                    _cp = cv2.VideoCapture("preview.mp4")
-                    _fps = _cp.get(cv2.CAP_PROP_FPS) or 25.0
-                    _nf = _cp.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-                    _cp.release()
-                    _est = (_nf / max(1, ai_skip)) * _t_ai
-                    st.caption(f"⏱️ AI ≈ {_t_ai*1000:.0f} ms/frame — video တစ်ခုလုံး AI အပိုင်း ≈ {_est/60:.1f} မိနစ်")
-                except Exception:
-                    pass
-                if _AI_STATE["err"]:
-                    st.warning(f"⚠️ {_AI_STATE['err']} — Filter ကိုပဲ အသုံးပြုပါ")
             if use_neon and neon_animated:
                 st.caption("🎬 Animated — Output Video မှာ အလင်းတန်း ပတ်ပြေးနေမည်")
-
-    if fr_full is not None:
-        if st.toggle("🖼️ Cartoon Style အားလုံး တစ်ပြိုင်နက် ကြည့်မယ်", value=False, key="gallery_on"):
-            tw = 320
-            th_ = max(16, int(fr_full.shape[0] * tw / fr_full.shape[1]))
-            thumb = cv2.resize(fr_full, (tw, th_), interpolation=cv2.INTER_AREA)
-            with st.spinner("Styles အားလုံး ပြင်နေ..."):
-                gcols = st.columns(2)
-                for n_i, (k_, l_, _f) in enumerate(_styles_now):
-                    o_ = apply_cartoon(thumb, k_, 256)
-                    gcols[n_i % 2].image(cv2.cvtColor(o_, cv2.COLOR_BGR2RGB),
-                                         caption=l_, use_container_width=True)
 st.divider()
 
 # ==================== Step 6 — Generate ====================
@@ -1366,18 +950,18 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     tempo = max(0.5, min(2.0, adur / vdur))
     eff = adur / tempo     # atempo ပြီးနောက် အသံအရှည်အမှန်
 
-    with st.spinner(f"🎬 Finalizing — {_style_lbl.get(cartoon_key, '')}..."):
+    with st.spinner("🎬 Finalizing..."):
         try:
             sp = scr_to_srt_timed(pieces, eff, "sub.srt") if use_sub else None
             final_render("input.mp4", None, "video_only.mp4", 1.0,
-                         srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
-                         bh=BH, ba=BA, use_neon=use_neon,
+                         srt_path=sp, fp=FONT_FILE, fs_ratio=fs_ratio, pos_y=pos_y,
+                         text_color=text_color, stroke_color=stroke_color,
+                         use_neon=use_neon,
                          thickness=neon_thickness, speed=neon_speed,
-                         segments=segments, cartoon=cartoon_key,
-                         ai_long=ai_long, ai_skip=ai_skip)
+                         segments=segments)
             mux_audio("video_only.mp4", "voice.mp3", "final.mp4", tempo)
         except Exception as e:
-            st.warning(f"⚠️ Fail: {e} — Cartoon/Subtitle/Neon မပါဘဲ Simple Merge နဲ့ ထုတ်ပေးမယ်")
+            st.warning(f"⚠️ Fail: {e}")
             simple_merge("input.mp4", "voice.mp3", "final.mp4", tempo, segments)
     step_times["🎬 Render"] = time.time() - t0
 
