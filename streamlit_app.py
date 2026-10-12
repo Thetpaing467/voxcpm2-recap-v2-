@@ -604,6 +604,8 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
             loop.run_until_complete(coro_fn())
             loop.close()
 
+    last_err = []
+
     def tts_one(args):
         i, c = args
         os.makedirs("tts_cache", exist_ok=True)
@@ -618,8 +620,8 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
                 if os.path.exists(dst) and os.path.getsize(dst) > 0:
                     time.sleep(0.3)
                     return (i, dst)
-            except Exception:
-                pass
+            except Exception as e:
+                last_err.append(f"{type(e).__name__}: {str(e)[:150]}")
             time.sleep(3 * (attempt + 1))
         return (i, None)
 
@@ -632,7 +634,8 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
     good = [a for a in results if a]
     if not good:
-        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ (edge-tts>=7.0.0) / ခဏနေ ပြန်စမ်းပါ")
+        raise Exception("Edge TTS အသံမရပါ — " + (last_err[-1] if last_err else "error မသိ")
+                        + " | edge-tts>=7.0.0 လိုအပ်")
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
