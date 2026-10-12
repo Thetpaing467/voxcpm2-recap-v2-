@@ -1,14 +1,12 @@
 import streamlit as st
 import os, re, hashlib, shutil, subprocess, asyncio, time
 import concurrent.futures
-import threading, queue, math
+import threading, queue, math, urllib.request
 import numpy as np
 import edge_tts
 
-# ---- edge-tts version check ----
 EDGE_TTS_VERSION = getattr(edge_tts, "__version__", "unknown")
 
-# ---- ffmpeg-python ----
 try:
     import ffmpeg
 except ImportError:
@@ -22,6 +20,16 @@ try:
     GRADIO_OK = True
 except Exception:
     GRADIO_OK = False
+
+# ---- Kokoro ----
+try:
+    from kokoro_onnx import Kokoro
+    import soundfile as sf
+    KOKORO_OK = True
+except Exception:
+    KOKORO_OK = False
+    Kokoro = None
+    sf = None
 
 os.environ["HF_HOME"] = "/tmp/hf_cache"
 
@@ -40,6 +48,7 @@ USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 300
 EDGE_CHUNK = 200
+KOKORO_CHUNK = 300
 TTS_WORKERS = 3
 PNG_WORKERS = 4
 
@@ -57,10 +66,18 @@ EDGE_VOICES = {
 }
 EDGE_VOICE_FIXED = "male"
 
+# ---- Kokoro settings ----
+KOKORO_MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+KOKORO_VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
+KOKORO_MODEL_FILE = "kokoro-v1.0.onnx"
+KOKORO_VOICES_FILE = "voices-v1.0.bin"
+KOKORO_VOICE = "af_bella"     # af_bella, af_sarah, am_adam, bf_emma, etc.
+KOKORO_SPEED = 1.0
+
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
 
-# ==================== Session State Init ====================
+# ==================== Session State ====================
 def _init_state():
     defaults = {
         "auth": False,
@@ -469,8 +486,7 @@ def final_render(video_in, audio_in, output_video, tempo,
     def qput(q, item):
         while not stop.is_set():
             try:
-                q.put(item, timeout=0.5)
-                return True
+                q.put(item, timeout=0.5); return True
             except queue.Full:
                 pass
         return False
@@ -480,16 +496,14 @@ def final_render(video_in, audio_in, output_video, tempo,
             try:
                 return q.get(timeout=0.5)
             except queue.Empty:
-                if stop.is_set():
-                    return None
+                if stop.is_set(): return None
 
     def reader():
         cap = cv2.VideoCapture(video_in)
         i = 0; p = 0
         try:
             while not stop.is_set():
-                if not cap.grab():
-                    break
+                if not cap.grab(): break
                 t_in = i / fps
                 i += 1
                 if segments:
@@ -498,10 +512,8 @@ def final_render(video_in, audio_in, output_video, tempo,
                     if not (p < len(segments) and segments[p][0] <= t_in):
                         continue
                 ok, fr = cap.retrieve()
-                if not ok:
-                    break
-                if not qput(q_in, fr):
-                    break
+                if not ok: break
+                if not qput(q_in, fr): break
         except Exception as e:
             err.append(e); stop.set()
         finally:
@@ -512,8 +524,7 @@ def final_render(video_in, audio_in, output_video, tempo,
         try:
             while True:
                 bts = qget(q_out)
-                if bts is None:
-                    break
+                if bts is None: break
                 proc.stdin.write(bts)
         except Exception as e:
             err.append(e); stop.set()
@@ -526,12 +537,10 @@ def final_render(video_in, audio_in, output_video, tempo,
     try:
         while True:
             fr = qget(q_in)
-            if fr is None:
-                break
+            if fr is None: break
             t = j / fps
             fr = fr[cy:cy + ch, cx:cx + cw]
-            if mirror:
-                fr = fr[:, ::-1]
+            if mirror: fr = fr[:, ::-1]
             fr = np.ascontiguousarray(fr)
 
             if use_neon and neon_data:
@@ -546,23 +555,19 @@ def final_render(video_in, audio_in, output_video, tempo,
                 reg = fr[sb["y0"]:sb["y1"]].astype(np.float32) * sb["inv"] + sb["pre"]
                 fr[sb["y0"]:sb["y1"]] = reg.astype(np.uint8)
 
-            if not qput(q_out, fr.tobytes()):
-                break
+            if not qput(q_out, fr.tobytes()): break
             j += 1
     except Exception as e:
         err.append(e); stop.set()
     finally:
-        if not stop.is_set():
-            qput(q_out, None)
+        if not stop.is_set(): qput(q_out, None)
         th_w.join()
         stop.set()
         th_r.join()
         try: proc.stdin.close()
         except Exception: pass
         proc.wait()
-
-    if err:
-        raise err[0]
+    if err: raise err[0]
     if proc.returncode != 0:
         raise Exception("Final render: ffmpeg fail")
     return output_video
@@ -616,7 +621,124 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     return img
 
 
-# ==================== TTS — VoxCPM2 ====================
+# ==================== Kokoro TTS ====================
+
+def _download_file(url, dst, desc=""):
+    if os.path.exists(dst) and os.path.getsize(dst) > 1024 * 1024:
+        return dst
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    tmp = dst + ".part"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f)
+        os.replace(tmp, dst)
+        return dst
+    except Exception:
+        if os.path.exists(tmp):
+            try: os.remove(tmp)
+            except Exception: pass
+        raise
+
+
+@st.cache_resource(show_spinner=False)
+def get_kokoro():
+    """Kokoro ONNX model ကို load (တစ်ခါပဲ)"""
+    if not KOKORO_OK:
+        raise RuntimeError("kokoro-onnx မရှိပါ — pip install kokoro-onnx soundfile")
+
+    model_path = _download_file(KOKORO_MODEL_URL, KOKORO_MODEL_FILE)
+    voices_path = _download_file(KOKORO_VOICES_URL, KOKORO_VOICES_FILE)
+
+    # kokoro-onnx version အလိုက် API ကွာတယ်
+    try:
+        return Kokoro(model_path, voices_path)
+    except TypeError:
+        # version အဟောင်း — voices file မလိုဘူး
+        return Kokoro(model_path)
+
+
+def kokoro_run(chunks, out_path, cb=None):
+    """
+    Kokoro ONNX — local offline TTS
+    chunk တစ်ခုချင်းစီကို generate → concat
+    """
+    if not KOKORO_OK:
+        raise RuntimeError("kokoro-onnx မရှိပါ")
+
+    # chunk သေးသေးလေး ခွဲ
+    small = []
+    for c in chunks:
+        for x in split_scr(c, KOKORO_CHUNK):
+            if has_speech(x):
+                small.append(x)
+    chunks = small
+    if not chunks:
+        raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
+
+    kokoro = get_kokoro()
+
+    os.makedirs("kokoro_cache", exist_ok=True)
+    wav_files = []
+
+    for i, c in enumerate(chunks):
+        if cb:
+            cb(i, len(chunks), c)
+
+        key = hashlib.md5(
+            (KOKORO_VOICE + str(KOKORO_SPEED) + c).encode("utf-8")
+        ).hexdigest()
+        dst = f"kokoro_cache/{key}.wav"
+
+        if os.path.exists(dst) and os.path.getsize(dst) > 1024:
+            wav_files.append(dst)
+            continue
+
+        try:
+            samples, sr = kokoro.create(
+                c,
+                voice=KOKORO_VOICE,
+                speed=KOKORO_SPEED,
+                lang="en-us",
+            )
+            sf.write(dst, samples, sr)
+            wav_files.append(dst)
+        except Exception as e:
+            st.warning(f"⚠️ Kokoro chunk {i} fail: {str(e)[:80]}")
+            continue
+
+    if not wav_files:
+        raise Exception("Kokoro အသံ မထုတ်နိုင်ပါ")
+
+    # pieces — chunk text + duration
+    pieces = []
+    idx = 0
+    for i, c in enumerate(chunks):
+        if idx < len(wav_files):
+            try:
+                pieces.append((c, audio_dur(wav_files[idx])))
+                idx += 1
+            except Exception:
+                pass
+
+    # concat → mp3
+    concat_file = "kokoro_concat.txt"
+    with open(concat_file, "w", encoding="utf-8") as f:
+        for a in wav_files:
+            f.write(f"file '{os.path.abspath(a)}'\n")
+
+    _require_ffmpeg_py()
+    (
+        ffmpeg
+        .input(concat_file, format="concat", safe=0)
+        .output(out_path, acodec="libmp3lame",
+                audio_bitrate=AUDIO_BITRATE, ar=48000)
+        .overwrite_output()
+        .run(quiet=True)
+    )
+    return out_path, pieces
+
+
+# ==================== VoxCPM2 TTS ====================
 
 def tts_demo(chunks, ref, space, cb=None):
     if not GRADIO_OK:
@@ -665,12 +787,9 @@ def tts_burmese(chunks, ref, space, cb=None):
     return files
 
 
-# ==================== TTS — Edge (7.2.6 SAFE) ====================
+# ==================== Edge TTS 7.2.6 (SAFE) ====================
 
 async def _edge_tts_async(text, out_file, voice):
-    """
-    edge-tts 7.2.6 — Communicate.save() async
-    """
     communicate = edge_tts.Communicate(
         text=text,
         voice=voice,
@@ -682,10 +801,7 @@ async def _edge_tts_async(text, out_file, voice):
 
 
 def _run_async_in_thread(coro_fn):
-    """
-    edge-tts 7.2.6 — thread-safe event loop
-    (Streamlit + ThreadPoolExecutor မှာ asyncio.run() crash ဖြစ်တာကို ကာကွယ်)
-    """
+    """edge-tts 7.2.6 — thread-safe event loop"""
     result_box = {}
 
     def _worker():
@@ -706,16 +822,13 @@ def _run_async_in_thread(coro_fn):
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
     t.join(timeout=60)
-
     if t.is_alive():
         raise TimeoutError("edge-tts timeout (60s)")
-
     if "err" in result_box:
         raise result_box["err"]
 
 
 def _is_valid_mp3(path, min_size=1024):
-    """edge-tts 7.2.6 — empty file ကာကွယ်"""
     if not os.path.exists(path):
         return False
     if os.path.getsize(path) < min_size:
@@ -723,7 +836,6 @@ def _is_valid_mp3(path, min_size=1024):
     try:
         with open(path, "rb") as f:
             header = f.read(4)
-        # ID3 / MPEG frame sync
         if header[:3] == b"ID3":
             return True
         if len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0:
@@ -734,9 +846,6 @@ def _is_valid_mp3(path, min_size=1024):
 
 
 def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
-    """
-    edge-tts 7.2.6 — retry + empty-file detection + MP3 header validation
-    """
     voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
 
     small = []
@@ -761,25 +870,20 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
             try:
                 if os.path.exists(dst):
                     os.remove(dst)
-
                 _run_async_in_thread(
                     lambda: _edge_tts_async(c, dst, voice_id)
                 )
-
                 if _is_valid_mp3(dst):
                     time.sleep(0.3)
                     return (i, dst)
                 elif os.path.exists(dst):
                     try: os.remove(dst)
                     except Exception: pass
-
             except TimeoutError:
                 pass
             except Exception:
                 pass
-
             time.sleep(2 * (attempt + 1))
-
         return (i, None)
 
     results = [None] * len(chunks)
@@ -831,12 +935,27 @@ def tts_free(chunks, out, cb=None):
     return out, pieces
 
 
-def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
+# ==================== TTS Router ====================
+
+def tts_all(text, out, ref=None, cb=None, engine="edge"):
+    """
+    engine: "kokoro" | "edge" | "voxcpm"
+    """
     chunks = split_scr(text, TTS_CHUNK)
 
-    if not use_voxcpm:
+    if engine == "kokoro":
+        try:
+            out_path, pieces = kokoro_run(chunks, out, cb=cb)
+            st.success(f"✅ Kokoro (Local) — 🎙️ {KOKORO_VOICE}")
+            return out_path, pieces
+        except Exception as e:
+            st.warning(f"⚠️ Kokoro Fail: {str(e)[:100]} → Edge TTS")
+            engine = "edge"
+
+    if engine == "edge":
         return tts_free(chunks, out, cb=cb)
 
+    # engine == "voxcpm"
     files = None
     for s in SPACES:
         try:
@@ -930,7 +1049,7 @@ def whisper_fast(video_path, model=None):
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown(
-    f"<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS {EDGE_TTS_VERSION} → Recap</div>",
+    f"<div class='main-sub'>Kokoro (Local) · Edge TTS {EDGE_TTS_VERSION} · VoxCPM2</div>",
     unsafe_allow_html=True
 )
 st.divider()
@@ -1008,7 +1127,7 @@ with c2:
         st.rerun()
 st.divider()
 
-# ---- Step 2 — Video ----
+# ---- Video ----
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader(
     "📹",
@@ -1025,7 +1144,7 @@ neon_animated = True
 neon_thickness = 15
 neon_speed = 0.4
 
-# ---- Step 4 — Subtitle ----
+# ---- Subtitle ----
 st.subheader("📝 Step 4 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
 pos_y = 100
@@ -1033,7 +1152,7 @@ if use_sub:
     pos_y = st.slider("📍 Position", 0, 100, 100, 1)
 st.divider()
 
-# ---- Step 5 — Preview ----
+# ---- Preview ----
 if vid:
     st.subheader("🖼️ Step 5 — Preview")
     with st.spinner("Preview..."):
@@ -1070,29 +1189,52 @@ if vid:
                 st.caption("🎬 Animated — Output Video မှာ အလင်းတန်း ပတ်ပြေးနေမည်")
 st.divider()
 
-# ---- Step 6 — Generate ----
+# ---- Generate ----
 st.subheader("🚀 Step 6 — Generate")
 
-use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True)
+# Kokoro availability
+kokoro_ready = KOKORO_OK
+if kokoro_ready:
+    kokoro_ready = (
+        os.path.exists(KOKORO_MODEL_FILE) and os.path.getsize(KOKORO_MODEL_FILE) > 1024 * 1024
+    ) or True  # auto-download allowed
 
-if use_voxcpm:
+engine_choices = ["edge"]
+if kokoro_ready:
+    engine_choices.insert(0, "kokoro")
+if GRADIO_OK:
+    engine_choices.append("voxcpm")
+
+engine = st.radio(
+    "🎙️ TTS Engine",
+    engine_choices,
+    format_func=lambda x: {
+        "kokoro": f"🎧 Kokoro (Local, offline) — {KOKORO_VOICE}",
+        "edge":   f"⚡ Edge TTS {EDGE_TTS_VERSION} — သီဟ (Thiha)",
+        "voxcpm": "🎙️ VoxCPM2 (Cloud, Myanmar)",
+    }[x],
+    index=0 if "kokoro" in engine_choices else 0,
+    horizontal=False,
+)
+
+ref_path = None
+if engine == "voxcpm":
     st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS သီဟ Auto")
     ref = st.file_uploader("🎤 Ref Audio (VoxCPM2) — Optional",
                            type=["wav", "mp3", "m4a"], key="ref_up")
     if ref:
         with open("ref.wav", "wb") as f:
             f.write(ref.read())
-        st.session_state.ref = "ref.wav"
+        ref_path = "ref.wav"
         st.success("✅ Ref Audio")
     else:
         if os.path.exists("ref.wav"):
-            st.session_state.ref = "ref.wav"
+            ref_path = "ref.wav"
             st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
-        else:
-            st.session_state.ref = None
+elif engine == "kokoro":
+    st.info(f"✅ Kokoro Local — 🎙️ {KOKORO_VOICE} (English only, offline)")
 else:
-    st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
-    st.session_state.ref = None
+    st.info("⚡ Edge TTS သီဟ (Thiha) — Myanmar voice")
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
     if not script.strip():
@@ -1117,7 +1259,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         except Exception:
             pass
 
-    # Whisper/VAD ကို TTS နဲ့ တပြိုင်နက် run
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     job = job_pool.submit(prepare_video_job, "input.mp4", fw_model)
 
@@ -1130,9 +1271,8 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         txt.caption(f"[{i+1}/{tot}]")
 
     try:
-        _, pieces = tts_all(script_n, "voice.mp3",
-                            ref=st.session_state.get("ref"),
-                            cb=cb, use_voxcpm=use_voxcpm)
+        _, pieces = tts_all(script_n, "voice.mp3", ref=ref_path,
+                            cb=cb, engine=engine)
     except Exception as e:
         st.error(f"TTS: {e}")
         st.stop()
