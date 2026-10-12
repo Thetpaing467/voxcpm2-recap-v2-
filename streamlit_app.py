@@ -1,21 +1,11 @@
 import streamlit as st
-import os, re, hashlib, shutil, subprocess, asyncio, time
+import os, re, hashlib, ffmpeg, shutil, subprocess, asyncio, time
 import concurrent.futures
 import numpy as np
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 from gradio_client import Client, handle_file
-
-# ==================== Gemini TTS ====================
-from google import genai
-import base64
-import wave
-
-# 获取 Gemini API Key
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-3.8-flash-tts"
-GEMINI_VOICES = ["Kore", "Puck", "Charon", "Fenrir", "Aoede"]
 
 os.environ["HF_HOME"] = "/tmp/hf_cache"
 
@@ -34,7 +24,7 @@ FINAL_PRESET = "ultrafast"
 FINAL_CRF = 20
 USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
-TTS_CHUNK = 300
+TTS_CHUNK = 300      # သေးလေ subtitle sync ပိုတိကျ
 EDGE_CHUNK = 200
 TTS_WORKERS = 3
 PNG_WORKERS = 4
@@ -57,6 +47,7 @@ st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="cen
 
 
 def _on_download_clear():
+    """Download နှိပ်ရင် Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.paste_big = ""
@@ -210,6 +201,7 @@ def split_for_sub(text, mc=30):
 
 
 def scr_to_srt_timed(pieces, total, path, mc=30):
+    """pieces = [(text, audio_seconds)] — chunk တစ်ခုချင်းစီမှာ အချိန် reset ဖြစ်လို့ drift မရှိ"""
     raw = sum(d for _, d in pieces)
     if raw <= 0: return None
     k = total / raw
@@ -425,7 +417,7 @@ def final_render(video_in, audio_in, output_video, tempo,
             except queue.Empty:
                 if stop.is_set(): return None
 
-    def reader():
+    def reader():          # Decode thread
         cap = cv2.VideoCapture(video_in)
         i = 0; p = 0
         try:
@@ -445,7 +437,7 @@ def final_render(video_in, audio_in, output_video, tempo,
             cap.release()
             qput(q_in, None)
 
-    def writer():
+    def writer():          # ffmpeg pipe write thread
         try:
             while True:
                 bts = qget(q_out)
@@ -508,6 +500,7 @@ def mux_audio(video_in, audio_in, output_video, tempo):
 
 
 def prepare_video_job(video_in, fw_model):
+    """Whisper/VAD နဲ့ speech segments ပဲ ရှာ (TTS နဲ့ တပြိုင်နက် run)"""
     segments = whisper_fast(video_in, fw_model)
     if not segments: raise Exception("Speech မတွေ့")
     kept, vfps = keep_count(video_in, segments)
@@ -577,89 +570,6 @@ def tts_burmese(chunks, ref, space, cb=None):
     return files
 
 
-# ==================== Gemini TTS ====================
-
-def wave_file(filename, pcm, channels=1, rate=24000, sample_width=2):
-    with wave.open(filename, "wb") as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(sample_width)
-        wf.setframerate(rate)
-        wf.writeframes(pcm)
-
-
-def gemini_tts_chunk(text, voice, out_path):
-    """Gemini TTS — single chunk"""
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    
-    interaction = client.interactions.create(
-        model=GEMINI_MODEL,
-        input=text,
-        response_format={"type": "audio"},
-        generation_config={
-            "speech_config": [{"voice": voice}]
-        }
-    )
-    
-    audio_data = base64.b64decode(interaction.output_audio.data)
-    wave_file(out_path, audio_data)
-    return out_path
-
-
-def gemini_tts_run(chunks, out_path, voice="Kore", cb=None):
-    """Gemini TTS — full run with chunking"""
-    if not GEMINI_API_KEY:
-        raise Exception("GEMINI_API_KEY မရှိပါ — Google AI Studio ကနေ ရယူပါ")
-    
-    small = []
-    for c in chunks:
-        for x in split_scr(c, TTS_CHUNK):
-            if has_speech(x): small.append(x)
-    chunks = small
-    if not chunks: raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
-    
-    os.makedirs("gemini_cache", exist_ok=True)
-    wav_files = []
-    
-    for i, c in enumerate(chunks):
-        if cb: cb(i, len(chunks), c)
-        
-        key = hashlib.md5((voice + c).encode("utf-8")).hexdigest()
-        dst = f"gemini_cache/{key}.wav"
-        
-        if os.path.exists(dst) and os.path.getsize(dst) > 1024:
-            wav_files.append(dst)
-            continue
-        
-        try:
-            gemini_tts_chunk(c, voice, dst)
-            if os.path.exists(dst) and os.path.getsize(dst) > 1024:
-                wav_files.append(dst)
-        except Exception as e:
-            st.warning(f"⚠️ Gemini chunk {i} fail: {str(e)[:80]}")
-            continue
-    
-    if not wav_files:
-        raise Exception("Gemini TTS အသံ မထုတ်နိုင်ပါ")
-    
-    pieces = []
-    for i, c in enumerate(chunks):
-        if i < len(wav_files):
-            try:
-                pieces.append((c, audio_dur(wav_files[i])))
-            except: pass
-    
-    concat_file = "gemini_concat.txt"
-    with open(concat_file, "w", encoding="utf-8") as f:
-        for a in wav_files: f.write(f"file '{a}'\n")
-    
-    ffmpeg.input(concat_file, format="concat", safe=0).output(
-        out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
-    return out_path, pieces
-
-
-# ==================== Edge TTS ====================
-
 async def _edge_tts_async(text, out_file, voice):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_file)
@@ -715,6 +625,7 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
+    # chunk တစ်ခုချင်းရဲ့ အမှန်တကယ် အသံအရှည်
     pieces = [(chunks[i], audio_dur(a)) for i, a in enumerate(results) if a]
 
     with open("edge_concat.txt", "w", encoding="utf-8") as f:
@@ -732,17 +643,8 @@ def tts_free(chunks, out, cb=None):
     return out, pieces
 
 
-def tts_all(text, out, ref=None, cb=None, use_voxcpm=True, use_gemini=False, gemini_voice="Kore"):
+def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
     chunks = split_scr(text, TTS_CHUNK)
-
-    # Gemini TTS (priority if enabled)
-    if use_gemini:
-        try:
-            out, pieces = gemini_tts_run(chunks, out, voice=gemini_voice, cb=cb)
-            st.success(f"✅ Gemini TTS — 🎙️ {gemini_voice}")
-            return out, pieces
-        except Exception as e:
-            st.warning(f"⚠️ Gemini TTS Fail: {str(e)[:80]} → VoxCPM2 / Edge TTS")
 
     if not use_voxcpm:
         return tts_free(chunks, out, cb=cb)
@@ -828,7 +730,7 @@ def whisper_fast(video_path, model=None):
 # ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Script → Gemini / VoxCPM2 / Edge TTS → Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>", unsafe_allow_html=True)
 st.divider()
 
 with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
@@ -965,19 +867,7 @@ st.divider()
 # ==================== Step 6 — Generate ====================
 st.subheader("🚀 Step 6 — Generate")
 
-# Gemini TTS toggle
-use_gemini = st.toggle("✨ Gemini TTS သုံးမလား? (Google AI Studio)", value=False)
-
-if use_gemini:
-    if not GEMINI_API_KEY:
-        st.error("❌ GEMINI_API_KEY မရှိပါ — HF Space Settings → Secrets မှာ ထည့်ပါ")
-        st.stop()
-    st.info("✅ Gemini TTS — မြန်မာစကား support (Voice Clone မရ)")
-    gemini_voice = st.selectbox("🎙️ Gemini Voice", GEMINI_VOICES, index=0)
-else:
-    gemini_voice = "Kore"
-
-use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=not use_gemini)
+use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True)
 
 if use_voxcpm:
     st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS သီဟ Auto")
@@ -1012,6 +902,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         try: fw_model = get_fw_model()
         except Exception: pass
 
+    # Whisper/VAD ကို TTS နဲ့ တပြိုင်နက် run
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     job = job_pool.submit(prepare_video_job, "input.mp4", fw_model)
 
@@ -1020,8 +911,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     def cb(i, tot, c): pb.progress((i+1)/tot); txt.caption(f"[{i+1}/{tot}]")
     try:
         _, pieces = tts_all(script_n, "voice.mp3", ref=st.session_state.get("ref"),
-                            cb=cb, use_voxcpm=use_voxcpm,
-                            use_gemini=use_gemini, gemini_voice=gemini_voice)
+                            cb=cb, use_voxcpm=use_voxcpm)
     except Exception as e:
         st.error(f"TTS: {e}"); st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
@@ -1036,7 +926,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     adur = audio_dur("voice.mp3")
     tempo = max(0.5, min(2.0, adur / vdur))
-    eff = adur / tempo
+    eff = adur / tempo     # atempo ပြီးနောက် အသံအရှည်အမှန်
 
     with st.spinner("🎬 Finalizing..."):
         try:
