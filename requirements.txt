@@ -6,3 +6,4 @@ pillow
 opencv-python-headless
 gradio_client
 faster-whisper
+gTTS
