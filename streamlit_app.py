@@ -31,6 +31,14 @@ except Exception:
     Kokoro = None
     sf = None
 
+# ---- pyttsx3 (System TTS) ----
+try:
+    import pyttsx3
+    PYTTSX3_OK = True
+except Exception:
+    PYTTSX3_OK = False
+    pyttsx3 = None
+
 os.environ["HF_HOME"] = "/tmp/hf_cache"
 
 SPACES = [
@@ -49,6 +57,7 @@ AUDIO_BITRATE = "128k"
 TTS_CHUNK = 300
 EDGE_CHUNK = 200
 KOKORO_CHUNK = 300
+PYTTSX3_CHUNK = 300
 TTS_WORKERS = 3
 PNG_WORKERS = 4
 
@@ -71,8 +80,12 @@ KOKORO_MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/downloa
 KOKORO_VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 KOKORO_MODEL_FILE = "kokoro-v1.0.onnx"
 KOKORO_VOICES_FILE = "voices-v1.0.bin"
-KOKORO_VOICE = "af_bella"     # af_bella, af_sarah, am_adam, bf_emma, etc.
+KOKORO_VOICE = "af_bella"
 KOKORO_SPEED = 1.0
+
+# ---- pyttsx3 settings ----
+PYTTSX3_RATE = 180        # words per minute
+PYTTSX3_VOLUME = 1.0      # 0.0 – 1.0
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
@@ -642,30 +655,20 @@ def _download_file(url, dst, desc=""):
 
 @st.cache_resource(show_spinner=False)
 def get_kokoro():
-    """Kokoro ONNX model ကို load (တစ်ခါပဲ)"""
     if not KOKORO_OK:
         raise RuntimeError("kokoro-onnx မရှိပါ — pip install kokoro-onnx soundfile")
-
     model_path = _download_file(KOKORO_MODEL_URL, KOKORO_MODEL_FILE)
     voices_path = _download_file(KOKORO_VOICES_URL, KOKORO_VOICES_FILE)
-
-    # kokoro-onnx version အလိုက် API ကွာတယ်
     try:
         return Kokoro(model_path, voices_path)
     except TypeError:
-        # version အဟောင်း — voices file မလိုဘူး
         return Kokoro(model_path)
 
 
 def kokoro_run(chunks, out_path, cb=None):
-    """
-    Kokoro ONNX — local offline TTS
-    chunk တစ်ခုချင်းစီကို generate → concat
-    """
     if not KOKORO_OK:
         raise RuntimeError("kokoro-onnx မရှိပါ")
 
-    # chunk သေးသေးလေး ခွဲ
     small = []
     for c in chunks:
         for x in split_scr(c, KOKORO_CHUNK):
@@ -676,7 +679,6 @@ def kokoro_run(chunks, out_path, cb=None):
         raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
 
     kokoro = get_kokoro()
-
     os.makedirs("kokoro_cache", exist_ok=True)
     wav_files = []
 
@@ -695,10 +697,7 @@ def kokoro_run(chunks, out_path, cb=None):
 
         try:
             samples, sr = kokoro.create(
-                c,
-                voice=KOKORO_VOICE,
-                speed=KOKORO_SPEED,
-                lang="en-us",
+                c, voice=KOKORO_VOICE, speed=KOKORO_SPEED, lang="en-us",
             )
             sf.write(dst, samples, sr)
             wav_files.append(dst)
@@ -709,7 +708,6 @@ def kokoro_run(chunks, out_path, cb=None):
     if not wav_files:
         raise Exception("Kokoro အသံ မထုတ်နိုင်ပါ")
 
-    # pieces — chunk text + duration
     pieces = []
     idx = 0
     for i, c in enumerate(chunks):
@@ -720,10 +718,95 @@ def kokoro_run(chunks, out_path, cb=None):
             except Exception:
                 pass
 
-    # concat → mp3
     concat_file = "kokoro_concat.txt"
     with open(concat_file, "w", encoding="utf-8") as f:
         for a in wav_files:
+            f.write(f"file '{os.path.abspath(a)}'\n")
+
+    _require_ffmpeg_py()
+    (
+        ffmpeg
+        .input(concat_file, format="concat", safe=0)
+        .output(out_path, acodec="libmp3lame",
+                audio_bitrate=AUDIO_BITRATE, ar=48000)
+        .overwrite_output()
+        .run(quiet=True)
+    )
+    return out_path, pieces
+
+
+# ==================== pyttsx3 (System TTS) ====================
+
+def _pyttsx3_synth_one(args):
+    """pyttsx3 chunk တစ်ခု — thread-safe (engine per call)"""
+    i, text = args
+    dst = f"pyttsx3_cache/chunk_{i:04d}.wav"
+    try:
+        os.makedirs("pyttsx3_cache", exist_ok=True)
+        # pyttsx3 က thread-safe မဟုတ်လို့ chunk တစ်ခုချင်း engine အသစ်
+        engine = pyttsx3.init()
+        engine.setProperty("rate", PYTTSX3_RATE)
+        engine.setProperty("volume", PYTTSX3_VOLUME)
+        engine.save_to_file(text, dst)
+        engine.runAndWait()
+        try:
+            engine.stop()
+        except Exception:
+            pass
+
+        if os.path.exists(dst) and os.path.getsize(dst) > 1024:
+            return (i, dst)
+        return (i, None)
+    except Exception as e:
+        print(f"[pyttsx3 chunk {i}] {e}")
+        return (i, None)
+
+
+def pyttsx3_run(chunks, out_path, cb=None, workers=1):
+    """
+    pyttsx3 — OS built-in voice (offline, no install)
+    Windows: SAPI5, macOS: NSSpeech, Linux: espeak
+    """
+    if not PYTTSX3_OK:
+        raise RuntimeError("pyttsx3 မရှိပါ — pip install pyttsx3")
+
+    small = []
+    for c in chunks:
+        for x in split_scr(c, PYTTSX3_CHUNK):
+            if has_speech(x):
+                small.append(x)
+    chunks = small
+    if not chunks:
+        raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
+
+    results = [None] * len(chunks)
+    done = 0
+    skipped = []
+
+    # pyttsx3 က thread-safe မဟုတ် — workers=1 ပဲ
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for idx, dst in ex.map(_pyttsx3_synth_one, enumerate(chunks)):
+            results[idx] = dst
+            done += 1
+            if dst is None:
+                skipped.append(idx)
+            if cb:
+                cb(done - 1, len(chunks), chunks[idx])
+
+    good = [a for a in results if a]
+    if not good:
+        raise Exception("pyttsx3 — အသံ မထုတ်နိုင်ပါ (system voice စစ်ပါ)")
+
+    if skipped:
+        st.warning(
+            f"⚠️ pyttsx3 ကျော်လိုက်တဲ့ အပိုင်း {len(skipped)} ခု"
+        )
+
+    pieces = [(chunks[i], audio_dur(a)) for i, a in enumerate(results) if a]
+
+    concat_file = "pyttsx3_concat.txt"
+    with open(concat_file, "w", encoding="utf-8") as f:
+        for a in good:
             f.write(f"file '{os.path.abspath(a)}'\n")
 
     _require_ffmpeg_py()
@@ -801,7 +884,6 @@ async def _edge_tts_async(text, out_file, voice):
 
 
 def _run_async_in_thread(coro_fn):
-    """edge-tts 7.2.6 — thread-safe event loop"""
     result_box = {}
 
     def _worker():
@@ -939,7 +1021,7 @@ def tts_free(chunks, out, cb=None):
 
 def tts_all(text, out, ref=None, cb=None, engine="edge"):
     """
-    engine: "kokoro" | "edge" | "voxcpm"
+    engine: "kokoro" | "edge" | "voxcpm" | "pyttsx3"
     """
     chunks = split_scr(text, TTS_CHUNK)
 
@@ -950,6 +1032,15 @@ def tts_all(text, out, ref=None, cb=None, engine="edge"):
             return out_path, pieces
         except Exception as e:
             st.warning(f"⚠️ Kokoro Fail: {str(e)[:100]} → Edge TTS")
+            engine = "edge"
+
+    if engine == "pyttsx3":
+        try:
+            out_path, pieces = pyttsx3_run(chunks, out, cb=cb)
+            st.success("✅ pyttsx3 (System) — 💻 OS built-in voice")
+            return out_path, pieces
+        except Exception as e:
+            st.warning(f"⚠️ pyttsx3 Fail: {str(e)[:100]} → Edge TTS")
             engine = "edge"
 
     if engine == "edge":
@@ -994,7 +1085,7 @@ def tts_all(text, out, ref=None, cb=None, engine="edge"):
     return out, pieces
 
 
-# ==================== Whisper ====================
+# ==================== Whisper (fixed — no openai-whisper) ====================
 
 @st.cache_resource(show_spinner=False)
 def get_fw_model():
@@ -1004,52 +1095,59 @@ def get_fw_model():
 
 
 def whisper_fast(video_path, model=None):
+    """
+    Speech segments — faster-whisper သာ
+    (openai-whisper fallback ဖျက်ထား — mobile/HF Space မှာ torch မလို)
+    """
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
         "-ar", "16000", "-ac", "1",
         "-c:a", "pcm_s16le", "whisper_audio.wav"
     ], capture_output=True, check=True)
 
-    if USE_FAST_VAD:
-        try:
-            from faster_whisper.audio import decode_audio
-            from faster_whisper.vad import get_speech_timestamps, VadOptions
-            audio = decode_audio("whisper_audio.wav", sampling_rate=16000)
-            ts = get_speech_timestamps(
-                audio, VadOptions(min_silence_duration_ms=700, speech_pad_ms=200))
-            segs_vad = [(t["start"] / 16000.0, t["end"] / 16000.0) for t in ts]
-            if segs_vad:
-                return segs_vad
-        except Exception:
-            pass
+    # ---- 1. faster-whisper VAD ----
+    try:
+        from faster_whisper.audio import decode_audio
+        from faster_whisper.vad import get_speech_timestamps, VadOptions
+        audio = decode_audio("whisper_audio.wav", sampling_rate=16000)
+        ts = get_speech_timestamps(
+            audio,
+            VadOptions(min_silence_duration_ms=700, speech_pad_ms=200)
+        )
+        segs_vad = [(t["start"] / 16000.0, t["end"] / 16000.0) for t in ts]
+        if segs_vad:
+            return segs_vad
+    except Exception as e:
+        print(f"[VAD fail] {e}")
 
-    speech_segments = []
+    # ---- 2. faster-whisper transcribe ----
     try:
         model = model or get_fw_model()
         segments, _ = model.transcribe(
             "whisper_audio.wav", language=WHISPER_LANG,
-            vad_filter=False, beam_size=1,
-            condition_on_previous_text=False, temperature=0
+            vad_filter=True, beam_size=1,
+            condition_on_previous_text=False, temperature=0,
         )
-        for seg in segments:
-            speech_segments.append((seg.start, seg.end))
+        segs = [(seg.start, seg.end) for seg in segments]
+        if segs:
+            return segs
+    except Exception as e:
+        st.warning(f"⚠️ faster-whisper: {str(e)[:80]}")
+
+    # ---- 3. Last resort: video တစ်ခုလုံး ----
+    try:
+        dur = float(ffmpeg.probe("whisper_audio.wav")['format']['duration'])
+        st.warning("⚠️ VAD fail — video တစ်ခုလုံးကို speech အနေနဲ့ ယူလိုက်တယ်")
+        return [(0.0, dur)]
     except Exception:
-        import whisper
-        model = whisper.load_model(WHISPER_MODEL)
-        result = model.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
-            condition_on_previous_text=False, beam_size=1, temperature=0
-        )
-        for seg in result["segments"]:
-            speech_segments.append((seg["start"], seg["end"]))
-    return speech_segments
+        raise Exception("Speech segment ရှာမရပါ")
 
 
 # ==================== UI ====================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown(
-    f"<div class='main-sub'>Kokoro (Local) · Edge TTS {EDGE_TTS_VERSION} · VoxCPM2</div>",
+    f"<div class='main-sub'>Kokoro · Edge {EDGE_TTS_VERSION} · VoxCPM2 · pyttsx3</div>",
     unsafe_allow_html=True
 )
 st.divider()
@@ -1192,29 +1290,27 @@ st.divider()
 # ---- Generate ----
 st.subheader("🚀 Step 6 — Generate")
 
-# Kokoro availability
-kokoro_ready = KOKORO_OK
-if kokoro_ready:
-    kokoro_ready = (
-        os.path.exists(KOKORO_MODEL_FILE) and os.path.getsize(KOKORO_MODEL_FILE) > 1024 * 1024
-    ) or True  # auto-download allowed
-
+# Engine list
 engine_choices = ["edge"]
-if kokoro_ready:
+if KOKORO_OK:
     engine_choices.insert(0, "kokoro")
+if PYTTSX3_OK:
+    engine_choices.append("pyttsx3")
 if GRADIO_OK:
     engine_choices.append("voxcpm")
+
+engine_labels = {
+    "kokoro":  f"🎧 Kokoro (Local, offline) — {KOKORO_VOICE}",
+    "edge":    f"⚡ Edge TTS {EDGE_TTS_VERSION} — သီဟ (Thiha)",
+    "pyttsx3": "💻 pyttsx3 (System) — OS built-in voice",
+    "voxcpm":  "🎙️ VoxCPM2 (Cloud, Myanmar)",
+}
 
 engine = st.radio(
     "🎙️ TTS Engine",
     engine_choices,
-    format_func=lambda x: {
-        "kokoro": f"🎧 Kokoro (Local, offline) — {KOKORO_VOICE}",
-        "edge":   f"⚡ Edge TTS {EDGE_TTS_VERSION} — သီဟ (Thiha)",
-        "voxcpm": "🎙️ VoxCPM2 (Cloud, Myanmar)",
-    }[x],
-    index=0 if "kokoro" in engine_choices else 0,
-    horizontal=False,
+    format_func=lambda x: engine_labels[x],
+    index=0,
 )
 
 ref_path = None
@@ -1233,6 +1329,8 @@ if engine == "voxcpm":
             st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
 elif engine == "kokoro":
     st.info(f"✅ Kokoro Local — 🎙️ {KOKORO_VOICE} (English only, offline)")
+elif engine == "pyttsx3":
+    st.info(f"✅ pyttsx3 System — 💻 OS built-in voice (offline, no install)")
 else:
     st.info("⚡ Edge TTS သီဟ (Thiha) — Myanmar voice")
 
