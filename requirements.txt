@@ -3,7 +3,7 @@ ffmpeg-python
 opencv-python-headless
 Pillow
 numpy
-edge-tts>=7.0.0
+edge-tts==7.2.6
 openai-whisper
 faster-whisper
 gradio_client
