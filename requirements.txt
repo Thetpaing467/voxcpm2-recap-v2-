@@ -1,5 +1,5 @@
 streamlit>=1.30.0
-edge-tts>=7.0.0
+edge-tts>=7.2.8
 gradio_client>=0.16.0
 ffmpeg-python>=0.2.0
 numpy>=1.24.0
