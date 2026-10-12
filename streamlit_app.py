@@ -17,16 +17,7 @@ SPACES = [
 PASSWORD = "voxcpm2026"
 FONT_FILE = "MyanmarPadaung.ttf"
 
-# ---------- Subtitle style (အစိမ်းကွပ် + အနက်စာ) ----------
-SUB_TEXT_COLOR = "#000000"      # စာလုံးအရောင်
-SUB_STROKE_COLOR = "#00FF00"    # ကွပ်အရောင် (အစိမ်း)
-SUB_FS_RATIO = 5.5              # စာအရွယ်အစား (video width ရဲ့ %)
-SUB_STROKE_RATIO = 0.22         # ကွပ်အထူ (font size နဲ့ အချိုး)
-SUB_MAX_W_RATIO = 0.92          # စာကြောင်းအများဆုံး အကျယ် (video width အချိုး)
-SUB_LINE_GAP = 1.45             # စာကြောင်းအကြား
-SUB_MAXCHAR = 28                # subtitle တစ်ပိုင်း စာလုံးအရေအတွက်
-SUB_POS_DEFAULT = 50            # 0=အပေါ်, 50=အလယ်, 100=အောက်
-
+FS, BH, BA = 30, 100, 200
 ENC_PRESET = "fast"
 ENC_CRF = 18
 FINAL_PRESET = "ultrafast"
@@ -41,6 +32,10 @@ PNG_WORKERS = 4
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
 WHISPER_MODEL = "tiny"
 WHISPER_LANG = "my"
+
+BOX_WIDTH_RATIO = 1.0
+PADDING_Y = 15
+CORNER_RADIUS = 20
 
 EDGE_VOICES = {
     "female": "my-MM-NilarNeural",
@@ -141,57 +136,54 @@ def s2t(ts):
     return None
 
 
-def hex2rgb(h):
-    h = h.lstrip("#")
-    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-
-
-def render_png(text, out, fp, W, H, fs, pos_y=SUB_POS_DEFAULT,
-               text_color=SUB_TEXT_COLOR, stroke_color=SUB_STROKE_COLOR,
-               stroke_ratio=SUB_STROKE_RATIO, max_w_ratio=SUB_MAX_W_RATIO):
-    """Box မပါ — အနက်စာလုံး + အစိမ်းရောင် အထူကွပ် (rounded outline) စာတန်း"""
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
+               box_width_ratio=BOX_WIDTH_RATIO,
+               padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
+    img = Image.new("RGBA", (W, H), (0,0,0,0))
     d = ImageDraw.Draw(img)
     try: f = ImageFont.truetype(fp, fs)
     except: f = ImageFont.load_default()
 
-    tc = hex2rgb(text_color) + (255,)
-    sc = hex2rgb(stroke_color) + (255,)
-    sw = max(3, int(fs * stroke_ratio))
-
-    # pixel အကျယ်နဲ့ စာကြောင်းခွဲ
-    max_w = int(W * max_w_ratio) - 2 * sw
+    mc = max(15, int(W/(fs*0.9)))
     lines, cur = [], ""
     for w in text.split():
-        test = cur + " " + w if cur else w
-        if d.textlength(test, font=f) <= max_w or not cur:
-            cur = test
+        if len(cur)+len(w)+1 <= mc: cur = cur+" "+w if cur else w
         else:
-            lines.append(cur)
+            if cur: lines.append(cur)
             cur = w
     if cur: lines.append(cur)
     if not lines: return out
 
-    lh = int(fs * SUB_LINE_GAP)
-    pad = sw + 4
-    block_h = len(lines) * lh + pad * 2
-    max_y = max(0, H - block_h)
-    top = int((pos_y / 100) * max_y)
-    top = max(0, min(top, max_y))
+    lh = int(fs * 1.3)
+    text_h = len(lines) * lh
+    box_w = int(W * box_width_ratio)
+    box_h = text_h + padding_y * 2
+    box_x = (W - box_w) // 2
+    max_y = H - box_h
+    box_y = int((pos_y / 100) * max_y)
+    box_y = max(0, min(box_y, max_y))
 
-    ty = top + pad
+    d.rounded_rectangle(
+        [box_x, box_y, box_x + box_w, box_y + box_h],
+        radius=corner_radius, fill=(0, 0, 0, ba)
+    )
+
+    ty = box_y + padding_y
     for ln in lines:
-        lw = d.textlength(ln, font=f)
-        lx = int((W - lw) / 2)
-        d.text((lx, ty), ln, font=f, fill=tc,
-               stroke_width=sw, stroke_fill=sc)
+        bb = d.textbbox((0, 0), ln, font=f)
+        lw = bb[2] - bb[0]
+        lx = box_x + (box_w - lw) // 2
+        for dx in [-2,-1,0,1,2]:
+            for dy in [-2,-1,0,1,2]:
+                d.text((lx+dx, ty+dy), ln, font=f, fill=(0,0,0,255))
+        d.text((lx, ty), ln, font=f, fill=(255,255,255,255))
         ty += lh
 
     img.save(out, "PNG")
     return out
 
 
-def split_for_sub(text, mc=SUB_MAXCHAR):
+def split_for_sub(text, mc=30):
     parts = []
     sents = [s.strip() + "။" for s in text.replace("။", "။|").split("|") if s.strip()]
     for s in sents:
@@ -208,7 +200,7 @@ def split_for_sub(text, mc=SUB_MAXCHAR):
     return parts
 
 
-def scr_to_srt_timed(pieces, total, path, mc=SUB_MAXCHAR):
+def scr_to_srt_timed(pieces, total, path, mc=30):
     """pieces = [(text, audio_seconds)] — chunk တစ်ခုချင်းစီမှာ အချိန် reset ဖြစ်လို့ drift မရှိ"""
     raw = sum(d for _, d in pieces)
     if raw <= 0: return None
@@ -312,9 +304,7 @@ def simple_merge(video_in, audio_in, output_video, tempo, segments=None):
 
 
 def final_render(video_in, audio_in, output_video, tempo,
-                 srt_path=None, fp=FONT_FILE, fs_ratio=SUB_FS_RATIO,
-                 pos_y=SUB_POS_DEFAULT,
-                 text_color=SUB_TEXT_COLOR, stroke_color=SUB_STROKE_COLOR,
+                 srt_path=None, fp=FONT_FILE, fs=FS, pos_y=100, bh=BH, ba=BA,
                  use_neon=True, thickness=15, speed=0.4, tail=0.5,
                  crop_ratio=0.95, mirror=True, segments=None):
     W0, H0, _ = vid_info(video_in)
@@ -331,7 +321,6 @@ def final_render(video_in, audio_in, output_video, tempo,
     else:
         cw, ch, cx, cy = W0, H0, 0, 0
     W, H = cw, ch
-    fs = max(12, int(W * fs_ratio / 100.0))
 
     subs = []
     if srt_path:
@@ -341,8 +330,8 @@ def final_render(video_in, audio_in, output_video, tempo,
         def prep(args):
             i, sg = args
             p = f"subtitle_pngs/s_{i:04d}.png"
-            render_png(sg["text"], p, fp, W, H, fs, pos_y,
-                       text_color=text_color, stroke_color=stroke_color)
+            render_png(sg["text"], p, fp, W, H, fs, pos_y, bh, ba,
+                       box_width_ratio=BOX_WIDTH_RATIO)
             rgba = cv2.imread(p, cv2.IMREAD_UNCHANGED)
             try: os.remove(p)
             except: pass
@@ -604,8 +593,6 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
             loop.run_until_complete(coro_fn())
             loop.close()
 
-    last_err = []
-
     def tts_one(args):
         i, c = args
         os.makedirs("tts_cache", exist_ok=True)
@@ -620,8 +607,8 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
                 if os.path.exists(dst) and os.path.getsize(dst) > 0:
                     time.sleep(0.3)
                     return (i, dst)
-            except Exception as e:
-                last_err.append(f"{type(e).__name__}: {str(e)[:400]}")
+            except Exception:
+                pass
             time.sleep(3 * (attempt + 1))
         return (i, None)
 
@@ -634,13 +621,7 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
     good = [a for a in results if a]
     if not good:
-        try:
-            from importlib.metadata import version as _v
-            _ver = _v("edge-tts")
-        except Exception:
-            _ver = "?"
-        raise Exception("Edge TTS အသံမရပါ [edge-tts " + _ver + "] — "
-                        + (last_err[-1] if last_err else "error မသိ"))
+        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ (edge-tts>=7.0.0) / ခဏနေ ပြန်စမ်းပါ")
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
@@ -656,43 +637,10 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     return out_path, pieces
 
 
-def gtts_run(chunks, out_path, cb=None):
-    """Edge TTS မရရင် Google TTS (မြန်မာ) နဲ့ အစားထိုး"""
-    from gtts import gTTS
-    small = []
-    for c in chunks:
-        for x in split_scr(c, EDGE_CHUNK):
-            if has_speech(x): small.append(x)
-    if not small: raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
-    os.makedirs("tts_cache", exist_ok=True)
-    files = []
-    for i, c in enumerate(small):
-        key = hashlib.md5(("gtts" + c).encode("utf-8")).hexdigest()
-        dst = f"tts_cache/{key}.mp3"
-        if not (os.path.exists(dst) and os.path.getsize(dst) > 0):
-            gTTS(c, lang="my").save(dst)
-        files.append(dst)
-        if cb: cb(i, len(small), c)
-    pieces = [(small[i], audio_dur(f)) for i, f in enumerate(files)]
-    with open("gtts_concat.txt", "w", encoding="utf-8") as f:
-        for a in files: f.write(f"file '{a}'\n")
-    ffmpeg.input("gtts_concat.txt", format="concat", safe=0).output(
-        out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
-    return out_path, pieces
-
-
 def tts_free(chunks, out, cb=None):
-    try:
-        out, pieces = edge_tts_run(chunks, out, cb=cb)
-        st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
-        return out, pieces
-    except Exception as e:
-        st.warning(f"⚠️ {str(e)[:300]}")
-        st.info("🔁 Google TTS (မြန်မာ) နဲ့ အစားထိုးနေသည်...")
-        out, pieces = gtts_run(chunks, out, cb=cb)
-        st.success("✅ Google TTS (gTTS)")
-        return out, pieces
+    out, pieces = edge_tts_run(chunks, out, cb=cb)
+    st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
+    return out, pieces
 
 
 def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
@@ -876,16 +824,9 @@ neon_speed = 0.4
 # ==================== Step 4 — Subtitle ====================
 st.subheader("📝 Step 4 — Subtitle")
 use_sub = st.toggle("Burn-in", value=True)
-pos_y = SUB_POS_DEFAULT
-fs_ratio = SUB_FS_RATIO
-text_color = SUB_TEXT_COLOR
-stroke_color = SUB_STROKE_COLOR
+pos_y = 100
 if use_sub:
-    pos_y = st.slider("📍 Position (0=အပေါ် · 50=အလယ် · 100=အောက်)", 0, 100, SUB_POS_DEFAULT, 1)
-    fs_ratio = st.slider("🔠 စာအရွယ်အစား", 3.0, 10.0, SUB_FS_RATIO, 0.5)
-    cc1, cc2 = st.columns(2)
-    with cc1: text_color = st.color_picker("စာလုံးအရောင်", SUB_TEXT_COLOR)
-    with cc2: stroke_color = st.color_picker("ကွပ်အရောင်", SUB_STROKE_COLOR)
+    pos_y = st.slider("📍 Position", 0, 100, 100, 1)
 st.divider()
 
 # ==================== Step 5 — Preview ====================
@@ -899,21 +840,17 @@ if vid:
             st.session_state.pkey = pkey
         W, H, _ = vid_info("preview.mp4")
 
+        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H, FS, pos_y, BH, BA,
+                   box_width_ratio=BOX_WIDTH_RATIO)
+
         cap = cv2.VideoCapture("preview.mp4")
         ok, fr = cap.read()
         cap.release()
 
         if ok:
             bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-            if use_sub:
-                prev_fs = max(12, int(W * fs_ratio / 100.0))
-                render_png("အထင်သေးရင် အရက်ကွဲတတ်တယ်နော်!", "prev.png", FONT_FILE,
-                           W, H, prev_fs, pos_y,
-                           text_color=text_color, stroke_color=stroke_color)
-                fg = Image.open("prev.png").convert("RGBA")
-                comp = Image.alpha_composite(bg, fg)
-            else:
-                comp = bg
+            fg = Image.open("prev.png").convert("RGBA")
+            comp = Image.alpha_composite(bg, fg)
 
             if use_neon:
                 phase = 0.5 if neon_animated else 0.0
@@ -995,9 +932,8 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         try:
             sp = scr_to_srt_timed(pieces, eff, "sub.srt") if use_sub else None
             final_render("input.mp4", None, "video_only.mp4", 1.0,
-                         srt_path=sp, fp=FONT_FILE, fs_ratio=fs_ratio, pos_y=pos_y,
-                         text_color=text_color, stroke_color=stroke_color,
-                         use_neon=use_neon,
+                         srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
+                         bh=BH, ba=BA, use_neon=use_neon,
                          thickness=neon_thickness, speed=neon_speed,
                          segments=segments)
             mux_audio("video_only.mp4", "voice.mp3", "final.mp4", tempo)
