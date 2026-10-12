@@ -135,28 +135,30 @@ def s2t(ts):
     return None
 
 
+# ==================== ✅✅✅ BOX + GREEN TEXT + BLACK OUTLINE ✅✅✅ ====================
 def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=200,
                box_width_ratio=BOX_WIDTH_RATIO,
                padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
     """
-    Box ပါတဲ့ စာတန်း PNG ဖန်တီးခြင်း
-    - နောက်ခံ: အနက်ရောင် Box (ba = alpha/အလင်းပိတ်)
+    စာတန်း PNG ဖန်တီးခြင်း:
+    - နောက်ခံ: အနက်ရောင် Box (ba = alpha)
     - စာလုံး: အစိမ်းရောင် (Neon Green)
     - ဘောင်: အနက်ရောင် Outline
     """
-    img = Image.new("RGBA", (W, H), (0,0,0,0))
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    try: 
+
+    try:
         f = ImageFont.truetype(fp, fs)
-    except: 
+    except:
         f = ImageFont.load_default()
 
     # စာလုံးအရေအတွက် အလိုက် line ခွဲခြင်း
-    mc = max(15, int(W/(fs*0.9)))
+    mc = max(15, int(W / (fs * 0.9)))
     lines, cur = [], ""
     for w in text.split():
-        if len(cur)+len(w)+1 <= mc: 
-            cur = cur+" "+w if cur else w
+        if len(cur) + len(w) + 1 <= mc:
+            cur = cur + " " + w if cur else w
         else:
             if cur: lines.append(cur)
             cur = w
@@ -172,7 +174,7 @@ def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=200,
     box_y = int((pos_y / 100) * max_y)
     box_y = max(0, min(box_y, max_y))
 
-    # ✅ အနက်ရောင် Box ဆွဲခြင်း (ba က alpha တန်ဖိုး)
+    # ✅ အနက်ရောင် Box ဆွဲခြင်း (ba = alpha တန်ဖိုး)
     d.rounded_rectangle(
         [box_x, box_y, box_x + box_w, box_y + box_h],
         radius=corner_radius, fill=(0, 0, 0, ba)
@@ -183,16 +185,17 @@ def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=200,
         bb = d.textbbox((0, 0), ln, font=f)
         lw = bb[2] - bb[0]
         lx = box_x + (box_w - lw) // 2
-        
-        # ✅ အနက်ရောင် Outline (ဘောင်) ထူထူလေး ဆွဲခြင်း
+
+        # ✅ အနက်ရောင် Outline (ဘောင်) ထူထူ
         for dx in range(-3, 4):
             for dy in range(-3, 4):
-                if dx == 0 and dy == 0: continue
-                d.text((lx+dx, ty+dy), ln, font=f, fill=(0, 0, 0, 255))
-        
-        # ✅ အစိမ်းရောင် (Neon Green) စာလုံး ဆွဲခြင်း
+                if dx == 0 and dy == 0:
+                    continue
+                d.text((lx + dx, ty + dy), ln, font=f, fill=(0, 0, 0, 255))
+
+        # ✅ အစိမ်းရောင် (Neon Green) စာလုံး
         d.text((lx, ty), ln, font=f, fill=(0, 255, 0, 255))
-        
+
         ty += lh
 
     img.save(out, "PNG")
@@ -208,7 +211,8 @@ def split_for_sub(text, mc=30):
             parts.append(s); continue
         cur = ""
         for w in s.split():
-            if len(cur) + len(w) + 1 <= mc: cur = cur + " " + w if cur else w
+            if len(cur) + len(w) + 1 <= mc:
+                cur = cur + " " + w if cur else w
             else:
                 if cur: parts.append(cur.strip())
                 cur = w
@@ -237,7 +241,7 @@ def scr_to_srt_timed(pieces, total, path, mc=30):
 
 def parse_srt(path):
     with open(path, "r", encoding="utf-8") as f:
-        raw = f.read().replace("\r\n","\n").replace("\r","\n")
+        raw = f.read().replace("\r\n", "\n").replace("\r", "\n")
     segs = []
     for ck in re.split(r"\n\s*\n", raw.strip()):
         ls = [l for l in ck.split("\n") if l.strip()]
@@ -273,19 +277,21 @@ def has_speech(t):
 
 def split_scr(t, mc=TTS_CHUNK):
     sents = []
-    for p in t.replace("။","။|").split("|"):
+    for p in t.replace("။", "။|").split("|"):
         p = p.strip()
         if not p: continue
         sents.append(p if p.endswith("။") else p + "။")
     out, cur = [], ""
     for s in sents:
-        if len(cur)+len(s) <= mc: cur += s
+        if len(cur) + len(s) <= mc:
+            cur += s
         else:
             if cur: out.append(cur)
             if len(s) > mc:
                 for i in range(0, len(s), mc): out.append(s[i:i+mc])
                 cur = ""
-            else: cur = s
+            else:
+                cur = s
     if cur: out.append(cur)
     return out
 
@@ -585,10 +591,12 @@ def tts_burmese(chunks, ref, space, cb=None):
 
 
 async def _edge_tts_async(text, out_file, voice):
+    """Edge TTS — retry ပါဝင်"""
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_file)
 
 
+# ==================== ✅✅✅ EDGE TTS — ERROR FIX ✅✅✅ ====================
 def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
 
@@ -600,7 +608,8 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     if not chunks: raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
 
     def run_async(coro_fn):
-        try: asyncio.run(coro_fn())
+        try:
+            asyncio.run(coro_fn())
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -614,16 +623,20 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
         dst = f"tts_cache/{key}.mp3"
         if os.path.exists(dst) and os.path.getsize(dst) > 0:
             return (i, dst)
-        for attempt in range(4):
+        last_err = None
+        for attempt in range(5):  # ✅ Retry 5 ကြိမ်
             try:
                 if os.path.exists(dst): os.remove(dst)
                 run_async(lambda: _edge_tts_async(c, dst, voice_id))
                 if os.path.exists(dst) and os.path.getsize(dst) > 0:
-                    time.sleep(0.3)
+                    time.sleep(0.4)
                     return (i, dst)
-            except Exception:
-                pass
-            time.sleep(3 * (attempt + 1))
+                else:
+                    last_err = "File empty"
+            except Exception as e:
+                last_err = str(e)
+            time.sleep(3 * (attempt + 1))  # ✅ စောင့်ချိန် တိုး
+        print(f"❌ Edge TTS fail [{i}]: {last_err}")
         return (i, None)
 
     results = [None] * len(chunks); done = 0; skipped = []
@@ -635,7 +648,7 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
     good = [a for a in results if a]
     if not good:
-        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ (edge-tts>=7.0.0) / ခဏနေ ပြန်စမ်းပါ")
+        raise Exception("Edge TTS အသံမရပါ — VPN ချိတ်ပါ / edge-tts update လုပ်ပါ / VoxCPM2 ကို ဖွင့်ပါ")
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
@@ -656,6 +669,7 @@ def tts_free(chunks, out, cb=None):
     return out, pieces
 
 
+# ==================== ✅✅✅ TTS ALL — VoxCPM2 → Edge Auto Fallback ✅✅✅ ====================
 def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
     chunks = split_scr(text, TTS_CHUNK)
 
@@ -679,7 +693,11 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
 
     if files is None:
         st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS သီဟ Auto")
-        return tts_free(chunks, out, cb=cb)
+        try:
+            return tts_free(chunks, out, cb=cb)
+        except Exception as e:
+            st.error(f"❌ Edge TTS လည်း Fail: {e}")
+            raise Exception("TTS နှစ်မျိုးလုံး Fail — VPN ချိတ်ပြီး ပြန်စမ်းပါ")
 
     pieces = [(chunks[i], audio_dur(f)) for i, f in enumerate(files)]
 
@@ -822,7 +840,7 @@ st.divider()
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader(
     "📹",
-    type=["mp4","mov","avi","mkv"],
+    type=["mp4", "mov", "avi", "mkv"],
     label_visibility="collapsed",
     key=f"video_up_{st.session_state.video_up_key}"
 )
@@ -885,7 +903,7 @@ use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True)
 if use_voxcpm:
     st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS သီဟ Auto")
     ref = st.file_uploader("🎤 Ref Audio (VoxCPM2) — Optional",
-                           type=["wav","mp3","m4a"], key="ref_up")
+                           type=["wav", "mp3", "m4a"], key="ref_up")
     if ref:
         with open("ref.wav", "wb") as f: f.write(ref.read())
         st.session_state.ref = "ref.wav"
