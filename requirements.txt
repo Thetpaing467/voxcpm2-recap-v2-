@@ -1,9 +1,10 @@
-streamlit>=1.30.0
-edge-tts==7
-google-genai>=1.0.0
+streamlit
 ffmpeg-python
-numpy
-Pillow
 opencv-python-headless
-faster-whisper>=1.0.0
+Pillow
+numpy
+edge-tts>=7.0.2
+openai-whisper
+faster-whisper
 gradio_client
+google-genai
