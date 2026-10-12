@@ -621,7 +621,7 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
                     time.sleep(0.3)
                     return (i, dst)
             except Exception as e:
-                last_err.append(f"{type(e).__name__}: {str(e)[:150]}")
+                last_err.append(f"{type(e).__name__}: {str(e)[:400]}")
             time.sleep(3 * (attempt + 1))
         return (i, None)
 
@@ -634,8 +634,13 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
     good = [a for a in results if a]
     if not good:
-        raise Exception("Edge TTS အသံမရပါ — " + (last_err[-1] if last_err else "error မသိ")
-                        + " | edge-tts>=7.0.0 လိုအပ်")
+        try:
+            from importlib.metadata import version as _v
+            _ver = _v("edge-tts")
+        except Exception:
+            _ver = "?"
+        raise Exception("Edge TTS အသံမရပါ [edge-tts " + _ver + "] — "
+                        + (last_err[-1] if last_err else "error မသိ"))
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
@@ -651,10 +656,43 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     return out_path, pieces
 
 
+def gtts_run(chunks, out_path, cb=None):
+    """Edge TTS မရရင် Google TTS (မြန်မာ) နဲ့ အစားထိုး"""
+    from gtts import gTTS
+    small = []
+    for c in chunks:
+        for x in split_scr(c, EDGE_CHUNK):
+            if has_speech(x): small.append(x)
+    if not small: raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
+    os.makedirs("tts_cache", exist_ok=True)
+    files = []
+    for i, c in enumerate(small):
+        key = hashlib.md5(("gtts" + c).encode("utf-8")).hexdigest()
+        dst = f"tts_cache/{key}.mp3"
+        if not (os.path.exists(dst) and os.path.getsize(dst) > 0):
+            gTTS(c, lang="my").save(dst)
+        files.append(dst)
+        if cb: cb(i, len(small), c)
+    pieces = [(small[i], audio_dur(f)) for i, f in enumerate(files)]
+    with open("gtts_concat.txt", "w", encoding="utf-8") as f:
+        for a in files: f.write(f"file '{a}'\n")
+    ffmpeg.input("gtts_concat.txt", format="concat", safe=0).output(
+        out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
+    ).run(overwrite_output=True)
+    return out_path, pieces
+
+
 def tts_free(chunks, out, cb=None):
-    out, pieces = edge_tts_run(chunks, out, cb=cb)
-    st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
-    return out, pieces
+    try:
+        out, pieces = edge_tts_run(chunks, out, cb=cb)
+        st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
+        return out, pieces
+    except Exception as e:
+        st.warning(f"⚠️ {str(e)[:300]}")
+        st.info("🔁 Google TTS (မြန်မာ) နဲ့ အစားထိုးနေသည်...")
+        out, pieces = gtts_run(chunks, out, cb=cb)
+        st.success("✅ Google TTS (gTTS)")
+        return out, pieces
 
 
 def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
