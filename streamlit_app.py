@@ -26,7 +26,7 @@ USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 300      # သေးလေ subtitle sync ပိုတိကျ
 EDGE_CHUNK = 200
-TTS_WORKERS = 3
+TTS_WORKERS = 2
 PNG_WORKERS = 4
 
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
@@ -585,12 +585,18 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     chunks = small
     if not chunks: raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
 
-    def run_async(coro_fn):
-        try: asyncio.run(coro_fn())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
+    last_err = []
+
+    def run_async(text, dst):
+        # Thread တစ်ခုချင်းစီမှာ event loop အသစ်သုံး
+        loop = asyncio.new_event_loop()
+        try:
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(coro_fn())
+            loop.run_until_complete(
+                asyncio.wait_for(_edge_tts_async(text, dst, voice_id), timeout=60))
+        finally:
+            try: loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception: pass
             loop.close()
 
     def tts_one(args):
@@ -600,16 +606,19 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
         dst = f"tts_cache/{key}.mp3"
         if os.path.exists(dst) and os.path.getsize(dst) > 0:
             return (i, dst)
-        for attempt in range(4):
+        for attempt in range(5):
             try:
                 if os.path.exists(dst): os.remove(dst)
-                run_async(lambda: _edge_tts_async(c, dst, voice_id))
+                run_async(c, dst)
                 if os.path.exists(dst) and os.path.getsize(dst) > 0:
-                    time.sleep(0.3)
                     return (i, dst)
-            except Exception:
-                pass
-            time.sleep(3 * (attempt + 1))
+                last_err.append("empty audio")
+            except Exception as e:
+                last_err.append(f"{type(e).__name__}: {str(e)[:150]}")
+            time.sleep(2 * (attempt + 1))
+        if os.path.exists(dst):
+            try: os.remove(dst)
+            except Exception: pass
         return (i, None)
 
     results = [None] * len(chunks); done = 0; skipped = []
@@ -621,7 +630,14 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
     good = [a for a in results if a]
     if not good:
-        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ (edge-tts>=7.0.0) / ခဏနေ ပြန်စမ်းပါ")
+        err = last_err[-1] if last_err else "unknown"
+        try:
+            import importlib.metadata as md
+            ver = md.version("edge-tts")
+        except Exception:
+            ver = "?"
+        raise Exception(f"Edge TTS အသံမရပါ [edge-tts {ver}] — {err} "
+                        f"(edge-tts>=7.2.0 လိုအပ်)")
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
@@ -629,11 +645,12 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     pieces = [(chunks[i], audio_dur(a)) for i, a in enumerate(results) if a]
 
     with open("edge_concat.txt", "w", encoding="utf-8") as f:
-        for a in good: f.write(f"file '{a}'\n")
+        for a in good:
+            f.write(f"file '{os.path.abspath(a)}'\n")
 
     ffmpeg.input("edge_concat.txt", format="concat", safe=0).output(
         out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
+    ).run(overwrite_output=True, quiet=True)
     return out_path, pieces
 
 
@@ -671,10 +688,10 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
     pieces = [(chunks[i], audio_dur(f)) for i, f in enumerate(files)]
 
     with open("concat.txt", "w", encoding="utf-8") as f:
-        for a in files: f.write(f"file '{a}'\n")
+        for a in files: f.write(f"file '{os.path.abspath(a)}'\n")
     ffmpeg.input("concat.txt", format="concat", safe=0).output(
         out, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
-    ).run(overwrite_output=True)
+    ).run(overwrite_output=True, quiet=True)
     return out, pieces
 
 
