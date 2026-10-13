@@ -1,6 +1,8 @@
 import streamlit as st
-import os, re, hashlib, ffmpeg, shutil, subprocess, asyncio, time
+import os, re, subprocess, time, math, threading, queue, bisect
 import concurrent.futures
+from functools import lru_cache
+import ffmpeg
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import cv2
@@ -12,7 +14,6 @@ FONT_FILE = "MyanmarPadaung.ttf"
 
 FS, BH, BA = 30, 100, 200
 AUDIO_BITRATE = "128k"
-TTS_CHUNK = 300
 PNG_WORKERS = 4
 USE_FAST_VAD = True
 
@@ -25,6 +26,10 @@ PADDING_Y = 15
 CORNER_RADIUS = 20
 FINAL_PRESET = "ultrafast"
 FINAL_CRF = 20
+
+SUB_MAX_CHARS = 30      # စာတန်းတစ်ကြောင်း အများဆုံး စာလုံး
+SUB_HOLD = 0.25         # စာတန်း အသံပြီးနောက် ဆက်ပြချိန် (sec)
+AUDIO_VAD_SILENCE_MS = 200
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
@@ -101,125 +106,20 @@ def vid_info(p):
     return int(v['width']), int(v['height']), float(pr['format']['duration'])
 
 
+def vid_meta(p):
+    """W, H, fps(float), fps(exact 'n/d' string), frame count"""
+    pr = ffmpeg.probe(p)
+    v = next(s for s in pr['streams'] if s['codec_type'] == 'video')
+    n, d = v['r_frame_rate'].split('/')
+    fps = float(n) / float(d)
+    dur = float(pr['format']['duration'])
+    nbf = str(v.get('nb_frames', ''))
+    nb = int(nbf) if nbf.isdigit() else int(round(dur * fps))
+    return int(v['width']), int(v['height']), fps, f"{n}/{d}", nb
+
+
 def audio_dur(p):
     return float(ffmpeg.probe(p)['format']['duration'])
-
-
-def t2s(s):
-    ms = int(round((s - int(s)) * 1000)); tot = int(s)
-    if ms >= 1000: tot += 1; ms = 0
-    h, r = divmod(tot, 3600); m, sec = divmod(r, 60)
-    return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
-
-
-def s2t(ts):
-    ts = ts.strip()
-    m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$', ts)
-    if m:
-        h, mi, se, ms = m.groups()
-        return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3,'0'))/1000
-    return None
-
-
-def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
-               box_width_ratio=BOX_WIDTH_RATIO,
-               padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
-    img = Image.new("RGBA", (W, H), (0,0,0,0))
-    d = ImageDraw.Draw(img)
-    try: f = ImageFont.truetype(fp, fs)
-    except: f = ImageFont.load_default()
-
-    mc = max(15, int(W/(fs*0.9)))
-    lines, cur = [], ""
-    for w in text.split():
-        if len(cur)+len(w)+1 <= mc: cur = cur+" "+w if cur else w
-        else:
-            if cur: lines.append(cur)
-            cur = w
-    if cur: lines.append(cur)
-    if not lines: return out
-
-    lh = int(fs * 1.3)
-    text_h = len(lines) * lh
-    box_w = int(W * box_width_ratio)
-    box_h = text_h + padding_y * 2
-    box_x = (W - box_w) // 2
-    max_y = H - box_h
-    box_y = int((pos_y / 100) * max_y)
-    box_y = max(0, min(box_y, max_y))
-
-    d.rounded_rectangle(
-        [box_x, box_y, box_x + box_w, box_y + box_h],
-        radius=corner_radius, fill=(0, 0, 0, ba)
-    )
-
-    ty = box_y + padding_y
-    for ln in lines:
-        bb = d.textbbox((0, 0), ln, font=f)
-        lw = bb[2] - bb[0]
-        lx = box_x + (box_w - lw) // 2
-        for dx in [-2,-1,0,1,2]:
-            for dy in [-2,-1,0,1,2]:
-                d.text((lx+dx, ty+dy), ln, font=f, fill=(0,0,0,255))
-        d.text((lx, ty), ln, font=f, fill=(255,255,255,255))
-        ty += lh
-
-    img.save(out, "PNG")
-    return out
-
-
-def split_for_sub(text, mc=30):
-    parts = []
-    sents = [s.strip() + "။" for s in text.replace("။", "။|").split("|") if s.strip()]
-    for s in sents:
-        s = s.replace("။။", "။")
-        if len(s) <= mc:
-            parts.append(s); continue
-        cur = ""
-        for w in s.split():
-            if len(cur) + len(w) + 1 <= mc: cur = cur + " " + w if cur else w
-            else:
-                if cur: parts.append(cur.strip())
-                cur = w
-        if cur: parts.append(cur.strip())
-    return parts
-
-
-def scr_to_srt_timed(pieces, total, path, mc=30):
-    raw = sum(d for _, d in pieces)
-    if raw <= 0: return None
-    k = total / raw
-    cur, idx, wrote = 0.0, 1, False
-    with open(path, "w", encoding="utf-8") as f:
-        for text, d in pieces:
-            parts = split_for_sub(text, mc)
-            d *= k
-            if not parts:
-                cur += d; continue
-            tot = sum(len(p) for p in parts)
-            for p in parts:
-                dd = len(p) / tot * d
-                f.write(f"{idx}\n{t2s(cur)} --> {t2s(cur+dd)}\n{p}\n\n")
-                cur += dd; idx += 1; wrote = True
-    return path if wrote else None
-
-
-def parse_srt(path):
-    with open(path, "r", encoding="utf-8") as f:
-        raw = f.read().replace("\r\n","\n").replace("\r","\n")
-    segs = []
-    for ck in re.split(r"\n\s*\n", raw.strip()):
-        ls = [l for l in ck.split("\n") if l.strip()]
-        if len(ls) < 3: continue
-        ts = next((l for l in ls if "-->" in l), None)
-        if not ts: continue
-        p = re.split(r"\s*-->\s*", ts)
-        if len(p) != 2: continue
-        a, b = s2t(p[0]), s2t(p[1])
-        if a is None or b is None: continue
-        idx = ls.index(ts); txt = " ".join(ls[idx+1:]).strip()
-        if txt: segs.append({"start": a, "end": b, "text": txt})
-    return segs
 
 
 def normalize_script(t):
@@ -236,41 +136,227 @@ def normalize_script(t):
     return t.strip()
 
 
-def has_speech(t):
-    return re.search(r"[\u1000-\u1049\u1050-\u109F\w]", t) is not None
+# ---------- Subtitle image (strip only, no full-frame PNG / disk I/O) ----------
+
+@lru_cache(maxsize=8)
+def get_font(fp, fs):
+    try: return ImageFont.truetype(fp, fs)
+    except Exception: return ImageFont.load_default()
 
 
-def split_scr(t, mc=TTS_CHUNK):
-    sents = []
-    for p in t.replace("။","။|").split("|"):
-        p = p.strip()
-        if not p: continue
-        sents.append(p if p.endswith("။") else p + "။")
-    out, cur = [], ""
-    for s in sents:
-        if len(cur)+len(s) <= mc: cur += s
+def wrap_px(text, font, max_w):
+    lines, cur = [], ""
+    for w in text.split():
+        t = f"{cur} {w}" if cur else w
+        if not cur or font.getlength(t) <= max_w: cur = t
         else:
-            if cur: out.append(cur)
-            if len(s) > mc:
-                for i in range(0, len(s), mc): out.append(s[i:i+mc])
-                cur = ""
-            else: cur = s
-    if cur: out.append(cur)
+            lines.append(cur); cur = w
+    if cur: lines.append(cur)
+    return lines
+
+
+def build_sub_layer(text, fp, W, H, fs=FS, pos_y=100, ba=BA,
+                    box_width_ratio=BOX_WIDTH_RATIO,
+                    padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
+    f = get_font(fp, fs)
+    box_w = int(W * box_width_ratio)
+    lines = wrap_px(text, f, box_w * 0.92)
+    if not lines: return None
+    lh = int(fs * 1.3)
+    box_h = min(len(lines) * lh + padding_y * 2, H)
+    max_y = H - box_h
+    y0 = max(0, min(int((pos_y / 100) * max_y), max_y))
+    box_x = (W - box_w) // 2
+
+    img = Image.new("RGBA", (W, box_h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([box_x, 0, box_x + box_w - 1, box_h - 1],
+                        radius=corner_radius, fill=(0, 0, 0, ba))
+    ty = padding_y
+    for ln in lines:
+        lx = box_x + (box_w - d.textlength(ln, font=f)) / 2
+        d.text((lx, ty), ln, font=f, fill=(255, 255, 255, 255),
+               stroke_width=2, stroke_fill=(0, 0, 0, 255))
+        ty += lh
+    return y0, img
+
+
+def render_png(text, out, fp, W, H, fs=30, pos_y=100, bh=100, ba=100,
+               box_width_ratio=BOX_WIDTH_RATIO,
+               padding_y=PADDING_Y, corner_radius=CORNER_RADIUS):
+    full = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    r = build_sub_layer(text, fp, W, H, fs, pos_y, ba, box_width_ratio,
+                        padding_y, corner_radius)
+    if r:
+        y0, img = r
+        full.paste(img, (0, y0))
+    full.save(out, "PNG")
     return out
 
 
-def keep_count(video_in, segments):
-    pr = ffmpeg.probe(video_in)
-    vs = next(x for x in pr['streams'] if x['codec_type'] == 'video')
-    n_, d_ = vs['r_frame_rate'].split('/')
-    fps = float(n_) / float(d_)
-    total = int(round(float(pr['format']['duration']) * fps))
-    t = np.arange(total) / fps
-    mask = np.zeros(total, dtype=bool)
-    for a, b in segments:
-        mask |= (t >= a) & (t <= b)
-    return int(mask.sum()), fps
+# ---------- Subtitle ↔ Audio alignment ----------
 
+def split_sentences(t):
+    return [s.strip() for s in re.split(r'(?<=[။!?])\s+', t) if s.strip()]
+
+
+def split_parts(sentence, mc=SUB_MAX_CHARS):
+    parts, cur = [], ""
+    for w in sentence.split():
+        if cur and len(cur) + len(w) + 1 > mc:
+            parts.append(cur); cur = w
+        else:
+            cur = f"{cur} {w}" if cur else w
+        if w.endswith("၊"):
+            parts.append(cur); cur = ""
+    if cur: parts.append(cur)
+    return parts
+
+
+def weight(s):
+    # consonant/letter count ≈ syllable count (ပြောနှုန်းနဲ့ ပိုကိုက်)
+    return max(1, len(re.findall(r'\w', s)))
+
+
+def make_speech_map(segs):
+    cum = [0.0]
+    for a, b in segs: cum.append(cum[-1] + (b - a))
+
+    def f(u, end=False):
+        u = max(0.0, min(u, cum[-1]))
+        i = (bisect.bisect_left(cum, u) - 1) if end else (bisect.bisect_right(cum, u) - 1)
+        i = max(0, min(i, len(segs) - 1))
+        a, b = segs[i]
+        return a + min(max(u - cum[i], 0.0), b - a)
+    return f, cum[-1]
+
+
+def distribute(parts, segs):
+    """parts ကို အသံပါတဲ့ အပိုင်းတွေပေါ်မှာပဲ (silence ကျော်) အချိုးကျ ခွဲ"""
+    f, U = make_speech_map(segs)
+    ws = [weight(p) for p in parts]
+    tot = float(sum(ws))
+    out, c = [], 0
+    for p, w in zip(parts, ws):
+        out.append((f(U * c / tot), f(U * (c + w) / tot, True), p))
+        c += w
+    return out
+
+
+def align_subs(sents, segs, total):
+    """sents: [[part,...],...]  segs: output-time speech segments"""
+    sents = [s for s in sents if s]
+    if not sents: return []
+    segs = sorted((max(0.0, a), min(total, b)) for a, b in segs if b > a)
+    if not segs: segs = [(0.0, total)]
+    S = len(sents)
+    res = []
+    if S > 1 and len(segs) >= S:
+        # အကြီးဆုံး ရပ်ကွက် (S-1) ခုကို ဝါကျအဆုံးအဖြစ် anchor လုပ်
+        gaps = sorted(((segs[i + 1][0] - segs[i][1], i)
+                       for i in range(len(segs) - 1)), reverse=True)[:S - 1]
+        cuts = sorted(i for _, i in gaps)
+        start = 0
+        for k, end in enumerate(cuts + [len(segs) - 1]):
+            res += distribute(sents[k], segs[start:end + 1])
+            start = end + 1
+    else:
+        res = distribute([p for s in sents for p in s], segs)
+
+    subs = []
+    for i, (a, b, t) in enumerate(res):
+        nxt = res[i + 1][0] if i + 1 < len(res) else total
+        b2 = min(b + SUB_HOLD, nxt) if nxt >= b else b
+        subs.append({"start": a, "end": max(b2, a + 0.05), "text": t})
+    return subs
+
+
+# ---------- Speech detect ----------
+
+def load_audio_16k(path):
+    from faster_whisper.audio import decode_audio
+    try:
+        return decode_audio(path, sampling_rate=16000)
+    except Exception:
+        tmp = f"_tmp_{os.getpid()}_{abs(hash(path))}.wav"
+        subprocess.run(["ffmpeg", "-y", "-i", path, "-ar", "16000", "-ac", "1",
+                        "-c:a", "pcm_s16le", tmp], capture_output=True, check=True)
+        try: return decode_audio(tmp, sampling_rate=16000)
+        finally:
+            try: os.remove(tmp)
+            except Exception: pass
+
+
+def vad_segments(audio, min_silence_ms, pad_ms):
+    from faster_whisper.vad import get_speech_timestamps, VadOptions
+    ts = get_speech_timestamps(
+        audio, VadOptions(min_silence_duration_ms=min_silence_ms, speech_pad_ms=pad_ms))
+    return [(t["start"] / 16000.0, t["end"] / 16000.0) for t in ts]
+
+
+@st.cache_resource(show_spinner=False)
+def get_fw_model():
+    from faster_whisper import WhisperModel
+    return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
+                        cpu_threads=os.cpu_count() or 4)
+
+
+def whisper_fast(video_path, model=None, audio=None):
+    if USE_FAST_VAD:
+        try:
+            if audio is None: audio = load_audio_16k(video_path)
+            segs = vad_segments(audio, 700, 200)
+            if segs: return segs
+        except Exception:
+            pass
+
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path, "-ar", "16000", "-ac", "1",
+        "-c:a", "pcm_s16le", "whisper_audio.wav"
+    ], capture_output=True, check=True)
+
+    speech_segments = []
+    try:
+        model = model or get_fw_model()
+        segments, _ = model.transcribe(
+            "whisper_audio.wav", language=WHISPER_LANG,
+            vad_filter=False, beam_size=1,
+            condition_on_previous_text=False, temperature=0)
+        for seg in segments:
+            speech_segments.append((seg.start, seg.end))
+    except Exception:
+        import whisper
+        model = whisper.load_model(WHISPER_MODEL)
+        result = model.transcribe(
+            "whisper_audio.wav", language=WHISPER_LANG,
+            condition_on_previous_text=False, beam_size=1, temperature=0)
+        for seg in result["segments"]:
+            speech_segments.append((seg["start"], seg["end"]))
+    return speech_segments
+
+
+def keep_mask(segments, fps, total):
+    """render နဲ့ duration တွက်ရာမှာ တူညီတဲ့ frame mask (တိကျစေရန်)"""
+    t = np.arange(total) / fps
+    m = np.zeros(total, dtype=bool)
+    if not segments: return ~m
+    segs = np.array(sorted(segments))
+    idx = np.searchsorted(segs[:, 0], t, side='right') - 1
+    ok = idx >= 0
+    m[ok] = t[ok] <= segs[idx[ok], 1]
+    return m
+
+
+def prepare_video_job(video_in, fw_model, audio=None):
+    segments = whisper_fast(video_in, fw_model, audio)
+    if not segments: raise Exception("Speech မတွေ့")
+    _, _, fps, _, nb = vid_meta(video_in)
+    kept = int(keep_mask(segments, fps, nb).sum())
+    if kept == 0: raise Exception("Speech မတွေ့")
+    return {"segments": segments, "vdur": kept / fps}
+
+
+# ---------- Render ----------
 
 def simple_merge(video_in, audio_in, output_video, tempo, segments=None):
     vf = []
@@ -289,14 +375,10 @@ def simple_merge(video_in, audio_in, output_video, tempo, segments=None):
 
 
 def final_render(video_in, audio_in, output_video, tempo,
-                 srt_path=None, fp=FONT_FILE, fs=FS, pos_y=100, bh=BH, ba=BA,
+                 subs=None, fp=FONT_FILE, fs=FS, pos_y=100, bh=BH, ba=BA,
                  use_neon=True, thickness=15, speed=0.4, tail=0.5,
-                 crop_ratio=1.0, mirror=True, segments=None):
-    W0, H0, _ = vid_info(video_in)
-    pr = ffmpeg.probe(video_in)
-    vs = next(s for s in pr['streams'] if s['codec_type'] == 'video')
-    n, d = vs['r_frame_rate'].split('/')
-    fps = float(n) / float(d)
+                 crop_ratio=1.0, mirror=True, segments=None, target_dur=None):
+    W0, H0, fps, fps_str, nb = vid_meta(video_in)
 
     if crop_ratio != 1.0:
         cw = int(W0 * crop_ratio); ch = int(H0 * crop_ratio)
@@ -307,38 +389,36 @@ def final_render(video_in, audio_in, output_video, tempo,
         cw, ch, cx, cy = W0, H0, 0, 0
     W, H = cw, ch
 
-    subs = []
-    if srt_path:
-        segs = parse_srt(srt_path)
-        os.makedirs("subtitle_pngs", exist_ok=True)
+    mask = keep_mask(segments, fps, int(nb + fps * 2)) if segments else None
+    target_frames = int(math.ceil(target_dur * fps)) if (target_dur and audio_in) else None
 
-        def prep(args):
-            i, sg = args
-            p = f"subtitle_pngs/s_{i:04d}.png"
-            render_png(sg["text"], p, fp, W, H, fs, pos_y, bh, ba,
-                       box_width_ratio=BOX_WIDTH_RATIO)
-            rgba = cv2.imread(p, cv2.IMREAD_UNCHANGED)
-            try: os.remove(p)
-            except: pass
-            if rgba is None: return None
-            rows = np.where(rgba[:, :, 3].any(axis=1))[0]
-            if len(rows) == 0: return None
-            y0, y1 = int(rows[0]), int(rows[-1]) + 1
-            crop = rgba[y0:y1]
-            alpha = crop[:, :, 3:4].astype(np.float32) / 255.0
-            pre = crop[:, :, :3].astype(np.float32) * alpha
-            return {"a": sg["start"], "b": sg["end"], "y0": y0, "y1": y1,
-                    "inv": 1.0 - alpha, "pre": pre}
+    # ---- Subtitle layers (strip only, parallel) ----
+    layers = []
+    if subs:
+        def prep(sg):
+            r = build_sub_layer(sg["text"], fp, W, H, fs, pos_y, ba,
+                                box_width_ratio=BOX_WIDTH_RATIO)
+            if r is None: return None
+            y0, img = r
+            arr = np.asarray(img)
+            alpha = arr[:, :, 3:4].astype(np.uint16)
+            bgr = arr[:, :, 2::-1].astype(np.uint16)
+            return {"a": sg["start"], "b": sg["end"], "y0": y0,
+                    "y1": y0 + arr.shape[0],
+                    "inv": 255 - alpha, "pre": bgr * alpha}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=PNG_WORKERS) as ex:
-            subs = [x for x in ex.map(prep, enumerate(segs)) if x]
+            layers = [x for x in ex.map(prep, subs) if x]
+        layers.sort(key=lambda s: s["a"])
 
+    # ---- Neon ----
     if use_neon:
         th = thickness
         P = 2 * (W + H)
         yy, xx = np.mgrid[0:H, 0:W]
         ring = (xx < th) | (xx >= W - th) | (yy < th) | (yy >= H - th)
         ys, xs = np.nonzero(ring)
+        flat = ys * W + xs
         dt, db, dl, dr = ys, H - 1 - ys, xs, W - 1 - xs
         m = np.minimum.reduce([dt, db, dl, dr])
         S = np.where(m == dt, xs,
@@ -349,7 +429,6 @@ def final_render(video_in, audio_in, output_video, tempo,
         CYAN = np.array([255, 255, 0], np.float32)
         MAGENTA = np.array([110, 30, 255], np.float32)
         IDLE = 0.14
-
         Si = (S.astype(np.int64)) % P
         P_arr = np.arange(P, dtype=np.float32)
 
@@ -364,26 +443,24 @@ def final_render(video_in, audio_in, output_video, tempo,
             c_ = BASE + layer(head, CYAN) + layer(head + P / 2, MAGENTA)
             return np.clip(c_, 0, 255).astype(np.uint8)
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo", "-pix_fmt", "bgr24",
-        "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
-    ]
+    # ---- ffmpeg encoder (video + audio တစ်ကြိမ်တည်း) ----
+    cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
+           "-s", f"{W}x{H}", "-r", fps_str, "-i", "-"]
     if audio_in:
-        cmd += ["-i", audio_in, "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a"]
+        cmd += ["-i", audio_in, "-af", f"atempo={tempo:.6f}",
+                "-map", "0:v", "-map", "1:a"]
     else:
         cmd += ["-an"]
     cmd += ["-c:v", "libx264", "-crf", str(FINAL_CRF), "-preset", FINAL_PRESET,
             "-pix_fmt", "yuv420p", "-threads", "0"]
     if audio_in:
         cmd += ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest"]
-    cmd += [output_video]
+    cmd += ["-movflags", "+faststart", output_video]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    import threading, queue
-    q_in = queue.Queue(maxsize=8)
-    q_out = queue.Queue(maxsize=8)
+    q_in = queue.Queue(maxsize=16)
+    q_out = queue.Queue(maxsize=16)
     stop = threading.Event()
     err = []
 
@@ -404,15 +481,13 @@ def final_render(video_in, audio_in, output_video, tempo,
 
     def reader():
         cap = cv2.VideoCapture(video_in)
-        i = 0; p = 0
+        i = 0
         try:
             while not stop.is_set():
                 if not cap.grab(): break
-                t_in = i / fps
-                i += 1
-                if segments:
-                    while p < len(segments) and segments[p][1] < t_in: p += 1
-                    if not (p < len(segments) and segments[p][0] <= t_in): continue
+                idx = i; i += 1
+                if mask is not None and (idx >= len(mask) or not mask[idx]):
+                    continue
                 ok, fr = cap.retrieve()
                 if not ok: break
                 if not qput(q_in, fr): break
@@ -425,9 +500,9 @@ def final_render(video_in, audio_in, output_video, tempo,
     def writer():
         try:
             while True:
-                bts = qget(q_out)
-                if bts is None: break
-                proc.stdin.write(bts)
+                fr = qget(q_out)
+                if fr is None: break
+                proc.stdin.write(fr.data)
         except Exception as e:
             err.append(e); stop.set()
 
@@ -435,28 +510,37 @@ def final_render(video_in, audio_in, output_video, tempo,
     th_w = threading.Thread(target=writer, daemon=True)
     th_r.start(); th_w.start()
 
-    j = 0; k = 0
+    k = 0
+
+    def process(raw, j):
+        nonlocal k
+        t = j / fps
+        crop = raw[cy:cy + ch, cx:cx + cw]
+        fr = cv2.flip(crop, 1) if mirror else crop.copy()
+        if use_neon:
+            head = (t * speed * P / 4.0) % P
+            fr.reshape(-1, 3)[flat] = make_strip(head)[Si]
+        while k < len(layers) and layers[k]["b"] < t: k += 1
+        if k < len(layers) and layers[k]["a"] <= t:
+            sb = layers[k]
+            roi = fr[sb["y0"]:sb["y1"]].astype(np.uint16)
+            fr[sb["y0"]:sb["y1"]] = ((roi * sb["inv"] + sb["pre"]) // 255).astype(np.uint8)
+        return fr
+
+    j = 0
+    last_raw = None
     try:
         while True:
-            fr = qget(q_in)
-            if fr is None: break
-            t = j / fps
-            fr = fr[cy:cy + ch, cx:cx + cw]
-            if mirror: fr = fr[:, ::-1]
-            fr = np.ascontiguousarray(fr)
-
-            if use_neon:
-                head = (t * speed * P / 4.0) % P
-                fr[ys, xs] = make_strip(head)[Si]
-
-            while k < len(subs) and subs[k]["b"] < t: k += 1
-            if k < len(subs) and subs[k]["a"] <= t:
-                sb = subs[k]
-                reg = fr[sb["y0"]:sb["y1"]].astype(np.float32) * sb["inv"] + sb["pre"]
-                fr[sb["y0"]:sb["y1"]] = reg.astype(np.uint8)
-
-            if not qput(q_out, fr.tobytes()): break
+            raw = qget(q_in)
+            if raw is None: break
+            last_raw = raw
+            if not qput(q_out, process(raw, j)): break
             j += 1
+        # အသံက ဗီဒီယိုထက်ရှည်ရင် နောက်ဆုံး frame ကို ဆက်ထား (အသံမဖြတ်မိစေရန်)
+        if target_frames and last_raw is not None and not stop.is_set():
+            while j < target_frames:
+                if not qput(q_out, process(last_raw, j)): break
+                j += 1
     except Exception as e:
         err.append(e); stop.set()
     finally:
@@ -465,7 +549,7 @@ def final_render(video_in, audio_in, output_video, tempo,
         stop.set()
         th_r.join()
         try: proc.stdin.close()
-        except: pass
+        except Exception: pass
         proc.wait()
     if err: raise err[0]
     if proc.returncode != 0:
@@ -473,28 +557,7 @@ def final_render(video_in, audio_in, output_video, tempo,
     return output_video
 
 
-def mux_audio(video_in, audio_in, output_video, tempo):
-    cmd = ["ffmpeg", "-y", "-i", video_in, "-i", audio_in,
-           "-af", f"atempo={tempo}", "-map", "0:v", "-map", "1:a",
-           "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE,
-           "-shortest", output_video]
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise Exception(f"Mux: {(r.stderr or '')[-300:]}")
-    return output_video
-
-
-def prepare_video_job(video_in, fw_model):
-    segments = whisper_fast(video_in, fw_model)
-    if not segments: raise Exception("Speech မတွေ့")
-    kept, vfps = keep_count(video_in, segments)
-    if kept == 0: raise Exception("Speech မတွေ့")
-    return {"segments": segments, "vdur": kept / vfps}
-
-
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
-    import math
     d = ImageDraw.Draw(img, "RGBA")
     W, H = img.size
     inner_c = max(3, thickness // 3)
@@ -516,55 +579,6 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     d.rectangle([offset, offset, W - 1 - offset, H - 1 - offset],
                 outline=(254, 44, 85, 255), width=inner_c)
     return img
-
-
-@st.cache_resource(show_spinner=False)
-def get_fw_model():
-    from faster_whisper import WhisperModel
-    return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
-                        cpu_threads=os.cpu_count() or 4)
-
-
-def whisper_fast(video_path, model=None):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", "whisper_audio.wav"
-    ], capture_output=True, check=True)
-
-    if USE_FAST_VAD:
-        try:
-            from faster_whisper.audio import decode_audio
-            from faster_whisper.vad import get_speech_timestamps, VadOptions
-            audio = decode_audio("whisper_audio.wav", sampling_rate=16000)
-            ts = get_speech_timestamps(
-                audio, VadOptions(min_silence_duration_ms=700, speech_pad_ms=200))
-            segs_vad = [(t["start"] / 16000.0, t["end"] / 16000.0) for t in ts]
-            if segs_vad:
-                return segs_vad
-        except Exception:
-            pass
-
-    speech_segments = []
-    try:
-        model = model or get_fw_model()
-        segments, _ = model.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
-            vad_filter=False, beam_size=1,
-            condition_on_previous_text=False, temperature=0
-        )
-        for seg in segments:
-            speech_segments.append((seg.start, seg.end))
-    except Exception:
-        import whisper
-        model = whisper.load_model(WHISPER_MODEL)
-        result = model.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
-            condition_on_previous_text=False, beam_size=1, temperature=0
-        )
-        for seg in result["segments"]:
-            speech_segments.append((seg["start"], seg["end"]))
-    return speech_segments
 
 
 # ==================== UI ====================
@@ -652,7 +666,7 @@ st.divider()
 st.subheader("📁 Step 2 — Video")
 vid = st.file_uploader(
     "📹",
-    type=["mp4","mov","avi","mkv"],
+    type=["mp4", "mov", "avi", "mkv"],
     label_visibility="collapsed",
     key=f"video_up_{st.session_state.video_up_key}"
 )
@@ -742,7 +756,6 @@ st.divider()
 st.subheader("🚀 Step 7 — Generate Recap Video")
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
-    # ==================== Validation ====================
     if not script.strip():
         st.error("Script paste လုပ်ပါ"); st.stop()
     if vid is None:
@@ -753,57 +766,63 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     total_start = time.time()
     step_times = {}
 
-    # ==================== Script Normalize ====================
     script_n = normalize_script(script)
     if not script_n.strip():
         st.error("Script မှာ စာမပါပါ"); st.stop()
 
-    # ==================== Video Save ====================
     vid.seek(0)
     with open("input.mp4", "wb") as f:
         f.write(vid.read())
 
-    # ==================== Speech Detect ====================
     fw_model = None
     if not USE_FAST_VAD:
         try: fw_model = get_fw_model()
         except Exception: pass
 
+    # ==================== Speech Detect (video + audio decode အပြိုင်) ====================
     t0 = time.time()
     with st.spinner("🔍 Speech segments ရှာနေသည်..."):
         try:
-            info = prepare_video_job("input.mp4", fw_model)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                f_vid = ex.submit(load_audio_16k, "input.mp4")
+                f_aud = ex.submit(load_audio_16k, "voice.mp3")
+                try: vid_audio = f_vid.result()
+                except Exception: vid_audio = None
+                aud = f_aud.result()
+            info = prepare_video_job("input.mp4", fw_model, vid_audio)
         except Exception as e:
             st.error(f"❌ Speech Detect: {e}"); st.stop()
     segments, vdur = info["segments"], info["vdur"]
     step_times["🔍 Speech Detect"] = time.time() - t0
 
-    # ==================== SRT Sync ====================
+    # ==================== Sync (အသံအမှန်အတိုင်း စာတန်းချိန်) ====================
     t0 = time.time()
-    adur = audio_dur("voice.mp3")
+    adur = len(aud) / 16000.0                      # decode လုပ်ထားတဲ့ အမှန် duration
     tempo = max(0.5, min(2.0, adur / vdur))
-    eff = adur / tempo
+    eff = adur / tempo                              # tempo ပြီးနောက် အသံ duration
 
-    srt_path = None
+    subs = []
     if use_sub:
-        chunks = split_scr(script_n, TTS_CHUNK)
-        total_chars = sum(len(c) for c in chunks)
-        if total_chars == 0:
+        try:
+            a_segs = vad_segments(aud, AUDIO_VAD_SILENCE_MS, 60)
+        except Exception:
+            a_segs = [(0.0, adur)]
+        a_segs = [(a / tempo, b / tempo) for a, b in a_segs]
+        sents = [split_parts(s) for s in split_sentences(script_n)]
+        subs = align_subs(sents, a_segs, eff)
+        if not subs:
             st.error("Script မှာ စာမပါပါ"); st.stop()
-        pieces = [(c, eff * (len(c) / total_chars)) for c in chunks]
-        srt_path = scr_to_srt_timed(pieces, eff, "sub.srt")
-    step_times["📝 SRT"] = time.time() - t0
+    step_times["📝 Sub Align"] = time.time() - t0
 
-    # ==================== Render + Mux ====================
+    # ==================== Render (video + audio တစ်ကြိမ်တည်း) ====================
     t0 = time.time()
     with st.spinner("🎬 Finalizing..."):
         try:
-            final_render("input.mp4", None, "video_only.mp4", 1.0,
-                         srt_path=srt_path, fp=FONT_FILE, fs=FS, pos_y=pos_y,
+            final_render("input.mp4", "voice.mp3", "final.mp4", tempo,
+                         subs=subs, fp=FONT_FILE, fs=FS, pos_y=pos_y,
                          bh=BH, ba=BA, use_neon=use_neon,
                          thickness=neon_thickness, speed=neon_speed,
-                         segments=segments)
-            mux_audio("video_only.mp4", "voice.mp3", "final.mp4", tempo)
+                         segments=segments, target_dur=eff)
         except Exception as e:
             st.warning(f"⚠️ Final render fail: {e} — simple merge ပြောင်း")
             simple_merge("input.mp4", "voice.mp3", "final.mp4", tempo, segments)
@@ -811,7 +830,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     total_elapsed = time.time() - total_start
 
-    # ==================== Result ====================
     st.markdown(f"""
     <div class="timer-box">
         <div class="timer-title">⏱️ TOTAL TIME</div>
@@ -822,6 +840,10 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     for name, t in step_times.items():
         st.markdown(f"<div class='step-timer'>{name} — <b>{t:.1f}s</b></div>",
                     unsafe_allow_html=True)
+
+    if abs(adur / tempo - vdur) > 0.3:
+        st.info(f"ℹ️ Tempo ကို {tempo:.2f}x ထိ ကန့်သတ်ထားလို့ အသံ/ဗီဒီယို အရှည် "
+                f"({adur/tempo:.1f}s / {vdur:.1f}s) မတူပါ — အသံမဖြတ်အောင် ညှိထားပါတယ်")
 
     st.success(f"✅ Done — ⏱️ {total_elapsed:.1f}s")
     st.video("final.mp4")
