@@ -1,9 +1,5 @@
 streamlit
-azure-cognitiveservices-speech
-edge-tts>=7.2.7
 faster-whisper
-openai-whisper
-gradio_client
 ffmpeg-python
 Pillow
 opencv-python-headless
