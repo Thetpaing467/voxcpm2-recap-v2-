@@ -274,17 +274,14 @@ def align_subs(sents, segs, total):
 # ---------- Speech detect ----------
 
 def load_audio_16k(path):
-    from faster_whisper.audio import decode_audio
-    try:
-        return decode_audio(path, sampling_rate=16000)
-    except Exception:
-        tmp = f"_tmp_{os.getpid()}_{abs(hash(path))}.wav"
-        subprocess.run(["ffmpeg", "-y", "-i", path, "-ar", "16000", "-ac", "1",
-                        "-c:a", "pcm_s16le", tmp], capture_output=True, check=True)
-        try: return decode_audio(tmp, sampling_rate=16000)
-        finally:
-            try: os.remove(tmp)
-            except Exception: pass
+    # PyAV version မကိုက်ညီမှု (metadata_errors) ကို ရှောင်ရန် ffmpeg pipe နဲ့ တိုက်ရိုက် decode
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "16000",
+         "-f", "f32le", "-"], capture_output=True, check=True)
+    audio = np.frombuffer(r.stdout, dtype=np.float32)
+    if audio.size == 0:
+        raise Exception("Audio မတွေ့")
+    return audio
 
 
 def vad_segments(audio, min_silence_ms, pad_ms):
