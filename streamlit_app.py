@@ -26,7 +26,7 @@ USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 300      # သေးလေ subtitle sync ပိုတိကျ
 EDGE_CHUNK = 200
-TTS_WORKERS = 3
+TTS_WORKERS = 1
 PNG_WORKERS = 4
 
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
