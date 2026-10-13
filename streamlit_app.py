@@ -26,7 +26,7 @@ USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 300      # သေးလေ subtitle sync ပိုတိကျ
 EDGE_CHUNK = 200
-TTS_WORKERS = 1
+TTS_WORKERS = 3
 PNG_WORKERS = 4
 
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
@@ -42,9 +42,6 @@ EDGE_VOICES = {
     "male":   "my-MM-ThihaNeural",
 }
 EDGE_VOICE_FIXED = "male"
-# Edge service က IP/region ကို block လုပ်ပါက HTTP/SOCKS proxy ထည့်နိုင်သည်။
-# ဥပမာ: EDGE_TTS_PROXY=http://127.0.0.1:7890
-EDGE_PROXY = os.getenv("EDGE_TTS_PROXY", "").strip() or None
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
@@ -574,113 +571,69 @@ def tts_burmese(chunks, ref, space, cb=None):
 
 
 async def _edge_tts_async(text, out_file, voice):
-    """Generate one MP3. EDGE_TTS_PROXY is optional but useful when Bing blocks the server IP."""
-    communicate = edge_tts.Communicate(
-        text,
-        voice,
-        proxy=EDGE_PROXY,
-        connect_timeout=15,
-        receive_timeout=90,
-    )
+    communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_file)
 
 
 def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
-    voice_id = EDGE_VOICES.get(EDGE_VOICE_FIXED, EDGE_VOICES["male"])
+    voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
 
     small = []
     for c in chunks:
         for x in split_scr(c, EDGE_CHUNK):
-            if has_speech(x):
-                small.append(x.strip())
+            if has_speech(x): small.append(x)
     chunks = small
-    if not chunks:
-        raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
+    if not chunks: raise Exception("TTS လုပ်စရာ စာမတွေ့ပါ")
 
     def run_async(coro_fn):
-        # Thread တစ်ခုချင်းစီမှာ event loop အသစ်သုံးပါ။ Streamlit loop နှင့် မတိုက်စေရန်။
-        loop = asyncio.new_event_loop()
-        try:
+        try: asyncio.run(coro_fn())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            return loop.run_until_complete(coro_fn())
-        finally:
-            asyncio.set_event_loop(None)
+            loop.run_until_complete(coro_fn())
             loop.close()
 
     def tts_one(args):
         i, c = args
         os.makedirs("tts_cache", exist_ok=True)
-        key = hashlib.md5((voice_id + (EDGE_PROXY or "") + c).encode("utf-8")).hexdigest()
+        key = hashlib.md5((voice_id + c).encode("utf-8")).hexdigest()
         dst = f"tts_cache/{key}.mp3"
-        tmp = dst + ".part"
-        if os.path.exists(dst) and os.path.getsize(dst) > 1024:
-            return (i, dst, None)
-
-        last_error = "unknown error"
+        if os.path.exists(dst) and os.path.getsize(dst) > 0:
+            return (i, dst)
         for attempt in range(4):
             try:
-                for p in (tmp, dst):
-                    try:
-                        if os.path.exists(p):
-                            os.remove(p)
-                    except OSError:
-                        pass
-                run_async(lambda: _edge_tts_async(c, tmp, voice_id))
-                if not os.path.exists(tmp) or os.path.getsize(tmp) <= 1024:
-                    raise RuntimeError("Edge TTS returned an empty audio file")
-                os.replace(tmp, dst)
-                return (i, dst, None)
-            except Exception as e:
-                last_error = f"{type(e).__name__}: {e}"
-                for p in (tmp,):
-                    try:
-                        if os.path.exists(p):
-                            os.remove(p)
-                    except OSError:
-                        pass
-                if attempt < 3:
-                    time.sleep(2 * (attempt + 1))
-        return (i, None, last_error)
+                if os.path.exists(dst): os.remove(dst)
+                run_async(lambda: _edge_tts_async(c, dst, voice_id))
+                if os.path.exists(dst) and os.path.getsize(dst) > 0:
+                    time.sleep(0.3)
+                    return (i, dst)
+            except Exception:
+                pass
+            time.sleep(3 * (attempt + 1))
+        return (i, None)
 
-    results = [None] * len(chunks)
-    errors = [None] * len(chunks)
-    done = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-        for idx, dst, err in ex.map(tts_one, enumerate(chunks)):
-            results[idx] = dst
-            errors[idx] = err
-            done += 1
-            if cb:
-                cb(done - 1, len(chunks), chunks[idx])
+    results = [None] * len(chunks); done = 0; skipped = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for idx, dst in ex.map(tts_one, enumerate(chunks)):
+            results[idx] = dst; done += 1
+            if dst is None: skipped.append(idx)
+            if cb: cb(done - 1, len(chunks), chunks[idx])
 
     good = [a for a in results if a]
     if not good:
-        detail = next((e for e in errors if e), "unknown error")
-        if "403" in detail or "WSServerHandshakeError" in detail:
-            proxy_hint = " EDGE_TTS_PROXY သတ်မှတ်ပါ (သို့) network/VPN ပြောင်းစမ်းပါ။" if not EDGE_PROXY else " Proxy ကို စစ်ဆေးပါ။"
-            raise Exception(
-                "Edge server က 403 ဖြင့် တားထားသည်။ Voice ID ပြဿနာမဟုတ်ပါ။" + proxy_hint +
-                f" အသေးစိတ်: {detail}"
-            )
-        raise Exception(f"Edge TTS အသံမရပါ: {detail}")
-
-    skipped = [i for i, a in enumerate(results) if not a]
+        raise Exception("Edge TTS အသံမရပါ — edge-tts ကို update လုပ်ပါ (edge-tts>=7.0.0) / ခဏနေ ပြန်စမ်းပါ")
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(chunks[i][:30] for i in skipped))
 
+    # chunk တစ်ခုချင်းရဲ့ အမှန်တကယ် အသံအရှည်
     pieces = [(chunks[i], audio_dur(a)) for i, a in enumerate(results) if a]
 
-    # concat demuxer အတွက် absolute path ကို quote လုပ်ထားသည်။
-    concat_path = os.path.abspath("edge_concat.txt")
-    with open(concat_path, "w", encoding="utf-8") as f:
-        for a in good:
-            f.write("file '" + os.path.abspath(a).replace("'", "'\\''") + "'\n")
+    with open("edge_concat.txt", "w", encoding="utf-8") as f:
+        for a in good: f.write(f"file '{a}'\n")
 
-    ffmpeg.input(concat_path, format="concat", safe=0).output(
+    ffmpeg.input("edge_concat.txt", format="concat", safe=0).output(
         out_path, acodec="libmp3lame", audio_bitrate=AUDIO_BITRATE, ar=48000
     ).run(overwrite_output=True)
-    if not os.path.exists(out_path) or os.path.getsize(out_path) <= 1024:
-        raise Exception("Edge TTS concat ပြီးနောက် audio file အလွတ်ဖြစ်နေသည်")
     return out_path, pieces
 
 
