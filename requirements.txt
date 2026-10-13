@@ -1,10 +1,10 @@
 streamlit
-ffmpeg-python
-opencv-python-headless
-Pillow
-numpy
+azure-cognitiveservices-speech
 edge-tts>=7.2.7
-openai-whisper
 faster-whisper
+openai-whisper
 gradio_client
-google-genai
+ffmpeg-python
+Pillow
+opencv-python-headless
+numpy
