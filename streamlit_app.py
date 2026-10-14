@@ -1,5 +1,6 @@
 # ============================================================
-# 🎬 Myanmar TTS Recap — Multilingual (English + Chinese + …)
+# 🎬 Myanmar TTS Recap — Fixed Widget Error
+# Multilingual (English + Chinese + …)
 # Video → Whisper Multi → Gemini 3.8 → TTS → Recap
 # + Canvas + Auto/Manual Mode
 # ============================================================
@@ -95,7 +96,7 @@ SPACES = [
     {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
 ]
 
-# 🌐 Google Canvas URL (Transcript ထုတ်ယူဖို့)
+# 🌐 Google Canvas URL
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
 
 FONT_FILE = "MyanmarPadaung.ttf"
@@ -110,19 +111,17 @@ PNG_WORKERS = 4
 # ============================================================
 # ================ WHISPER CONFIG (MULTILINGUAL) =============
 # ============================================================
-# ⚠️ "small" (no .en suffix) = multilingual — Chinese/English/…
-# ⚠️ "small.en" = English-only (မြန် + တိကျ၊ ဒါပေမဲ့ Chinese မရ)
 WHISPER_MULTILINGUAL = True           # ← True = Chinese support
 WHISPER_MODEL_EN = "small.en"         # ← English-only fallback
-WHISPER_MODEL_MM = "small"            # ← Multilingual (Chinese/English/…)
-WHISPER_MODEL_MULTI = "small"         # ← Alias (auto-detect mode)
-WHISPER_LANG_MM = "my"                # ← VAD mode (my = Myanmar audio)
+WHISPER_MODEL_MM = "tiny"             # ← VAD (မြန်မာ)
+WHISPER_MODEL_MULTI = "small"         # ← Multilingual (auto-detect)
+WHISPER_LANG_MM = "my"
 
 # ============================================================
 # ================ GEMINI MODELS (Updated 2026) ==============
 # ============================================================
 GEMINI_MODELS = [
-    "gemini-3.8-flash",        # အသစ်ဆုံး + အမြန်ဆုံး
+    "gemini-3.8-flash",
     "gemini-3.8-flash-lite",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
@@ -151,7 +150,8 @@ def _init_state():
     defaults = {
         "script": "",
         "last_paste": "",
-        "paste_big": "",
+        # ⭐ widget key မဟုတ်တဲ့ session value (paste box အတွက်)
+        "paste_box_value": "",
         "pkey": None,
         "ref": None,
         "video_up_key": 0,
@@ -161,6 +161,7 @@ def _init_state():
         "final_video": None,
         "active_model": None,
         "detected_lang": None,
+        "_clear_paste": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -170,10 +171,16 @@ def _init_state():
 _init_state()
 
 
+def _clear_paste_box():
+    """Paste box ကို လုံခြုံစွာ ရှင်း (widget key မထိ)"""
+    st.session_state.paste_box_value = ""
+    st.session_state._clear_paste = True
+
+
 def _on_download_clear():
     st.session_state.script = ""
     st.session_state.last_paste = ""
-    st.session_state.paste_big = ""
+    st.session_state.paste_box_value = ""
     st.session_state.pkey = None
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
     st.session_state.english_transcript = ""
@@ -804,9 +811,6 @@ OUTPUT FORMAT:
 - Start directly with the story."""
 
 
-# ============================================================
-# Language hints (detected from Whisper)
-# ============================================================
 LANG_HINTS = {
     "zh": "The transcript is in CHINESE (中文). Translate it directly to Burmese.",
     "en": "The transcript is in English. Translate it to Burmese.",
@@ -857,7 +861,7 @@ def _is_model_missing(err_str):
 def transcribe_english(video_path):
     """
     Whisper → Transcript (multilingual)
-    - WHISPER_MULTILINGUAL=True  → Auto language detect (Chinese/English/…)
+    - WHISPER_MULTILINGUAL=True  → Auto language detect
     - WHISPER_MULTILINGUAL=False → English only (small.en)
     """
     wav = "english_audio.wav"
@@ -870,12 +874,11 @@ def transcribe_english(video_path):
     detected_lang = "?"
     confidence = 0.0
 
-    # ---- Model & language ရွေး ----
     if WHISPER_MULTILINGUAL:
-        model_name = WHISPER_MODEL_MULTI     # "small"
-        lang_arg = None                       # auto detect
+        model_name = WHISPER_MODEL_MULTI
+        lang_arg = None
     else:
-        model_name = WHISPER_MODEL_EN        # "small.en"
+        model_name = WHISPER_MODEL_EN
         lang_arg = "en"
 
     try:
@@ -917,10 +920,8 @@ def transcribe_english(video_path):
         confidence = 0.0
         lines = [s["text"].strip() for s in result["segments"] if s["text"].strip()]
 
-    # ---- Language ကို session ထဲ သိမ်း ----
     st.session_state["detected_lang"] = detected_lang
 
-    # ---- UI မှာ ပြ ----
     if WHISPER_MULTILINGUAL and detected_lang != "?":
         st.info(
             f"🗣️ Detected: **{detected_lang}** "
@@ -933,7 +934,7 @@ def transcribe_english(video_path):
 def split_transcript(text, chunk_chars=4000):
     if len(text) <= chunk_chars:
         return [text]
-    sentences = re.split(r'(?<=[.!?။])\s+', text)
+    sentences = re.split(r'(?<=[.!?။。！？])\s+', text)
     chunks, cur = [], ""
     for s in sentences:
         if len(cur) + len(s) + 1 <= chunk_chars:
@@ -985,7 +986,6 @@ def gemini_write_script(english_text, progress_cb=None):
     except Exception as e:
         raise Exception(f"Gemini model မရပါ: {e}")
 
-    # Language hint (from Whisper)
     lang_code = st.session_state.get("detected_lang", "en") or "en"
     hint = _lang_hint(lang_code)
     st.caption(f"🌐 Source language: `{lang_code}`")
@@ -1302,7 +1302,7 @@ with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", 
             🌐 Google Gemini Canvas
         </div>
         <div style='color:#c8c8e0;font-size:.9rem;line-height:1.5'>
-            Canvas ဖွင့် → Transcript Copy → Step 2 (Manual) မှာ Paste လုပ်ပါ
+            Canvas ဖွင့် → Transcript Copy → Manual Mode မှာ Paste လုပ်ပါ
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1321,7 +1321,7 @@ with st.expander("🔑 API Key Settings", expanded=(not st.session_state.gemini_
         value=st.session_state.get("gemini_key", ""),
         type="password",
         placeholder="AIza...",
-        key="key_input_widget",
+        key="api_key_input",     # ← unique key
     )
 
     c1, c2, c3 = st.columns([2, 1, 1])
@@ -1368,9 +1368,7 @@ with st.expander("🔑 API Key Settings", expanded=(not st.session_state.gemini_
         unsafe_allow_html=True
     )
 
-    # 🌍 Multilingual mode info
-    mode_str = "🌍 Multilingual (Chinese/English/…)" if WHISPER_MULTILINGUAL \
-               else "🇬🇧 English only"
+    mode_str = "🌍 Multilingual" if WHISPER_MULTILINGUAL else "🇬🇧 English only"
     st.markdown(
         f"<div class='lang-info'>🗣️ Whisper mode: <b>{mode_str}</b> — "
         f"model: <code>{WHISPER_MODEL_MULTI if WHISPER_MULTILINGUAL else WHISPER_MODEL_EN}</code></div>",
@@ -1434,32 +1432,47 @@ if st.session_state.mode == "manual":
     st.markdown("#### 📋 Script Paste")
     st.caption("💡 **Canvas** ကို အပေါ်မှာ ဖွင့် → Transcript Copy → ဒီနေရာ Paste")
 
+    # ⭐ widget key မသုံး — session value သုံး
+    # _clear_paste flag စစ်ပြီး value ရှင်း
+    if st.session_state.get("_clear_paste", False):
+        st.session_state.paste_box_value = ""
+        st.session_state._clear_paste = False
+
+    paste_value = st.session_state.get("paste_box_value", "")
+
     pasted_now = st.text_area(
-        "paste",
-        value="",
+        "paste_box",
+        value=paste_value,
         height=150,
-        key="paste_big",
         label_visibility="collapsed",
         placeholder="📋  မြန်မာ Script ကို ဒီနေရာ Long-press → Paste  (သို့)  Ctrl+V",
+        key="paste_widget_manual",     # ⭐ unique key
     )
 
+    # ---- Auto paste → script ----
     if pasted_now and pasted_now.strip():
         clean = pasted_now.strip()
         if clean != st.session_state.get("last_paste", ""):
             st.session_state.last_paste = clean
+
             lines = [l.strip().strip('"\u201c\u201d').strip()
                      for l in clean.splitlines()]
             result = "\n\n".join(l for l in lines if l)
+
             st.session_state.script = result
-            st.session_state.paste_big = ""
+            # ⭐ clear flag (widget key ကို မထိ)
+            st.session_state._clear_paste = True
+
             st.success(f"✅ Script ရောက်သွားပြီ — {len(result)} လုံး")
             st.rerun()
 
+    # ---- Script Editor (unique key) ----
     script = st.text_area(
         "Script Editor",
         value=st.session_state.script,
         height=200,
         placeholder="မြန်မာ Script...",
+        key="script_editor_manual",    # ⭐ unique key
     )
     st.session_state.script = script
 
@@ -1470,23 +1483,26 @@ if st.session_state.mode == "manual":
         if st.button("🗑️ Clear Script", use_container_width=True):
             st.session_state.script = ""
             st.session_state.last_paste = ""
+            st.session_state._clear_paste = True
             st.rerun()
 
 else:  # auto mode
     if st.session_state.english_transcript:
         with st.expander("📄 Transcript (raw)", expanded=False):
-            st.text_area("eng", st.session_state.english_transcript,
-                         height=200, label_visibility="collapsed")
+            st.text_area("eng_view", st.session_state.english_transcript,
+                         height=200, label_visibility="collapsed",
+                         key="transcript_viewer")
     if st.session_state.script:
         with st.expander("📝 Gemini Script (edit လို့ရ)", expanded=False):
-            edited = st.text_area("mm", st.session_state.script,
-                                  height=200, label_visibility="collapsed")
+            edited = st.text_area("mm_view", st.session_state.script,
+                                  height=200, label_visibility="collapsed",
+                                  key="script_viewer")
             if edited != st.session_state.script:
                 st.session_state.script = edited
 
 # ==================== ⚙️ Options ====================
 with st.expander("⚙️ Options", expanded=False):
-    use_voxcpm = st.toggle("VoxCPM2 သုံးမလား?", value=False)
+    use_voxcpm = st.toggle("VoxCPM2 သုံးမလား?", value=False, key="use_voxcpm_toggle")
 
     ref_file = None
     if use_voxcpm:
@@ -1505,14 +1521,19 @@ with st.expander("⚙️ Options", expanded=False):
     else:
         st.session_state.ref = None
 
-    use_sub = st.toggle("Subtitle Burn-in", value=True)
-    pos_y = st.slider("📍 Subtitle Position", 0, 100, 100, 1) if use_sub else 100
+    use_sub = st.toggle("Subtitle Burn-in", value=True, key="use_sub_toggle")
+    if use_sub:
+        pos_y = st.slider("📍 Subtitle Position", 0, 100, 100, 1,
+                          key="pos_y_slider")
+    else:
+        pos_y = 100
 
 st.divider()
 
 # ==================== 🚀 ONE-CLICK RECAP BUTTON ====================
 st.markdown('<div class="big-recap-btn">', unsafe_allow_html=True)
-recap_clicked = st.button("🚀 RECAP", type="primary", use_container_width=True)
+recap_clicked = st.button("🚀 RECAP", type="primary", use_container_width=True,
+                          key="recap_main_btn")
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.caption(f"💡 Mode: **{st.session_state.mode.upper()}** — Video + "
@@ -1543,11 +1564,11 @@ if recap_clicked:
 
     # ==================== AUTO MODE ====================
     if st.session_state.mode == "auto":
-        # ---- Step 1: Whisper ----
         t0 = time.time()
         with st.status("🎧 Step 1/4 — Whisper (multilingual)...",
                        expanded=True) as s:
-            st.write(f"Model: `{WHISPER_MODEL_MULTI if WHISPER_MULTILINGUAL else WHISPER_MODEL_EN}`")
+            model_used = WHISPER_MODEL_MULTI if WHISPER_MULTILINGUAL else WHISPER_MODEL_EN
+            st.write(f"Model: `{model_used}`")
             try:
                 eng = transcribe_english("input.mp4")
             except Exception as e:
@@ -1564,7 +1585,6 @@ if recap_clicked:
                      state="complete")
         step_times["🎧 Whisper"] = time.time() - t0
 
-        # ---- Step 2: Gemini ----
         t0 = time.time()
         with st.status("🤖 Step 2/4 — Gemini script...", expanded=True) as s:
             pb = st.progress(0)
@@ -1691,8 +1711,9 @@ if recap_clicked:
     st.video("final.mp4")
 
     with st.expander("📝 Script ကြည့် / ပြင်", expanded=False):
-        edited = st.text_area("script_edit", st.session_state.script,
-                              height=200, label_visibility="collapsed")
+        edited = st.text_area("script_edit_view", st.session_state.script,
+                              height=200, label_visibility="collapsed",
+                              key="script_edit_after_render")
         if edited != st.session_state.script:
             st.session_state.script = edited
             st.caption("💡 ပြင်ပြီးရင် 🚀 RECAP ပြန်နှိပ်ပါ")
@@ -1704,4 +1725,5 @@ if recap_clicked:
             file_name="recap.mp4",
             on_click=_on_download_clear,
             use_container_width=True,
+            key="download_btn_final",
         )
