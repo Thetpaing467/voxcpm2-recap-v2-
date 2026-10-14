@@ -1,17 +1,24 @@
 # ============================================================
-# 🎬 Myanmar TTS Recap — All-in-One Streamlit App
-# Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap
+# 🎬 Myanmar TTS Recap — All-in-One Streamlit App + Gemini Auto-Script
+# Video → Whisper → Gemini Script → VoxCPM2 / Edge TTS → Recap
 # ============================================================
 
 import streamlit as st
 import os, re, hashlib, ffmpeg, shutil, subprocess, asyncio, time
-import tempfile, threading, queue, math
+import tempfile, threading, queue, math, json
 import concurrent.futures
 import numpy as np
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 from gradio_client import Client, handle_file
+
+# ---- dotenv (optional) ----
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 # ==================== Config ====================
 os.environ["HF_HOME"] = os.path.join(tempfile.gettempdir(), "hf_cache")
@@ -22,6 +29,8 @@ SPACES = [
 ]
 
 PASSWORD = os.environ.get("APP_PASSWORD", "voxcpm2026")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+
 FONT_FILE = "MyanmarPadaung.ttf"
 
 FS, BH, BA = 30, 100, 200
@@ -36,9 +45,9 @@ EDGE_CHUNK = 200
 TTS_WORKERS = 3
 PNG_WORKERS = 4
 
-CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
-WHISPER_MODEL = "tiny"
-WHISPER_LANG = "my"
+WHISPER_MODEL_EN = "small.en"     # Gemini script အတွက် English transcript
+WHISPER_MODEL_MM = "tiny"          # VAD / speech detect
+WHISPER_LANG_MM = "my"
 
 BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
@@ -50,10 +59,17 @@ EDGE_VOICES = {
 }
 EDGE_VOICE_FIXED = "male"
 
+GEMINI_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+]
+
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
 
-# ==================== Session State Init (all) ====================
+# ==================== Session State ====================
 def _init_state():
     defaults = {
         "auth": False,
@@ -63,6 +79,8 @@ def _init_state():
         "pkey": None,
         "ref": None,
         "video_up_key": 0,
+        "english_transcript": "",
+        "gemini_busy": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -72,13 +90,14 @@ _init_state()
 
 
 def _on_download_clear():
-    """Download နှိပ်ရင် Script + Video + Paste ရှင်း (Ref Audio မထိ)"""
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.paste_big = ""
     st.session_state.pkey = None
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
-    for f in ("preview.mp4", "prev.png", "prev_out.png"):
+    st.session_state.english_transcript = ""
+    for f in ("preview.mp4", "prev.png", "prev_out.png",
+              "english_transcript.txt", "gemini_script.txt"):
         if os.path.exists(f):
             try: os.remove(f)
             except: pass
@@ -113,6 +132,9 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 .step-timer{background:rgba(255,255,255,.05);border-left:4px solid #667eea;
  border-radius:10px;padding:12px 18px;margin:8px 0;color:#e8e8f0;font-size:.95rem}
 .step-timer b{color:#6ba8ff;font-size:1.05rem}
+.ai-badge{display:inline-block;background:linear-gradient(135deg,#00c9a7,#00b4d8);
+ color:#fff;padding:4px 12px;border-radius:20px;font-size:.75rem;
+ font-weight:700;letter-spacing:.5px;margin-left:8px}
 </style>
 """, unsafe_allow_html=True)
 
@@ -244,14 +266,10 @@ def split_for_sub(text, mc=30):
 
 
 def scr_to_srt_timed(pieces, total, path, mc=30):
-    """pieces = [(text, audio_seconds)] — real audio duration
-    total = final audio duration (atempo ပြီးနောက်)"""
     raw = sum(d for _, d in pieces)
     if raw <= 0:
         return None
-
     k = total / raw if raw > 0 else 1.0
-
     cur, idx, wrote = 0.0, 1, False
     with open(path, "w", encoding="utf-8") as f:
         for text, d in pieces:
@@ -600,7 +618,7 @@ def final_render(video_in, audio_in, output_video, tempo,
     return output_video
 
 
-# ==================== Preview Helpers ====================
+# ==================== Preview ====================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     d = ImageDraw.Draw(img, "RGBA")
@@ -624,6 +642,171 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     d.rectangle([offset, offset, W - 1 - offset, H - 1 - offset],
                 outline=(254, 44, 85, 255), width=inner_c)
     return img
+
+
+# ============================================================
+# ================ Gemini Script Generator ===================
+# ============================================================
+
+GEMINI_SYSTEM_PROMPT = """You are an expert Burmese (Myanmar) recap script writer for TikTok/YouTube Shorts recap videos.
+
+Your task: Take an English transcript from a movie/story recap video and write a natural, engaging Burmese narration script.
+
+RULES:
+1. Write ONLY in Burmese (မြန်မာစာ). No English words except well-known proper nouns.
+2. Keep the ENTIRE story — no summaries, no skipping, no shortening.
+3. Use natural spoken Burmese like a narrator telling a story to a friend.
+4. Keep character names, relationships, and places consistent throughout.
+5. Every sentence must end with ။ (Burmese period).
+6. Split into short sentences (max ~25 Burmese characters per sentence) for subtitle sync.
+7. Use ၊ (comma) for natural pauses within longer thoughts.
+8. NO emojis, NO markdown, NO bullet points, NO English punctuation like ! ? .
+9. If a character/place name is foreign, transliterate into Burmese phonetics.
+10. Preserve emotional tone — excitement, tension, sadness — in word choice.
+
+OUTPUT FORMAT:
+- Plain text only.
+- One paragraph, no line breaks between sentences (or one sentence per line).
+- No headers, no titles, no intro like "Here is the script".
+- Start directly with the story."""
+
+
+def _gemini_client():
+    if not GEMINI_API_KEY:
+        raise Exception("GEMINI_API_KEY မရှိပါ — .env ဖိုင် စစ်ပါ")
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        raise Exception("google-generativeai မသွင်းထားပါ — pip install google-generativeai")
+    genai.configure(api_key=GEMINI_API_KEY)
+    return genai
+
+
+def transcribe_english(video_path):
+    """Whisper (small.en) နဲ့ English transcript ထုတ်"""
+    wav = "english_audio.wav"
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path,
+        "-ar", "16000", "-ac", "1",
+        "-c:a", "pcm_s16le", wav
+    ], capture_output=True, check=True)
+
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel(WHISPER_MODEL_EN, device="cpu",
+                             compute_type="int8", cpu_threads=os.cpu_count() or 4)
+        segments, _ = model.transcribe(
+            wav, language="en", vad_filter=True,
+            beam_size=1, condition_on_previous_text=False, temperature=0
+        )
+        lines = [seg.text.strip() for seg in segments if seg.text.strip()]
+    except Exception:
+        import whisper
+        model = whisper.load_model("small.en")
+        result = model.transcribe(wav, language="en",
+                                  condition_on_previous_text=False,
+                                  beam_size=1, temperature=0)
+        lines = [s["text"].strip() for s in result["segments"] if s["text"].strip()]
+
+    text = " ".join(lines)
+    return text.strip()
+
+
+def split_transcript(text, chunk_chars=4000):
+    """Gemini input limit အတွက် ခွဲ"""
+    if len(text) <= chunk_chars:
+        return [text]
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks, cur = [], ""
+    for s in sentences:
+        if len(cur) + len(s) + 1 <= chunk_chars:
+            cur = (cur + " " + s).strip()
+        else:
+            if cur:
+                chunks.append(cur)
+            cur = s
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def gemini_write_script(english_text, progress_cb=None):
+    """Gemini နဲ့ မြန်မာ recap script ရေး (long transcript ကို chunk ခွဲပြီး ဆက်)"""
+    genai = _gemini_client()
+
+    chunks = split_transcript(english_text, chunk_chars=4000)
+    n = len(chunks)
+    full_script = []
+
+    model = None
+    last_err = None
+    for mname in GEMINI_MODELS:
+        try:
+            model = genai.GenerativeModel(
+                model_name=mname,
+                system_instruction=GEMINI_SYSTEM_PROMPT
+            )
+            break
+        except Exception as e:
+            last_err = e
+            continue
+
+    if model is None:
+        raise Exception(f"Gemini model မရပါ: {last_err}")
+
+    for i, chunk in enumerate(chunks):
+        if progress_cb:
+            progress_cb(i, n, f"Chunk {i+1}/{n}")
+
+        if n == 1:
+            prompt = f"""Here is the English transcript. Write the full Burmese recap script.
+
+TRANSCRIPT:
+{chunk}
+
+Remember: Full story, no summary, natural spoken Burmese, every sentence ends with ။"""
+        else:
+            if i == 0:
+                prompt = f"""This is PART 1 of {n} of an English transcript.
+Write the Burmese recap script for THIS PART ONLY.
+Do NOT summarize. Do NOT add intro. Continue the story flow.
+
+PART 1:
+{chunk}"""
+            elif i == n - 1:
+                prev_tail = full_script[-1][-400:] if full_script else ""
+                prompt = f"""This is the FINAL PART ({i+1}/{n}) of the transcript.
+Continue naturally from the previous Burmese text. Do NOT repeat what was already said.
+
+PREVIOUS BURMESE (end of last part):
+{prev_tail}
+
+FINAL PART (English):
+{chunk}
+
+Write the Burmese recap for this final part only."""
+            else:
+                prev_tail = full_script[-1][-400:] if full_script else ""
+                prompt = f"""This is PART {i+1}/{n} of the transcript.
+Continue naturally from the previous Burmese text.
+
+PREVIOUS BURMESE (end of last part):
+{prev_tail}
+
+PART {i+1} (English):
+{chunk}
+
+Write the Burmese recap for this part only. No summary."""
+
+        resp = model.generate_content(prompt)
+        out = (resp.text or "").strip()
+        out = re.sub(r"^```[\w]*\n?", "", out)
+        out = re.sub(r"\n?```$", "", out)
+        full_script.append(out)
+
+    combined = "\n".join(full_script)
+    combined = normalize_script(combined)
+    return combined
 
 
 # ==================== TTS Functions ====================
@@ -679,7 +862,6 @@ async def _edge_tts_async(text, out_file, voice):
 def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
     voice_id = EDGE_VOICES[EDGE_VOICE_FIXED]
 
-    # Filter + track original index
     filtered = []
     for i, c in enumerate(chunks):
         for x in split_scr(c, EDGE_CHUNK):
@@ -729,7 +911,7 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
     good = [(c, d) for c, d in results if d]
     if not good:
-        raise Exception("Edge TTS အသံမရပါ — edge-tts update / ခဏနေ ပြန်စမ်း")
+        raise Exception("Edge TTS အသံမရပါ")
     if skipped:
         st.warning("⚠️ ကျော်လိုက်တဲ့ အပိုင်း: " + " | ".join(skipped))
 
@@ -795,7 +977,7 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
 @st.cache_resource(show_spinner=False)
 def get_fw_model():
     from faster_whisper import WhisperModel
-    return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
+    return WhisperModel(WHISPER_MODEL_MM, device="cpu", compute_type="int8",
                         cpu_threads=os.cpu_count() or 4)
 
 
@@ -825,7 +1007,7 @@ def whisper_fast(video_path, model=None):
     try:
         model = model or get_fw_model()
         segments, _ = model.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
+            "whisper_audio.wav", language=WHISPER_LANG_MM,
             vad_filter=False, beam_size=1,
             condition_on_previous_text=False, temperature=0
         )
@@ -833,9 +1015,9 @@ def whisper_fast(video_path, model=None):
             speech_segments.append((seg.start, seg.end))
     except Exception:
         import whisper
-        m = whisper.load_model(WHISPER_MODEL)
+        m = whisper.load_model(WHISPER_MODEL_MM)
         result = m.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
+            "whisper_audio.wav", language=WHISPER_LANG_MM,
             condition_on_previous_text=False, beam_size=1, temperature=0
         )
         for seg in result["segments"]:
@@ -848,87 +1030,12 @@ def whisper_fast(video_path, model=None):
 # ============================================================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Script → VoxCPM2 / Edge TTS သီဟ → Recap</div>",
+st.markdown("<div class='main-sub'>Video → Whisper → Gemini Script → TTS → Recap</div>",
             unsafe_allow_html=True)
 st.divider()
 
-with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
-    st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL, use_container_width=True)
-    st.caption("Canvas ဖွင့် → Transcript Copy → အောက်က box ထဲ Paste လုပ်ပါ")
-
-st.markdown("""
-<div style="text-align:center;margin:8px 0 4px">
-  <span style="font-size:1.1rem;font-weight:700;
-    background:linear-gradient(90deg,#FF6B9D,#C66BFF,#6BA8FF);
-    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-    background-clip:text">
-    📋  Paste Box
-  </span>
-</div>
-""", unsafe_allow_html=True)
-
-pasted_now = st.text_area(
-    "paste",
-    value="",
-    height=80,
-    key="paste_big",
-    label_visibility="collapsed",
-    placeholder="📋  ဒီနေရာကို Long-press → Paste  (သို့)  Ctrl+V  —  ချက်ချင်း Script ထဲ ရောက်မယ်",
-)
-
-st.markdown("""
-<style>
-div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea {
-  background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
-  border:2px dashed rgba(198,107,255,.55)!important;
-  border-radius:18px!important;
-  color:#fff!important;
-  font-size:1.05rem!important;
-  padding:22px!important;
-  text-align:center!important;
-}
-div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea:focus {
-  border-color:#C66BFF!important;
-  border-style:solid!important;
-  box-shadow:0 0 24px rgba(198,107,255,.5)!important;
-}
-div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeholder {
-  color:#b48cff!important;
-  font-weight:600!important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# Auto paste → script
-if pasted_now and pasted_now.strip():
-    clean = pasted_now.strip()
-    if clean != st.session_state.get("last_paste", ""):
-        st.session_state.last_paste = clean
-        lines = [l.strip().strip('"\u201c\u201d').strip()
-                 for l in clean.splitlines()]
-        result = "\n\n".join(l for l in lines if l)
-        st.session_state.script = result
-        st.session_state.paste_big = ""
-        st.success(f"✅ Script ထဲ Auto ရောက်သွားပြီ — {len(result)} လုံး")
-        st.rerun()
-
-script = st.text_area("Script", value=st.session_state.script, height=180,
-                      label_visibility="collapsed",
-                      placeholder="မြန်မာ Script paste...")
-st.session_state.script = script
-
-c1, c2 = st.columns([3, 1])
-with c1:
-    st.caption(f"📝 {len(script):,}")
-with c2:
-    if st.button("🗑️ Clear", use_container_width=True):
-        st.session_state.script = ""
-        st.session_state.last_paste = ""
-        st.rerun()
-st.divider()
-
-# ==================== Step 2 — Video ====================
-st.subheader("📁 Step 2 — Video")
+# ==================== Step 1 — Video ====================
+st.subheader("📁 Step 1 — Video")
 vid = st.file_uploader(
     "📹",
     type=["mp4", "mov", "avi", "mkv"],
@@ -936,13 +1043,184 @@ vid = st.file_uploader(
     key=f"video_up_{st.session_state.video_up_key}"
 )
 if vid:
-    st.success(f"✅ {vid.size/(1024*1024):.1f} MB")
+    st.success(f"✅ {vid.name} — {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-use_neon = True
-neon_animated = True
-neon_thickness = 15
-neon_speed = 0.4
+# ==================== Step 2 — Script (AI or Manual) ====================
+st.subheader("📝 Step 2 — Script")
+st.markdown(
+    f"<span class='ai-badge'>✨ GEMINI AI</span> "
+    f"<span style='color:#8888aa;font-size:.85rem'>"
+    f"English transcript → မြန်မာ recap script auto ရေးပေးမယ်</span>",
+    unsafe_allow_html=True
+)
+
+tab_ai, tab_manual = st.tabs(["🤖 AI Auto-Write", "✍️ Manual / Paste"])
+
+with tab_ai:
+    if not GEMINI_API_KEY:
+        st.error("⚠️ `.env` မှာ `GEMINI_API_KEY` မထည့်ရသေးပါ")
+        st.code("GEMINI_API_KEY=your_key_here", language="bash")
+    elif vid is None:
+        st.info("📹 Step 1 မှာ Video upload လုပ်ပါ")
+    else:
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.caption("1️⃣ Whisper နဲ့ English transcript ထုတ် → 2️⃣ Gemini က မြန်မာ script ရေး")
+        with c2:
+            gen_btn = st.button("🚀 Generate Script", type="primary",
+                                use_container_width=True)
+
+        if gen_btn:
+            vid.seek(0)
+            with open("input.mp4", "wb") as f:
+                f.write(vid.read())
+
+            # --- Step A: English transcript ---
+            with st.spinner("🎧 Whisper နဲ့ English transcript ထုတ်နေသည်..."):
+                try:
+                    eng = transcribe_english("input.mp4")
+                except Exception as e:
+                    st.error(f"Whisper fail: {e}")
+                    st.stop()
+
+            if not eng.strip():
+                st.error("English transcript မရပါ — English ဗီဒီယို ဖြစ်ရပါမယ်")
+                st.stop()
+
+            st.session_state.english_transcript = eng
+            with open("english_transcript.txt", "w", encoding="utf-8") as f:
+                f.write(eng)
+
+            with st.expander("📄 English Transcript (raw)", expanded=False):
+                st.text_area("eng", eng, height=200, label_visibility="collapsed")
+
+            # --- Step B: Gemini script ---
+            n_chunks = len(split_transcript(eng, 4000))
+            pb = st.progress(0)
+            txt = st.empty()
+
+            def gp(i, n, msg):
+                pb.progress(min(1.0, (i + 1) / max(1, n)))
+                txt.caption(f"🤖 {msg}")
+
+            with st.spinner("🤖 Gemini က မြန်မာ script ရေးနေသည်..."):
+                try:
+                    mm_script = gemini_write_script(eng, progress_cb=gp)
+                except Exception as e:
+                    st.error(f"Gemini fail: {e}")
+                    st.stop()
+
+            if not mm_script.strip():
+                st.error("Gemini က script မထုတ်ပေးပါ")
+                st.stop()
+
+            st.session_state.script = mm_script
+            with open("gemini_script.txt", "w", encoding="utf-8") as f:
+                f.write(mm_script)
+            st.success(f"✅ မြန်မာ script ရပြီ — {len(mm_script):,} လုံး")
+            st.rerun()
+
+        if st.session_state.english_transcript:
+            with st.expander("📄 English Transcript (saved)", expanded=False):
+                st.text_area("eng2", st.session_state.english_transcript,
+                             height=200, label_visibility="collapsed")
+
+with tab_manual:
+    st.markdown("""
+    <div style="text-align:center;margin:8px 0 4px">
+      <span style="font-size:1.05rem;font-weight:700;
+        background:linear-gradient(90deg,#FF6B9D,#C66BFF,#6BA8FF);
+        -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+        background-clip:text">📋 Paste Box</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    pasted_now = st.text_area(
+        "paste",
+        value="",
+        height=80,
+        key="paste_big",
+        label_visibility="collapsed",
+        placeholder="📋 Long-press → Paste  (သို့)  Ctrl+V",
+    )
+
+    st.markdown("""
+    <style>
+    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea {
+      background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
+      border:2px dashed rgba(198,107,255,.55)!important;
+      border-radius:18px!important;
+      color:#fff!important;font-size:1.05rem!important;
+      padding:22px!important;text-align:center!important;
+    }
+    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea:focus {
+      border-color:#C66BFF!important;border-style:solid!important;
+      box-shadow:0 0 24px rgba(198,107,255,.5)!important;
+    }
+    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeholder {
+      color:#b48cff!important;font-weight:600!important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    if pasted_now and pasted_now.strip():
+        clean = pasted_now.strip()
+        if clean != st.session_state.get("last_paste", ""):
+            st.session_state.last_paste = clean
+            lines = [l.strip().strip('"\u201c\u201d').strip()
+                     for l in clean.splitlines()]
+            result = "\n\n".join(l for l in lines if l)
+            st.session_state.script = result
+            st.session_state.paste_big = ""
+            st.success(f"✅ Script ထဲ Auto ရောက်သွားပြီ — {len(result)} လုံး")
+            st.rerun()
+
+# ---- Script Editor (shared) ----
+st.markdown("##### 📝 Script Editor")
+script = st.text_area("Script", value=st.session_state.script, height=200,
+                      label_visibility="collapsed",
+                      placeholder="မြန်မာ Script...")
+st.session_state.script = script
+
+c1, c2, c3 = st.columns([2, 1, 1])
+with c1:
+    st.caption(f"📝 {len(script):,} လုံး")
+with c2:
+    if st.button("🗑️ Clear", use_container_width=True):
+        st.session_state.script = ""
+        st.session_state.last_paste = ""
+        st.rerun()
+with c3:
+    if st.button("💾 Save", use_container_width=True):
+        if script.strip():
+            with open("gemini_script.txt", "w", encoding="utf-8") as f:
+                f.write(script)
+            st.success("✅ Save ပြီး")
+st.divider()
+
+# ==================== Step 3 — Voice Settings ====================
+st.subheader("🎙️ Step 3 — Voice")
+use_voxcpm = st.toggle("VoxCPM2 သုံးမလား? (Fail ရင် Edge TTS Auto)", value=False)
+
+if use_voxcpm:
+    ref = st.file_uploader("🎤 Ref Audio (VoxCPM2)", type=["wav", "mp3", "m4a"],
+                           key="ref_up")
+    if ref:
+        with open("ref.wav", "wb") as f:
+            f.write(ref.read())
+        st.session_state.ref = "ref.wav"
+        st.success("✅ Ref Audio")
+    else:
+        if os.path.exists("ref.wav"):
+            st.session_state.ref = "ref.wav"
+            st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
+        else:
+            st.session_state.ref = None
+else:
+    st.info("⚡ Edge TTS သီဟ (Thiha) — Default")
+    st.session_state.ref = None
+st.divider()
 
 # ==================== Step 4 — Subtitle ====================
 st.subheader("📝 Step 4 — Subtitle")
@@ -951,6 +1229,11 @@ pos_y = 100
 if use_sub:
     pos_y = st.slider("📍 Position", 0, 100, 100, 1)
 st.divider()
+
+use_neon = True
+neon_animated = True
+neon_thickness = 15
+neon_speed = 0.4
 
 # ==================== Step 5 — Preview ====================
 if vid:
@@ -964,7 +1247,13 @@ if vid:
             st.session_state.pkey = pkey
         W, H, _ = vid_info("preview.mp4")
 
-        render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE, W, H,
+        sample_text = "စာတန်းထိုး Preview"
+        if st.session_state.script.strip():
+            first = split_for_sub(st.session_state.script, 40)
+            if first:
+                sample_text = first[0]
+
+        render_png(sample_text, "prev.png", FONT_FILE, W, H,
                    FS, pos_y, BH, BA, box_width_ratio=BOX_WIDTH_RATIO)
 
         cap = cv2.VideoCapture("preview.mp4")
@@ -985,40 +1274,17 @@ if vid:
             comp.resize((pw, int(H * (pw / W))), Image.LANCZOS
                         ).convert("RGB").save("prev_out.png")
             st.image("prev_out.png", use_container_width=True)
-            if use_neon and neon_animated:
-                st.caption("🎬 Animated — Output Video မှာ အလင်းတန်း ပတ်ပြေးနေမည်")
 st.divider()
 
 # ==================== Step 6 — Generate ====================
-st.subheader("🚀 Step 6 — Generate")
-
-use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား?", value=True)
-
-if use_voxcpm:
-    st.info("✅ VoxCPM2 သုံးမယ် — Fail/Busy ရင် — Edge TTS သီဟ Auto")
-    ref = st.file_uploader("🎤 Ref Audio (VoxCPM2) — Optional",
-                           type=["wav", "mp3", "m4a"], key="ref_up")
-    if ref:
-        with open("ref.wav", "wb") as f:
-            f.write(ref.read())
-        st.session_state.ref = "ref.wav"
-        st.success("✅ Ref Audio")
-    else:
-        if os.path.exists("ref.wav"):
-            st.session_state.ref = "ref.wav"
-            st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
-        else:
-            st.session_state.ref = None
-else:
-    st.info("⚡ Edge TTS သီဟ (Thiha) — ပဲ သုံးမယ်")
-    st.session_state.ref = None
+st.subheader("🚀 Step 6 — Generate Recap")
 
 if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
     if not script.strip():
-        st.error("Script paste")
+        st.error("Script မရှိပါ — Step 2 မှာ ရေးပါ")
         st.stop()
     if vid is None:
-        st.error("Video Upload")
+        st.error("Video Upload လုပ်ပါ")
         st.stop()
 
     total_start = time.time()
@@ -1033,7 +1299,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f:
         f.write(vid.read())
 
-    # ---- Whisper/VAD — TTS နဲ့ တပြိုင်နက် ----
+    # Whisper/VAD + TTS တပြိုင်နက်
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     job = job_pool.submit(prepare_video_job, "input.mp4", None)
 
@@ -1057,7 +1323,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
 
-    # ---- Cut / Prepare ----
+    # ---- Cut ----
     t0 = time.time()
     try:
         info = job.result()
@@ -1072,7 +1338,7 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
 
     adur = audio_dur("voice.mp3")
     tempo = max(0.5, min(2.0, adur / vdur))
-    eff = adur / tempo  # atempo ပြီးနောက် အသံအရှည်
+    eff = adur / tempo
     step_times["✂️ Cut"] = time.time() - t0
 
     # ---- Render ----
