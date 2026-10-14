@@ -1,6 +1,6 @@
 # ============================================================
-# 🎬 Myanmar TTS Recap — One-Click Version
-# Video Upload → 🚀 Recap → Auto Script + TTS + Render + Download
+# 🎬 Myanmar TTS Recap — One-Click + Auto/Manual Mode
+# Video → (Auto: Gemini 3.8) / (Manual: Paste) → 🚀 Recap → Output
 # ============================================================
 
 import subprocess, sys, importlib
@@ -43,7 +43,6 @@ from PIL import Image, ImageDraw, ImageFont
 import cv2
 from gradio_client import Client, handle_file
 
-# ---- dotenv (optional) ----
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -118,11 +117,19 @@ EDGE_VOICES = {
 }
 EDGE_VOICE_FIXED = "male"
 
+# ============================================================
+# ================ GEMINI MODELS (Updated 2026) ==============
+# ============================================================
+# အသစ်ဆုံးကနေ အဟောင်းဆုံး အစဉ်လိုက်
+# 404/429 ဖြစ်ရင် နောက်တစ်ခုကို auto ပြောင်း
 GEMINI_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
+    "gemini-3.8-flash",        # အသစ်ဆုံး + အမြန်ဆုံး (default)
+    "gemini-3.8-flash-lite",   # ပိုမြန် + ပိုသက်သာ
+    "gemini-3.7-flash",        # fallback 1
+    "gemini-3.6-flash",        # fallback 2
+    "gemini-3.5-flash",        # fallback 3
+    "gemini-3.5-flash-lite",   # fallback 4 (Lite)
+    "gemini-3.1-flash-lite",   # နောက်ဆုံး fallback
 ]
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
@@ -141,8 +148,9 @@ def _init_state():
         "video_up_key": 0,
         "english_transcript": "",
         "gemini_key": GEMINI_API_KEY,
-        "final_video": None,   # rendered output path
-        "last_run": 0,
+        "mode": "auto",              # "auto" or "manual"
+        "final_video": None,
+        "active_model": None,        # လက်ရှိ သုံးနေတဲ့ model
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -160,6 +168,7 @@ def _on_download_clear():
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
     st.session_state.english_transcript = ""
     st.session_state.final_video = None
+    st.session_state.active_model = None
     for f in ("preview.mp4", "prev.png", "prev_out.png",
               "english_transcript.txt", "gemini_script.txt",
               "final.mp4", "video_only.mp4", "voice.mp3"):
@@ -205,12 +214,32 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
  border-radius:10px;padding:10px 16px;margin:8px 0;color:#a8ffef;font-size:.9rem}
 .key-bad{background:rgba(255,107,157,.15);border-left:4px solid #ff6b9d;
  border-radius:10px;padding:10px 16px;margin:8px 0;color:#ffc4d8;font-size:.9rem}
+.model-info{background:rgba(0,180,216,.12);border-left:4px solid #00b4d8;
+ border-radius:10px;padding:10px 16px;margin:8px 0;color:#a8e8ff;font-size:.85rem}
 .big-recap-btn .stButton>button{
  background:linear-gradient(135deg,#ff6b9d,#c66bff,#6ba8ff)!important;
  font-size:1.3rem!important;padding:22px!important;font-weight:900!important;
  letter-spacing:1px!important;
  box-shadow:0 8px 30px rgba(198,107,255,.6)!important;
 }
+.paste-box textarea{
+ background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
+ border:2px dashed rgba(198,107,255,.55)!important;
+ border-radius:18px!important;
+ color:#fff!important;font-size:1.05rem!important;
+ padding:22px!important;text-align:center!important;
+}
+.paste-box textarea:focus{
+ border-color:#C66BFF!important;border-style:solid!important;
+ box-shadow:0 0 24px rgba(198,107,255,.5)!important;
+}
+.paste-box textarea::placeholder{
+ color:#b48cff!important;font-weight:600!important;
+}
+.mode-badge{display:inline-block;padding:6px 14px;border-radius:20px;
+ font-size:.8rem;font-weight:700;margin-right:6px}
+.mode-auto{background:linear-gradient(135deg,#00c9a7,#00b4d8);color:#fff}
+.mode-manual{background:linear-gradient(135deg,#ff6b9d,#c66bff);color:#fff}
 </style>
 """, unsafe_allow_html=True)
 
@@ -768,6 +797,18 @@ def _gemini_client():
     return genai
 
 
+def _is_model_missing(err_str):
+    """Model 404/not found error လား စစ်"""
+    s = err_str.lower()
+    return (
+        "404" in s
+        or "not found" in s
+        or "no longer available" in s
+        or "is not supported" in s
+        or "does not exist" in s
+    )
+
+
 def transcribe_english(video_path):
     wav = "english_audio.wav"
     subprocess.run([
@@ -814,13 +855,11 @@ def split_transcript(text, chunk_chars=4000):
     return chunks
 
 
-def gemini_write_script(english_text, progress_cb=None):
-    genai = _gemini_client()
-    chunks = split_transcript(english_text, chunk_chars=4000)
-    n = len(chunks)
-    full_script = []
-
-    model = None
+def _get_working_model(genai):
+    """
+    GEMINI_MODELS list ထဲက အလုပ်လုပ်တဲ့ model ကို ရှာ
+    Model မရှိရင် → နောက်တစ်ခုကို ဆက်
+    """
     last_err = None
     for mname in GEMINI_MODELS:
         try:
@@ -828,17 +867,42 @@ def gemini_write_script(english_text, progress_cb=None):
                 model_name=mname,
                 system_instruction=GEMINI_SYSTEM_PROMPT
             )
-            break
+            # Test call — သေးငယ်တဲ့ prompt
+            test = model.generate_content(
+                "hi",
+                generation_config={"max_output_tokens": 3}
+            )
+            _ = test.text  # error ရှိရင် raise
+            st.session_state.active_model = mname
+            return model, mname
         except Exception as e:
             last_err = e
-            continue
+            if _is_model_missing(str(e)):
+                continue  # နောက် model ဆက်
+            # တခြား error (auth, network) → တန်းရပ်
+            raise
+    raise Exception(
+        f"Gemini model အားလုံး မရပါ။ နောက်ဆုံး error: {last_err}\n"
+        f"စမ်းခဲ့တဲ့ models: {GEMINI_MODELS}"
+    )
 
-    if model is None:
-        raise Exception(f"Gemini model မရပါ: {last_err}")
+
+def gemini_write_script(english_text, progress_cb=None):
+    genai = _gemini_client()
+    chunks = split_transcript(english_text, chunk_chars=4000)
+    n = len(chunks)
+    full_script = []
+
+    # Working model ရှာ (auto fallback)
+    try:
+        model, active_name = _get_working_model(genai)
+        st.success(f"✅ Gemini Model: `{active_name}`")
+    except Exception as e:
+        raise Exception(f"Gemini model မရပါ: {e}")
 
     for i, chunk in enumerate(chunks):
         if progress_cb:
-            progress_cb(i, n, f"Chunk {i+1}/{n}")
+            progress_cb(i, n, f"Chunk {i+1}/{n} — {active_name}")
 
         if n == 1:
             prompt = f"""Here is the English transcript. Write the full Burmese recap script.
@@ -880,7 +944,24 @@ PART {i+1} (English):
 
 Write the Burmese recap for this part only. No summary."""
 
-        resp = model.generate_content(prompt)
+        # Chunk တစ်ခုချင်း — model error ဖြစ်ရင် နောက် model ပြောင်း
+        resp = None
+        for retry_model in GEMINI_MODELS:
+            try:
+                m = genai.GenerativeModel(
+                    model_name=retry_model,
+                    system_instruction=GEMINI_SYSTEM_PROMPT
+                )
+                resp = m.generate_content(prompt)
+                break
+            except Exception as e:
+                if _is_model_missing(str(e)):
+                    continue  # နောက် model
+                raise  # တခြား error → raise
+
+        if resp is None:
+            raise Exception("Gemini chunk အားလုံး fail")
+
         out = (resp.text or "").strip()
         out = re.sub(r"^```[\w]*\n?", "", out)
         out = re.sub(r"\n?```$", "", out)
@@ -1107,11 +1188,11 @@ def whisper_fast(video_path, model=None):
 
 
 # ============================================================
-# ==================== UI — One-Click Recap ==================
+# ==================== UI ====================================
 # ============================================================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video တင်လိုက် → 🚀 Recap နှိပ်လိုက် → ပြီး</div>",
+st.markdown("<div class='main-sub'>Video တင်လိုက် → Mode ရွေး → 🚀 Recap</div>",
             unsafe_allow_html=True)
 
 # ==================== 🔑 API Key Settings ====================
@@ -1160,9 +1241,16 @@ with st.expander("🔑 API Key Settings", expanded=(not st.session_state.gemini_
         )
     else:
         st.markdown(
-            "<div class='key-bad'>⚠️ Key မထည့်ရသေးပါ</div>",
+            "<div class='key-bad'>⚠️ Key မထည့်ရသေးပါ — Auto mode သုံးလို့ မရဘူး</div>",
             unsafe_allow_html=True
         )
+
+    # Model list preview
+    st.markdown(
+        f"<div class='model-info'>🤖 Models (fallback order): "
+        f"<code>{' → '.join(GEMINI_MODELS)}</code></div>",
+        unsafe_allow_html=True
+    )
 
 st.divider()
 
@@ -1177,8 +1265,103 @@ vid = st.file_uploader(
 if vid:
     st.success(f"✅ {vid.name} — {vid.size/(1024*1024):.1f} MB")
 
-# ==================== ⚙️ Options (collapsed by default) ====================
-with st.expander("⚙️ Options (default အတိုင်း ထားလို့ရ)", expanded=False):
+# ==================== 🎯 Mode Selector ====================
+st.markdown("### 🎯 Mode ရွေးပါ")
+
+mode_col1, mode_col2 = st.columns(2)
+with mode_col1:
+    auto_btn = st.button(
+        "🤖 Auto (AI Script)",
+        use_container_width=True,
+        type="primary" if st.session_state.mode == "auto" else "secondary"
+    )
+    if auto_btn:
+        st.session_state.mode = "auto"
+        st.rerun()
+
+with mode_col2:
+    manual_btn = st.button(
+        "✍️ Manual (Paste)",
+        use_container_width=True,
+        type="primary" if st.session_state.mode == "manual" else "secondary"
+    )
+    if manual_btn:
+        st.session_state.mode = "manual"
+        st.rerun()
+
+# Mode badge
+if st.session_state.mode == "auto":
+    st.markdown(
+        "<span class='mode-badge mode-auto'>🤖 AUTO MODE</span>"
+        "<span style='color:#8888aa;font-size:.85rem'>"
+        "Whisper → Gemini → Script (auto)</span>",
+        unsafe_allow_html=True
+    )
+else:
+    st.markdown(
+        "<span class='mode-badge mode-manual'>✍️ MANUAL MODE</span>"
+        "<span style='color:#8888aa;font-size:.85rem'>"
+        "Script ကို ကိုယ်တိုင် paste</span>",
+        unsafe_allow_html=True
+    )
+
+# ==================== Mode-specific UI ====================
+if st.session_state.mode == "manual":
+    st.markdown("#### 📋 Script Paste")
+    pasted_now = st.text_area(
+        "paste",
+        value="",
+        height=150,
+        key="paste_big",
+        label_visibility="collapsed",
+        placeholder="📋  မြန်မာ Script ကို ဒီနေရာ Long-press → Paste  (သို့)  Ctrl+V",
+    )
+
+    # Auto paste → script
+    if pasted_now and pasted_now.strip():
+        clean = pasted_now.strip()
+        if clean != st.session_state.get("last_paste", ""):
+            st.session_state.last_paste = clean
+            lines = [l.strip().strip('"\u201c\u201d').strip()
+                     for l in clean.splitlines()]
+            result = "\n\n".join(l for l in lines if l)
+            st.session_state.script = result
+            st.session_state.paste_big = ""
+            st.success(f"✅ Script ရောက်သွားပြီ — {len(result)} လုံး")
+            st.rerun()
+
+    # Editor
+    script = st.text_area(
+        "Script Editor",
+        value=st.session_state.script,
+        height=200,
+        placeholder="မြန်မာ Script...",
+    )
+    st.session_state.script = script
+
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.caption(f"📝 {len(script):,} လုံး")
+    with c2:
+        if st.button("🗑️ Clear Script", use_container_width=True):
+            st.session_state.script = ""
+            st.session_state.last_paste = ""
+            st.rerun()
+
+else:  # auto mode
+    if st.session_state.english_transcript:
+        with st.expander("📄 English Transcript (raw)", expanded=False):
+            st.text_area("eng", st.session_state.english_transcript,
+                         height=200, label_visibility="collapsed")
+    if st.session_state.script:
+        with st.expander("📝 Gemini Script (edit လို့ရ)", expanded=False):
+            edited = st.text_area("mm", st.session_state.script,
+                                  height=200, label_visibility="collapsed")
+            if edited != st.session_state.script:
+                st.session_state.script = edited
+
+# ==================== ⚙️ Options (collapsed) ====================
+with st.expander("⚙️ Options", expanded=False):
     use_voxcpm = st.toggle("VoxCPM2 သုံးမလား? (Fail ရင် Edge TTS Auto)", value=False)
 
     ref_file = None
@@ -1201,61 +1384,32 @@ with st.expander("⚙️ Options (default အတိုင်း ထားလိ�
     use_sub = st.toggle("Subtitle Burn-in", value=True)
     pos_y = st.slider("📍 Subtitle Position", 0, 100, 100, 1) if use_sub else 100
 
-# ==================== 🖼️ Preview (optional) ====================
-if vid:
-    with st.expander("🖼️ Preview", expanded=False):
-        try:
-            pkey = (vid.name, vid.size)
-            if st.session_state.get("pkey") != pkey or not os.path.exists("preview.mp4"):
-                vid.seek(0)
-                with open("preview.mp4", "wb") as f:
-                    f.write(vid.read())
-                st.session_state.pkey = pkey
-
-            W, H, _ = vid_info("preview.mp4")
-            sample_text = "စာတန်းထိုး Preview"
-            if st.session_state.script.strip():
-                first = split_for_sub(st.session_state.script, 40)
-                if first:
-                    sample_text = first[0]
-
-            render_png(sample_text, "prev.png", FONT_FILE, W, H,
-                       FS, pos_y, BH, BA, box_width_ratio=BOX_WIDTH_RATIO)
-
-            cap = cv2.VideoCapture("preview.mp4")
-            ok, fr = cap.read()
-            cap.release()
-            if ok:
-                bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-                fg = Image.open("prev.png").convert("RGBA")
-                comp = Image.alpha_composite(bg, fg)
-                comp = draw_tiktok_border_preview(comp, thickness=15, animated_phase=0.5)
-                pw = 720
-                comp.resize((pw, int(H * (pw / W))), Image.LANCZOS
-                            ).convert("RGB").save("prev_out.png")
-                st.image("prev_out.png", use_container_width=True)
-        except Exception as e:
-            st.warning(f"Preview error: {e}")
-
 st.divider()
 
 # ==================== 🚀 ONE-CLICK RECAP BUTTON ====================
 st.markdown('<div class="big-recap-btn">', unsafe_allow_html=True)
-recap_clicked = st.button("🚀 RECAP — Auto Script + Render", 
-                          type="primary", use_container_width=True)
+recap_clicked = st.button("🚀 RECAP", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-st.caption("💡 Video တင်ပြီး ဒီခလုတ်တစ်ခုပဲ နှိပ်ပါ — Script + TTS + Render အကုန် auto")
+st.caption(f"💡 Mode: **{st.session_state.mode.upper()}** — Video + "
+           f"{'Script' if st.session_state.mode == 'manual' else 'Key'} ရှိပြီဆိုရင် "
+           f"ဒီခလုတ်တစ်ခုပဲ နှိပ်ပါ")
 
 # ==================== Main Process ====================
 if recap_clicked:
     # ---- Checks ----
-    if not st.session_state.get("gemini_key", "").strip():
-        st.error("⚠️ 🔑 API Key Settings မှာ Gemini key ထည့်ပါ")
-        st.stop()
     if vid is None:
         st.error("📹 Video upload လုပ်ပါ")
         st.stop()
+
+    if st.session_state.mode == "auto":
+        if not st.session_state.get("gemini_key", "").strip():
+            st.error("⚠️ 🔑 API Key Settings မှာ Gemini key ထည့်ပါ")
+            st.stop()
+    else:  # manual
+        if not st.session_state.script.strip():
+            st.error("✍️ Script paste လုပ်ပါ")
+            st.stop()
 
     total_start = time.time()
     step_times = {}
@@ -1264,53 +1418,64 @@ if recap_clicked:
     with open("input.mp4", "wb") as f:
         f.write(vid.read())
 
-    # ==================== STEP 1: Whisper English ====================
-    t0 = time.time()
-    with st.status("🎧 Step 1/4 — Whisper English transcript...", expanded=True) as s:
-        st.write("Whisper small.en နဲ့ စာသားထုတ်နေသည်...")
-        try:
-            eng = transcribe_english("input.mp4")
-        except Exception as e:
-            st.error(f"Whisper fail: {e}")
-            st.stop()
-        if not eng.strip():
-            st.error("English transcript မရပါ")
-            st.stop()
-        st.session_state.english_transcript = eng
-        st.write(f"✅ {len(eng)} chars")
-        s.update(label=f"✅ Step 1/4 — Transcript ({len(eng)} chars)",
-                 state="complete")
-    step_times["🎧 Whisper"] = time.time() - t0
+    # ==================== AUTO MODE: Whisper + Gemini ====================
+    if st.session_state.mode == "auto":
+        # ---- Step 1: Whisper English ----
+        t0 = time.time()
+        with st.status("🎧 Step 1/4 — Whisper English...", expanded=True) as s:
+            st.write("Whisper small.en နဲ့ transcript ထုတ်နေသည်...")
+            try:
+                eng = transcribe_english("input.mp4")
+            except Exception as e:
+                st.error(f"Whisper fail: {e}")
+                st.stop()
+            if not eng.strip():
+                st.error("English transcript မရပါ")
+                st.stop()
+            st.session_state.english_transcript = eng
+            st.write(f"✅ {len(eng)} chars")
+            s.update(label=f"✅ Step 1/4 — Transcript ({len(eng)} chars)",
+                     state="complete")
+        step_times["🎧 Whisper"] = time.time() - t0
 
-    # ==================== STEP 2: Gemini Script ====================
-    t0 = time.time()
-    with st.status("🤖 Step 2/4 — Gemini မြန်မာ script...", expanded=True) as s:
-        pb = st.progress(0)
-        txt = st.empty()
+        # ---- Step 2: Gemini Script ----
+        t0 = time.time()
+        with st.status("🤖 Step 2/4 — Gemini script...", expanded=True) as s:
+            pb = st.progress(0)
+            txt = st.empty()
 
-        def gp(i, n, msg):
-            pb.progress(min(1.0, (i + 1) / max(1, n)))
-            txt.caption(f"🤖 {msg}")
+            def gp(i, n, msg):
+                pb.progress(min(1.0, (i + 1) / max(1, n)))
+                txt.caption(f"🤖 {msg}")
 
-        try:
-            mm_script = gemini_write_script(eng, progress_cb=gp)
-        except Exception as e:
-            st.error(f"Gemini fail: {e}")
-            st.stop()
+            try:
+                mm_script = gemini_write_script(eng, progress_cb=gp)
+            except Exception as e:
+                st.error(f"Gemini fail: {e}")
+                st.stop()
 
-        if not mm_script.strip():
-            st.error("Gemini script မထုတ်ပေးပါ")
-            st.stop()
+            if not mm_script.strip():
+                st.error("Script မထုတ်ပေးပါ")
+                st.stop()
 
-        st.session_state.script = mm_script
-        with open("gemini_script.txt", "w", encoding="utf-8") as f:
-            f.write(mm_script)
-        st.write(f"✅ {len(mm_script)} chars")
-        s.update(label=f"✅ Step 2/4 — Script ({len(mm_script)} chars)",
-                 state="complete")
-    step_times["🤖 Gemini"] = time.time() - t0
+            st.session_state.script = mm_script
+            with open("gemini_script.txt", "w", encoding="utf-8") as f:
+                f.write(mm_script)
+            used_model = st.session_state.get("active_model", "unknown")
+            st.write(f"✅ {len(mm_script)} chars — model: `{used_model}`")
+            s.update(label=f"✅ Step 2/4 — Script ({len(mm_script)} chars) "
+                           f"[{used_model}]",
+                     state="complete")
+        step_times["🤖 Gemini"] = time.time() - t0
 
-    script_n = normalize_script(mm_script)
+    # ==================== MANUAL MODE ====================
+    else:
+        with st.status("✍️ Manual mode — Script ready", expanded=False) as s:
+            st.write(f"✅ Script: {len(st.session_state.script)} chars")
+            s.update(label="✅ Script ready (manual)", state="complete")
+
+    # Get script
+    script_n = normalize_script(st.session_state.script)
     if not script_n.strip():
         st.error("Script မှာ စာမပါပါ")
         st.stop()
@@ -1398,13 +1563,12 @@ if recap_clicked:
     st.success(f"✅ Recap ပြီးပါပြီ — ⏱️ {total_elapsed:.1f}s")
     st.video("final.mp4")
 
-    # Script preview
-    with st.expander("📝 ထွက်လာတဲ့ Script ကြည့် / ပြင်", expanded=False):
+    with st.expander("📝 Script ကြည့် / ပြင်", expanded=False):
         edited = st.text_area("script_edit", st.session_state.script,
                               height=200, label_visibility="collapsed")
         if edited != st.session_state.script:
             st.session_state.script = edited
-            st.caption("💡 ပြင်ပြီးရင် 🚀 Recap ပြန်နှိပ်ပါ")
+            st.caption("💡 ပြင်ပြီးရင် 🚀 RECAP ပြန်နှိပ်ပါ")
 
     with open("final.mp4", "rb") as f:
         st.download_button(
