@@ -1,6 +1,7 @@
 # ============================================================
-# 🎬 Myanmar TTS Recap — One-Click + Auto/Manual + Canvas
-# Video → Canvas/Whisper → Gemini 3.8 → TTS → Recap
+# 🎬 Myanmar TTS Recap — Multilingual (English + Chinese + …)
+# Video → Whisper Multi → Gemini 3.8 → TTS → Recap
+# + Canvas + Auto/Manual Mode
 # ============================================================
 
 import subprocess, sys, importlib
@@ -106,19 +107,16 @@ EDGE_CHUNK = 200
 TTS_WORKERS = 3
 PNG_WORKERS = 4
 
-WHISPER_MODEL_EN = "small.en"
-WHISPER_MODEL_MM = "tiny"
-WHISPER_LANG_MM = "my"
-
-BOX_WIDTH_RATIO = 1.0
-PADDING_Y = 15
-CORNER_RADIUS = 20
-
-EDGE_VOICES = {
-    "female": "my-MM-NilarNeural",
-    "male":   "my-MM-ThihaNeural",
-}
-EDGE_VOICE_FIXED = "male"
+# ============================================================
+# ================ WHISPER CONFIG (MULTILINGUAL) =============
+# ============================================================
+# ⚠️ "small" (no .en suffix) = multilingual — Chinese/English/…
+# ⚠️ "small.en" = English-only (မြန် + တိကျ၊ ဒါပေမဲ့ Chinese မရ)
+WHISPER_MULTILINGUAL = True           # ← True = Chinese support
+WHISPER_MODEL_EN = "small.en"         # ← English-only fallback
+WHISPER_MODEL_MM = "small"            # ← Multilingual (Chinese/English/…)
+WHISPER_MODEL_MULTI = "small"         # ← Alias (auto-detect mode)
+WHISPER_LANG_MM = "my"                # ← VAD mode (my = Myanmar audio)
 
 # ============================================================
 # ================ GEMINI MODELS (Updated 2026) ==============
@@ -132,6 +130,16 @@ GEMINI_MODELS = [
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
 ]
+
+BOX_WIDTH_RATIO = 1.0
+PADDING_Y = 15
+CORNER_RADIUS = 20
+
+EDGE_VOICES = {
+    "female": "my-MM-NilarNeural",
+    "male":   "my-MM-ThihaNeural",
+}
+EDGE_VOICE_FIXED = "male"
 
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
@@ -152,6 +160,7 @@ def _init_state():
         "mode": "auto",
         "final_video": None,
         "active_model": None,
+        "detected_lang": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -170,6 +179,7 @@ def _on_download_clear():
     st.session_state.english_transcript = ""
     st.session_state.final_video = None
     st.session_state.active_model = None
+    st.session_state.detected_lang = None
     for f in ("preview.mp4", "prev.png", "prev_out.png",
               "english_transcript.txt", "gemini_script.txt",
               "final.mp4", "video_only.mp4", "voice.mp3"):
@@ -217,6 +227,8 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
  border-radius:10px;padding:10px 16px;margin:8px 0;color:#ffc4d8;font-size:.9rem}
 .model-info{background:rgba(0,180,216,.12);border-left:4px solid #00b4d8;
  border-radius:10px;padding:10px 16px;margin:8px 0;color:#a8e8ff;font-size:.85rem}
+.lang-info{background:rgba(255,193,7,.12);border-left:4px solid #ffc107;
+ border-radius:10px;padding:10px 16px;margin:8px 0;color:#ffe9a8;font-size:.9rem}
 .canvas-box{background:linear-gradient(135deg,rgba(102,126,234,.15),rgba(118,75,162,.15));
  border:2px solid rgba(198,107,255,.4);border-radius:14px;padding:18px;margin:12px 0}
 .big-recap-btn .stButton>button{
@@ -762,30 +774,57 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
 
 
 # ============================================================
-# ==================== Gemini Script =========================
+# ==================== Gemini Script (Multilingual) ==========
 # ============================================================
 
 GEMINI_SYSTEM_PROMPT = """You are an expert Burmese (Myanmar) recap script writer for TikTok/YouTube Shorts recap videos.
 
-Your task: Take an English transcript from a movie/story recap video and write a natural, engaging Burmese narration script.
+Your task: Take a transcript from a movie/story recap video — the transcript may be in **English, Chinese, Hindi, Korean, Japanese, Thai, or ANY other language** — and write a natural, engaging Burmese narration script.
 
 RULES:
 1. Write ONLY in Burmese (မြန်မာစာ). No English words except well-known proper nouns.
-2. Keep the ENTIRE story — no summaries, no skipping, no shortening.
-3. Use natural spoken Burmese like a narrator telling a story to a friend.
-4. Keep character names, relationships, and places consistent throughout.
-5. Every sentence must end with ။ (Burmese period).
-6. Split into short sentences (max ~25 Burmese characters per sentence) for subtitle sync.
-7. Use ၊ (comma) for natural pauses within longer thoughts.
-8. NO emojis, NO markdown, NO bullet points, NO English punctuation like ! ? .
-9. If a character/place name is foreign, transliterate into Burmese phonetics.
-10. Preserve emotional tone — excitement, tension, sadness — in word choice.
+2. **The transcript may be in ANY language** — translate it directly to Burmese.
+   - If English → translate to Burmese.
+   - If Chinese (中文) → translate to Burmese directly.
+   - If Hindi / Thai / Korean / Japanese / etc. → translate to Burmese directly.
+3. Keep the ENTIRE story — no summaries, no skipping, no shortening.
+4. Use natural spoken Burmese like a narrator telling a story to a friend.
+5. Keep character names, relationships, and places consistent throughout.
+6. Every sentence must end with ။ (Burmese period).
+7. Split into short sentences (max ~25 Burmese characters per sentence) for subtitle sync.
+8. Use ၊ (comma) for natural pauses within longer thoughts.
+9. NO emojis, NO markdown, NO bullet points, NO English punctuation like ! ? .
+10. If a character/place name is foreign, transliterate into Burmese phonetics.
+11. Preserve emotional tone — excitement, tension, sadness — in word choice.
 
 OUTPUT FORMAT:
 - Plain text only.
 - One paragraph, no line breaks between sentences (or one sentence per line).
 - No headers, no titles, no intro like "Here is the script".
 - Start directly with the story."""
+
+
+# ============================================================
+# Language hints (detected from Whisper)
+# ============================================================
+LANG_HINTS = {
+    "zh": "The transcript is in CHINESE (中文). Translate it directly to Burmese.",
+    "en": "The transcript is in English. Translate it to Burmese.",
+    "hi": "The transcript is in Hindi. Translate it directly to Burmese.",
+    "ko": "The transcript is in Korean. Translate it directly to Burmese.",
+    "ja": "The transcript is in Japanese. Translate it directly to Burmese.",
+    "th": "The transcript is in Thai. Translate it directly to Burmese.",
+    "vi": "The transcript is in Vietnamese. Translate it directly to Burmese.",
+    "id": "The transcript is in Indonesian. Translate it directly to Burmese.",
+    "my": "The transcript is in Burmese. Keep it in Burmese.",
+}
+
+
+def _lang_hint(lang_code):
+    return LANG_HINTS.get(
+        lang_code,
+        f"The transcript is in '{lang_code}'. Translate it directly to Burmese."
+    )
 
 
 def _gemini_client():
@@ -811,8 +850,16 @@ def _is_model_missing(err_str):
     )
 
 
+# ============================================================
+# ============ Whisper (Multilingual) ========================
+# ============================================================
+
 def transcribe_english(video_path):
-    """Whisper small.en → English transcript (Canvas မသုံးရင်)"""
+    """
+    Whisper → Transcript (multilingual)
+    - WHISPER_MULTILINGUAL=True  → Auto language detect (Chinese/English/…)
+    - WHISPER_MULTILINGUAL=False → English only (small.en)
+    """
     wav = "english_audio.wav"
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
@@ -820,23 +867,65 @@ def transcribe_english(video_path):
         "-c:a", "pcm_s16le", wav
     ], capture_output=True, check=True)
 
+    detected_lang = "?"
+    confidence = 0.0
+
+    # ---- Model & language ရွေး ----
+    if WHISPER_MULTILINGUAL:
+        model_name = WHISPER_MODEL_MULTI     # "small"
+        lang_arg = None                       # auto detect
+    else:
+        model_name = WHISPER_MODEL_EN        # "small.en"
+        lang_arg = "en"
+
     try:
         from faster_whisper import WhisperModel
-        model = WhisperModel(WHISPER_MODEL_EN, device="cpu",
-                             compute_type="int8",
-                             cpu_threads=os.cpu_count() or 4)
-        segments, _ = model.transcribe(
-            wav, language="en", vad_filter=True,
-            beam_size=1, condition_on_previous_text=False, temperature=0
+        model = WhisperModel(
+            model_name,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=os.cpu_count() or 4
         )
+
+        kwargs = {
+            "vad_filter": True,
+            "beam_size": 1,
+            "condition_on_previous_text": False,
+            "temperature": 0
+        }
+        if lang_arg:
+            kwargs["language"] = lang_arg
+
+        segments, info = model.transcribe(wav, **kwargs)
+        detected_lang = info.language
+        confidence = info.language_probability
         lines = [seg.text.strip() for seg in segments if seg.text.strip()]
+
     except Exception:
         import whisper
-        model = whisper.load_model("small.en")
-        result = model.transcribe(wav, language="en",
-                                  condition_on_previous_text=False,
-                                  beam_size=1, temperature=0)
+        m = whisper.load_model(model_name)
+        kwargs = {
+            "condition_on_previous_text": False,
+            "beam_size": 1,
+            "temperature": 0
+        }
+        if lang_arg:
+            kwargs["language"] = lang_arg
+
+        result = m.transcribe(wav, **kwargs)
+        detected_lang = result.get("language", "?")
+        confidence = 0.0
         lines = [s["text"].strip() for s in result["segments"] if s["text"].strip()]
+
+    # ---- Language ကို session ထဲ သိမ်း ----
+    st.session_state["detected_lang"] = detected_lang
+
+    # ---- UI မှာ ပြ ----
+    if WHISPER_MULTILINGUAL and detected_lang != "?":
+        st.info(
+            f"🗣️ Detected: **{detected_lang}** "
+            f"({confidence:.0%} confidence)"
+        )
 
     return " ".join(lines).strip()
 
@@ -844,7 +933,7 @@ def transcribe_english(video_path):
 def split_transcript(text, chunk_chars=4000):
     if len(text) <= chunk_chars:
         return [text]
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sentences = re.split(r'(?<=[.!?။])\s+', text)
     chunks, cur = [], ""
     for s in sentences:
         if len(cur) + len(s) + 1 <= chunk_chars:
@@ -859,7 +948,6 @@ def split_transcript(text, chunk_chars=4000):
 
 
 def _get_working_model(genai):
-    """GEMINI_MODELS ထဲက အလုပ်လုပ်တဲ့ model ကို ရှာ"""
     last_err = None
     for mname in GEMINI_MODELS:
         try:
@@ -897,12 +985,19 @@ def gemini_write_script(english_text, progress_cb=None):
     except Exception as e:
         raise Exception(f"Gemini model မရပါ: {e}")
 
+    # Language hint (from Whisper)
+    lang_code = st.session_state.get("detected_lang", "en") or "en"
+    hint = _lang_hint(lang_code)
+    st.caption(f"🌐 Source language: `{lang_code}`")
+
     for i, chunk in enumerate(chunks):
         if progress_cb:
             progress_cb(i, n, f"Chunk {i+1}/{n} — {active_name}")
 
         if n == 1:
-            prompt = f"""Here is the English transcript. Write the full Burmese recap script.
+            prompt = f"""{hint}
+
+Here is the transcript. Write the full Burmese recap script.
 
 TRANSCRIPT:
 {chunk}
@@ -910,7 +1005,9 @@ TRANSCRIPT:
 Remember: Full story, no summary, natural spoken Burmese, every sentence ends with ။"""
         else:
             if i == 0:
-                prompt = f"""This is PART 1 of {n} of an English transcript.
+                prompt = f"""{hint}
+
+This is PART 1 of {n} of a transcript.
 Write the Burmese recap script for THIS PART ONLY.
 Do NOT summarize. Do NOT add intro. Continue the story flow.
 
@@ -918,25 +1015,29 @@ PART 1:
 {chunk}"""
             elif i == n - 1:
                 prev_tail = full_script[-1][-400:] if full_script else ""
-                prompt = f"""This is the FINAL PART ({i+1}/{n}) of the transcript.
+                prompt = f"""{hint}
+
+This is the FINAL PART ({i+1}/{n}) of the transcript.
 Continue naturally from the previous Burmese text.
 
 PREVIOUS BURMESE (end of last part):
 {prev_tail}
 
-FINAL PART (English):
+FINAL PART:
 {chunk}
 
 Write the Burmese recap for this final part only."""
             else:
                 prev_tail = full_script[-1][-400:] if full_script else ""
-                prompt = f"""This is PART {i+1}/{n} of the transcript.
+                prompt = f"""{hint}
+
+This is PART {i+1}/{n} of the transcript.
 Continue naturally from the previous Burmese text.
 
 PREVIOUS BURMESE (end of last part):
 {prev_tail}
 
-PART {i+1} (English):
+PART {i+1}:
 {chunk}
 
 Write the Burmese recap for this part only. No summary."""
@@ -1188,7 +1289,7 @@ def whisper_fast(video_path, model=None):
 # ============================================================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Canvas/Whisper → Gemini 3.8 → 🚀 Recap</div>",
+st.markdown("<div class='main-sub'>Video → Whisper Multi → Gemini 3.8 → 🚀 Recap</div>",
             unsafe_allow_html=True)
 
 # ============================================================
@@ -1201,7 +1302,7 @@ with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", 
             🌐 Google Gemini Canvas
         </div>
         <div style='color:#c8c8e0;font-size:.9rem;line-height:1.5'>
-            Canvas ဖွင့် → English Transcript Copy → Step 2 (Manual) မှာ Paste လုပ်ပါ
+            Canvas ဖွင့် → Transcript Copy → Step 2 (Manual) မှာ Paste လုပ်ပါ
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1262,8 +1363,17 @@ with st.expander("🔑 API Key Settings", expanded=(not st.session_state.gemini_
         )
 
     st.markdown(
-        f"<div class='model-info'>🤖 Models (fallback): "
+        f"<div class='model-info'>🤖 Models: "
         f"<code>{' → '.join(GEMINI_MODELS)}</code></div>",
+        unsafe_allow_html=True
+    )
+
+    # 🌍 Multilingual mode info
+    mode_str = "🌍 Multilingual (Chinese/English/…)" if WHISPER_MULTILINGUAL \
+               else "🇬🇧 English only"
+    st.markdown(
+        f"<div class='lang-info'>🗣️ Whisper mode: <b>{mode_str}</b> — "
+        f"model: <code>{WHISPER_MODEL_MULTI if WHISPER_MULTILINGUAL else WHISPER_MODEL_EN}</code></div>",
         unsafe_allow_html=True
     )
 
@@ -1308,22 +1418,20 @@ if st.session_state.mode == "auto":
     st.markdown(
         "<span class='mode-badge mode-auto'>🤖 AUTO MODE</span>"
         "<span style='color:#8888aa;font-size:.85rem'>"
-        "Whisper → Gemini → Script (auto)</span>",
+        "Whisper Multi → Gemini → Script (auto)</span>",
         unsafe_allow_html=True
     )
 else:
     st.markdown(
         "<span class='mode-badge mode-manual'>✍️ MANUAL MODE</span>"
         "<span style='color:#8888aa;font-size:.85rem'>"
-        "Script ကို ကိုယ်တိုင် paste / Canvas ကနေ copy</span>",
+        "Script ကို ကိုယ်တိုင် paste</span>",
         unsafe_allow_html=True
     )
 
 # ==================== Mode-specific UI ====================
 if st.session_state.mode == "manual":
     st.markdown("#### 📋 Script Paste")
-
-    # Canvas hint
     st.caption("💡 **Canvas** ကို အပေါ်မှာ ဖွင့် → Transcript Copy → ဒီနေရာ Paste")
 
     pasted_now = st.text_area(
@@ -1366,7 +1474,7 @@ if st.session_state.mode == "manual":
 
 else:  # auto mode
     if st.session_state.english_transcript:
-        with st.expander("📄 English Transcript (raw)", expanded=False):
+        with st.expander("📄 Transcript (raw)", expanded=False):
             st.text_area("eng", st.session_state.english_transcript,
                          height=200, label_visibility="collapsed")
     if st.session_state.script:
@@ -1376,9 +1484,9 @@ else:  # auto mode
             if edited != st.session_state.script:
                 st.session_state.script = edited
 
-# ==================== ⚙️ Options (collapsed) ====================
+# ==================== ⚙️ Options ====================
 with st.expander("⚙️ Options", expanded=False):
-    use_voxcpm = st.toggle("VoxCPM2 သုံးမလား? (Fail ရင် Edge TTS Auto)", value=False)
+    use_voxcpm = st.toggle("VoxCPM2 သုံးမလား?", value=False)
 
     ref_file = None
     if use_voxcpm:
@@ -1423,7 +1531,7 @@ if recap_clicked:
             st.stop()
     else:
         if not st.session_state.script.strip():
-            st.error("✍️ Script paste လုပ်ပါ (Canvas ကနေ copy လို့ရ)")
+            st.error("✍️ Script paste လုပ်ပါ")
             st.stop()
 
     total_start = time.time()
@@ -1435,23 +1543,28 @@ if recap_clicked:
 
     # ==================== AUTO MODE ====================
     if st.session_state.mode == "auto":
+        # ---- Step 1: Whisper ----
         t0 = time.time()
-        with st.status("🎧 Step 1/4 — Whisper English...", expanded=True) as s:
-            st.write("Whisper small.en နဲ့ transcript ထုတ်နေသည်...")
+        with st.status("🎧 Step 1/4 — Whisper (multilingual)...",
+                       expanded=True) as s:
+            st.write(f"Model: `{WHISPER_MODEL_MULTI if WHISPER_MULTILINGUAL else WHISPER_MODEL_EN}`")
             try:
                 eng = transcribe_english("input.mp4")
             except Exception as e:
                 st.error(f"Whisper fail: {e}")
                 st.stop()
             if not eng.strip():
-                st.error("English transcript မရပါ")
+                st.error("Transcript မရပါ")
                 st.stop()
             st.session_state.english_transcript = eng
-            st.write(f"✅ {len(eng)} chars")
-            s.update(label=f"✅ Step 1/4 — Transcript ({len(eng)} chars)",
+            lang = st.session_state.get("detected_lang", "?")
+            st.write(f"✅ {len(eng)} chars — lang: `{lang}`")
+            s.update(label=f"✅ Step 1/4 — Transcript ({len(eng)} chars) "
+                           f"[{lang}]",
                      state="complete")
         step_times["🎧 Whisper"] = time.time() - t0
 
+        # ---- Step 2: Gemini ----
         t0 = time.time()
         with st.status("🤖 Step 2/4 — Gemini script...", expanded=True) as s:
             pb = st.progress(0)
@@ -1482,7 +1595,8 @@ if recap_clicked:
         step_times["🤖 Gemini"] = time.time() - t0
 
     else:
-        with st.status("✍️ Manual mode — Script ready", expanded=False) as s:
+        with st.status("✍️ Manual mode — Script ready",
+                       expanded=False) as s:
             st.write(f"✅ Script: {len(st.session_state.script)} chars")
             s.update(label="✅ Script ready (manual)", state="complete")
 
@@ -1496,7 +1610,8 @@ if recap_clicked:
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     job = job_pool.submit(prepare_video_job, "input.mp4", None)
 
-    with st.status("🎙️ Step 3/4 — Voice ထုတ်နေသည်...", expanded=True) as s:
+    with st.status("🎙️ Step 3/4 — Voice ထုတ်နေသည်...",
+                   expanded=True) as s:
         pb2 = st.progress(0)
         txt2 = st.empty()
 
@@ -1535,7 +1650,8 @@ if recap_clicked:
 
     # ==================== STEP 4: Render ====================
     t0 = time.time()
-    with st.status("🎬 Step 4/4 — Final render...", expanded=True) as s:
+    with st.status("🎬 Step 4/4 — Final render...",
+                   expanded=True) as s:
         st.write("Video render လုပ်နေသည်...")
         try:
             sp = scr_to_srt_timed(pieces, eff, "sub.srt") if use_sub else None
@@ -1557,6 +1673,7 @@ if recap_clicked:
 
     total_elapsed = time.time() - total_start
 
+    # ==================== OUTPUT ====================
     st.markdown(f"""
     <div class="timer-box">
         <div class="timer-title">⏱️ TOTAL TIME</div>
