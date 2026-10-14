@@ -1,6 +1,7 @@
 # ============================================================
-# 🎬 Myanmar TTS Recap — All-in-One Streamlit App + Gemini Auto-Script
-# Video → Whisper → Gemini Script → VoxCPM2 / Edge TTS → Recap
+# 🎬 Myanmar TTS Recap — All-in-One Streamlit App
+# Video → Whisper → Gemini Script → TTS → Recap
+# UI Key Storage · One-Time Setup
 # ============================================================
 
 import streamlit as st
@@ -20,24 +21,61 @@ try:
 except Exception:
     pass
 
-# ==================== Config ====================
+# ============================================================
+# ================ Key Storage (persistent) ==================
+# ============================================================
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".myanmar_recap")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+
+def load_saved_config():
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def save_config(data):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"save_config error: {e}")
+        return False
+
+
+_SAVED = load_saved_config()
+
+
+# ============================================================
+# ==================== Config ================================
+# ============================================================
 os.environ["HF_HOME"] = os.path.join(tempfile.gettempdir(), "hf_cache")
+
+# Priority: .env > saved config
+GEMINI_API_KEY = (
+    os.environ.get("GEMINI_API_KEY", "").strip()
+    or _SAVED.get("gemini_api_key", "").strip()
+)
+
+PASSWORD = (
+    os.environ.get("APP_PASSWORD", "")
+    or _SAVED.get("app_password", "")
+    or "voxcpm2026"
+)
 
 SPACES = [
     {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
     {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
 ]
 
-PASSWORD = os.environ.get("APP_PASSWORD", "voxcpm2026")
-GEMINI_API_KEY = os.environ.get("AIzaSyDeR0cU2EkKCVIlA_Ee5JKEOOvVVfmHNL0", "").strip()
-
 FONT_FILE = "MyanmarPadaung.ttf"
-
 FS, BH, BA = 30, 100, 200
-ENC_PRESET = "fast"
-ENC_CRF = 18
-FINAL_PRESET = "ultrafast"
-FINAL_CRF = 20
 USE_FAST_VAD = True
 AUDIO_BITRATE = "128k"
 TTS_CHUNK = 300
@@ -45,8 +83,8 @@ EDGE_CHUNK = 200
 TTS_WORKERS = 3
 PNG_WORKERS = 4
 
-WHISPER_MODEL_EN = "small.en"     # Gemini script အတွက် English transcript
-WHISPER_MODEL_MM = "tiny"          # VAD / speech detect
+WHISPER_MODEL_EN = "small.en"
+WHISPER_MODEL_MM = "tiny"
 WHISPER_LANG_MM = "my"
 
 BOX_WIDTH_RATIO = 1.0
@@ -69,7 +107,9 @@ GEMINI_MODELS = [
 st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
 
-# ==================== Session State ====================
+# ============================================================
+# ==================== Session State =========================
+# ============================================================
 def _init_state():
     defaults = {
         "auth": False,
@@ -81,10 +121,12 @@ def _init_state():
         "video_up_key": 0,
         "english_transcript": "",
         "gemini_busy": False,
+        "gemini_key": GEMINI_API_KEY,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
 
 _init_state()
 
@@ -99,11 +141,15 @@ def _on_download_clear():
     for f in ("preview.mp4", "prev.png", "prev_out.png",
               "english_transcript.txt", "gemini_script.txt"):
         if os.path.exists(f):
-            try: os.remove(f)
-            except: pass
+            try:
+                os.remove(f)
+            except Exception:
+                pass
 
 
-# ==================== CSS ====================
+# ============================================================
+# ==================== CSS ===================================
+# ============================================================
 st.markdown("""
 <style>
 .stApp{background:linear-gradient(160deg,#0f0f23,#1a1a35,#0f0f23);color:#e8e8f0}
@@ -132,14 +178,17 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 .step-timer{background:rgba(255,255,255,.05);border-left:4px solid #667eea;
  border-radius:10px;padding:12px 18px;margin:8px 0;color:#e8e8f0;font-size:.95rem}
 .step-timer b{color:#6ba8ff;font-size:1.05rem}
-.ai-badge{display:inline-block;background:linear-gradient(135deg,#00c9a7,#00b4d8);
- color:#fff;padding:4px 12px;border-radius:20px;font-size:.75rem;
- font-weight:700;letter-spacing:.5px;margin-left:8px}
+.key-ok{background:rgba(0,201,167,.15);border-left:4px solid #00c9a7;
+ border-radius:10px;padding:10px 16px;margin:8px 0;color:#a8ffef;font-size:.9rem}
+.key-bad{background:rgba(255,107,157,.15);border-left:4px solid #ff6b9d;
+ border-radius:10px;padding:10px 16px;margin:8px 0;color:#ffc4d8;font-size:.9rem}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ==================== Auth Gate ====================
+# ============================================================
+# ==================== Auth Gate =============================
+# ============================================================
 if not st.session_state.auth:
     st.markdown("<div class='main-title'>🔐 Private App</div>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
@@ -170,10 +219,13 @@ def audio_dur(p):
 
 
 def t2s(s):
-    ms = int(round((s - int(s)) * 1000)); tot = int(s)
+    ms = int(round((s - int(s)) * 1000))
+    tot = int(s)
     if ms >= 1000:
-        tot += 1; ms = 0
-    h, r = divmod(tot, 3600); m, sec = divmod(r, 60)
+        tot += 1
+        ms = 0
+    h, r = divmod(tot, 3600)
+    m, sec = divmod(r, 60)
     return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
 
 
@@ -182,7 +234,7 @@ def s2t(ts):
     m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$', ts)
     if m:
         h, mi, se, ms = m.groups()
-        return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3, '0'))/1000
+        return int(h) * 3600 + int(mi) * 60 + int(se) + int(ms.ljust(3, '0')) / 1000
     return None
 
 
@@ -251,7 +303,8 @@ def split_for_sub(text, mc=30):
     for s in sents:
         s = s.replace("။။", "။")
         if len(s) <= mc:
-            parts.append(s); continue
+            parts.append(s)
+            continue
         cur = ""
         for w in s.split():
             if len(cur) + len(w) + 1 <= mc:
@@ -281,7 +334,9 @@ def scr_to_srt_timed(pieces, total, path, mc=30):
             for p in parts:
                 dd = (len(p) / tot) * d * k
                 f.write(f"{idx}\n{t2s(cur)} --> {t2s(cur + dd)}\n{p}\n\n")
-                cur += dd; idx += 1; wrote = True
+                cur += dd
+                idx += 1
+                wrote = True
     return path if wrote else None
 
 
@@ -303,7 +358,7 @@ def parse_srt(path):
         if a is None or b is None:
             continue
         idx = ls.index(ts)
-        txt = " ".join(ls[idx+1:]).strip()
+        txt = " ".join(ls[idx + 1:]).strip()
         if txt:
             segs.append({"start": a, "end": b, "text": txt})
     return segs
@@ -348,7 +403,7 @@ def split_scr(t, mc=TTS_CHUNK):
                 out.append(cur)
             if len(s) > mc:
                 for i in range(0, len(s), mc):
-                    out.append(s[i:i+mc])
+                    out.append(s[i:i + mc])
                 cur = ""
             else:
                 cur = s
@@ -413,7 +468,9 @@ def prepare_video_job(video_in, fw_model=None):
     return {"segments": segments, "vdur": kept / vfps}
 
 
-# ==================== Final Render ====================
+# ============================================================
+# ==================== Final Render ==========================
+# ============================================================
 
 def final_render(video_in, audio_in, output_video, tempo,
                  srt_path=None, fp=FONT_FILE, fs=FS, pos_y=100,
@@ -427,10 +484,14 @@ def final_render(video_in, audio_in, output_video, tempo,
     fps = float(n) / float(d)
 
     if crop_ratio != 1.0:
-        cw = int(W0 * crop_ratio); ch = int(H0 * crop_ratio)
-        if cw % 2: cw -= 1
-        if ch % 2: ch -= 1
-        cx = (W0 - cw) // 2; cy = (H0 - ch) // 2
+        cw = int(W0 * crop_ratio)
+        ch = int(H0 * crop_ratio)
+        if cw % 2:
+            cw -= 1
+        if ch % 2:
+            ch -= 1
+        cx = (W0 - cw) // 2
+        cy = (H0 - ch) // 2
     else:
         cw, ch, cx, cy = W0, H0, 0, 0
     W, H = cw, ch
@@ -446,8 +507,10 @@ def final_render(video_in, audio_in, output_video, tempo,
             render_png(sg["text"], p, fp, W, H, fs, pos_y, bh, ba,
                        box_width_ratio=BOX_WIDTH_RATIO)
             rgba = cv2.imread(p, cv2.IMREAD_UNCHANGED)
-            try: os.remove(p)
-            except: pass
+            try:
+                os.remove(p)
+            except Exception:
+                pass
             if rgba is None:
                 return None
             rows = np.where(rgba[:, :, 3].any(axis=1))[0]
@@ -504,7 +567,7 @@ def final_render(video_in, audio_in, output_video, tempo,
                 "-map", "0:v", "-map", "1:a"]
     else:
         cmd += ["-an"]
-    cmd += ["-c:v", "libx264", "-crf", str(FINAL_CRF), "-preset", FINAL_PRESET,
+    cmd += ["-c:v", "libx264", "-crf", "20", "-preset", "ultrafast",
             "-pix_fmt", "yuv420p", "-threads", "0"]
     if audio_in:
         cmd += ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest"]
@@ -521,7 +584,8 @@ def final_render(video_in, audio_in, output_video, tempo,
     def qput(q, item):
         while not stop.is_set():
             try:
-                q.put(item, timeout=0.5); return True
+                q.put(item, timeout=0.5)
+                return True
             except queue.Full:
                 pass
         return False
@@ -536,7 +600,8 @@ def final_render(video_in, audio_in, output_video, tempo,
 
     def reader():
         cap = cv2.VideoCapture(video_in)
-        i = 0; p = 0
+        i = 0
+        p = 0
         try:
             while not stop.is_set():
                 if not cap.grab():
@@ -554,7 +619,8 @@ def final_render(video_in, audio_in, output_video, tempo,
                 if not qput(q_in, fr):
                     break
         except Exception as e:
-            err.append(e); stop.set()
+            err.append(e)
+            stop.set()
         finally:
             cap.release()
             qput(q_in, None)
@@ -567,13 +633,16 @@ def final_render(video_in, audio_in, output_video, tempo,
                     break
                 proc.stdin.write(bts)
         except Exception as e:
-            err.append(e); stop.set()
+            err.append(e)
+            stop.set()
 
     th_r = threading.Thread(target=reader, daemon=True)
     th_w = threading.Thread(target=writer, daemon=True)
-    th_r.start(); th_w.start()
+    th_r.start()
+    th_w.start()
 
-    j = 0; k = 0
+    j = 0
+    k = 0
     try:
         while True:
             fr = qget(q_in)
@@ -600,15 +669,18 @@ def final_render(video_in, audio_in, output_video, tempo,
                 break
             j += 1
     except Exception as e:
-        err.append(e); stop.set()
+        err.append(e)
+        stop.set()
     finally:
         if not stop.is_set():
             qput(q_out, None)
         th_w.join()
         stop.set()
         th_r.join()
-        try: proc.stdin.close()
-        except: pass
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
         proc.wait()
 
     if err:
@@ -618,7 +690,9 @@ def final_render(video_in, audio_in, output_video, tempo,
     return output_video
 
 
-# ==================== Preview ====================
+# ============================================================
+# ==================== Preview ===============================
+# ============================================================
 
 def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     d = ImageDraw.Draw(img, "RGBA")
@@ -645,7 +719,7 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
 
 
 # ============================================================
-# ================ Gemini Script Generator ===================
+# ==================== Gemini Script =========================
 # ============================================================
 
 GEMINI_SYSTEM_PROMPT = """You are an expert Burmese (Myanmar) recap script writer for TikTok/YouTube Shorts recap videos.
@@ -672,18 +746,18 @@ OUTPUT FORMAT:
 
 
 def _gemini_client():
-    if not GEMINI_API_KEY:
-        raise Exception("GEMINI_API_KEY မရှိပါ — .env ဖိုင် စစ်ပါ")
+    key = st.session_state.get("gemini_key", "").strip() or GEMINI_API_KEY
+    if not key:
+        raise Exception("Gemini API Key မထည့်ရသေးပါ — 🔑 API Key Settings မှာ ထည့်ပါ")
     try:
         import google.generativeai as genai
     except ImportError:
-        raise Exception("google-generativeai မသွင်းထားပါ — pip install google-generativeai")
-    genai.configure(api_key=GEMINI_API_KEY)
+        raise Exception("pip install google-generativeai")
+    genai.configure(api_key=key)
     return genai
 
 
 def transcribe_english(video_path):
-    """Whisper (small.en) နဲ့ English transcript ထုတ်"""
     wav = "english_audio.wav"
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path,
@@ -694,7 +768,8 @@ def transcribe_english(video_path):
     try:
         from faster_whisper import WhisperModel
         model = WhisperModel(WHISPER_MODEL_EN, device="cpu",
-                             compute_type="int8", cpu_threads=os.cpu_count() or 4)
+                             compute_type="int8",
+                             cpu_threads=os.cpu_count() or 4)
         segments, _ = model.transcribe(
             wav, language="en", vad_filter=True,
             beam_size=1, condition_on_previous_text=False, temperature=0
@@ -708,12 +783,10 @@ def transcribe_english(video_path):
                                   beam_size=1, temperature=0)
         lines = [s["text"].strip() for s in result["segments"] if s["text"].strip()]
 
-    text = " ".join(lines)
-    return text.strip()
+    return " ".join(lines).strip()
 
 
 def split_transcript(text, chunk_chars=4000):
-    """Gemini input limit အတွက် ခွဲ"""
     if len(text) <= chunk_chars:
         return [text]
     sentences = re.split(r'(?<=[.!?])\s+', text)
@@ -731,9 +804,7 @@ def split_transcript(text, chunk_chars=4000):
 
 
 def gemini_write_script(english_text, progress_cb=None):
-    """Gemini နဲ့ မြန်မာ recap script ရေး (long transcript ကို chunk ခွဲပြီး ဆက်)"""
     genai = _gemini_client()
-
     chunks = split_transcript(english_text, chunk_chars=4000)
     n = len(chunks)
     full_script = []
@@ -776,7 +847,7 @@ PART 1:
             elif i == n - 1:
                 prev_tail = full_script[-1][-400:] if full_script else ""
                 prompt = f"""This is the FINAL PART ({i+1}/{n}) of the transcript.
-Continue naturally from the previous Burmese text. Do NOT repeat what was already said.
+Continue naturally from the previous Burmese text.
 
 PREVIOUS BURMESE (end of last part):
 {prev_tail}
@@ -809,7 +880,9 @@ Write the Burmese recap for this part only. No summary."""
     return combined
 
 
-# ==================== TTS Functions ====================
+# ============================================================
+# ==================== TTS Functions =========================
+# ============================================================
 
 def tts_demo(chunks, ref, space, cb=None):
     cl = Client(space)
@@ -972,7 +1045,9 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
     return out, pieces
 
 
-# ==================== Whisper / VAD ====================
+# ============================================================
+# ==================== Whisper / VAD =========================
+# ============================================================
 
 @st.cache_resource(show_spinner=False)
 def get_fw_model():
@@ -1032,6 +1107,57 @@ def whisper_fast(video_path, model=None):
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-sub'>Video → Whisper → Gemini Script → TTS → Recap</div>",
             unsafe_allow_html=True)
+
+# ==================== 🔑 API Key Settings ====================
+with st.expander("🔑 API Key Settings", expanded=(not st.session_state.gemini_key)):
+    st.caption("Gemini API key ကို **တစ်ခါပဲ** ထည့်ရမယ် — စက်ထဲ save ဖြစ်သွားမယ်")
+
+    key_input = st.text_input(
+        "Gemini API Key",
+        value=st.session_state.get("gemini_key", ""),
+        type="password",
+        placeholder="AIza...",
+        key="key_input_widget",
+    )
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        st.caption("🔗 [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — အခမဲ့ ရနိုင်")
+    with c2:
+        if st.button("💾 Save Key", use_container_width=True):
+            if key_input.strip():
+                st.session_state.gemini_key = key_input.strip()
+                cfg = load_saved_config()
+                cfg["gemini_api_key"] = key_input.strip()
+                if save_config(cfg):
+                    st.success("✅ Key သိမ်းပြီး — နောက်ဖွင့်ရင် auto ပါမယ်")
+                    time.sleep(0.8)
+                    st.rerun()
+            else:
+                st.warning("Key ထည့်ပါ")
+    with c3:
+        if st.button("🗑️ Clear Key", use_container_width=True):
+            st.session_state.gemini_key = ""
+            cfg = load_saved_config()
+            cfg.pop("gemini_api_key", None)
+            save_config(cfg)
+            st.success("✅ ဖျက်ပြီး")
+            time.sleep(0.8)
+            st.rerun()
+
+    if st.session_state.gemini_key:
+        k = st.session_state.gemini_key
+        masked = k[:6] + "..." + k[-4:] if len(k) > 12 else "***"
+        st.markdown(
+            f"<div class='key-ok'>✅ Key ထည့်ပြီး: <code>{masked}</code></div>",
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            "<div class='key-bad'>⚠️ Key မထည့်ရသေးပါ — AI script feature သုံးလို့ မရဘူး</div>",
+            unsafe_allow_html=True
+        )
+
 st.divider()
 
 # ==================== Step 1 — Video ====================
@@ -1046,27 +1172,21 @@ if vid:
     st.success(f"✅ {vid.name} — {vid.size/(1024*1024):.1f} MB")
 st.divider()
 
-# ==================== Step 2 — Script (AI or Manual) ====================
+# ==================== Step 2 — Script ====================
 st.subheader("📝 Step 2 — Script")
-st.markdown(
-    f"<span class='ai-badge'>✨ GEMINI AI</span> "
-    f"<span style='color:#8888aa;font-size:.85rem'>"
-    f"English transcript → မြန်မာ recap script auto ရေးပေးမယ်</span>",
-    unsafe_allow_html=True
-)
 
 tab_ai, tab_manual = st.tabs(["🤖 AI Auto-Write", "✍️ Manual / Paste"])
 
 with tab_ai:
-    if not GEMINI_API_KEY:
-        st.error("⚠️ `.env` မှာ `GEMINI_API_KEY` မထည့်ရသေးပါ")
-        st.code("GEMINI_API_KEY=your_key_here", language="bash")
+    if not st.session_state.get("gemini_key", "").strip():
+        st.error("⚠️ **🔑 API Key Settings** (အပေါ်မှာ) မှာ Gemini key ထည့်ပါ")
+        st.info("💡 Key ကို တစ်ခါထည့်ရင် စက်ထဲ save ဖြစ်သွားလို့ နောက်ပိုင်း auto ပါမယ်")
     elif vid is None:
         st.info("📹 Step 1 မှာ Video upload လုပ်ပါ")
     else:
         c1, c2 = st.columns([2, 1])
         with c1:
-            st.caption("1️⃣ Whisper နဲ့ English transcript ထုတ် → 2️⃣ Gemini က မြန်မာ script ရေး")
+            st.caption("1️⃣ Whisper → English transcript · 2️⃣ Gemini → မြန်မာ script")
         with c2:
             gen_btn = st.button("🚀 Generate Script", type="primary",
                                 use_container_width=True)
@@ -1076,7 +1196,6 @@ with tab_ai:
             with open("input.mp4", "wb") as f:
                 f.write(vid.read())
 
-            # --- Step A: English transcript ---
             with st.spinner("🎧 Whisper နဲ့ English transcript ထုတ်နေသည်..."):
                 try:
                     eng = transcribe_english("input.mp4")
@@ -1095,7 +1214,6 @@ with tab_ai:
             with st.expander("📄 English Transcript (raw)", expanded=False):
                 st.text_area("eng", eng, height=200, label_visibility="collapsed")
 
-            # --- Step B: Gemini script ---
             n_chunks = len(split_transcript(eng, 4000))
             pb = st.progress(0)
             txt = st.empty()
@@ -1199,7 +1317,7 @@ with c3:
             st.success("✅ Save ပြီး")
 st.divider()
 
-# ==================== Step 3 — Voice Settings ====================
+# ==================== Step 3 — Voice ====================
 st.subheader("🎙️ Step 3 — Voice")
 use_voxcpm = st.toggle("VoxCPM2 သုံးမလား? (Fail ရင် Edge TTS Auto)", value=False)
 
@@ -1299,11 +1417,9 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     with open("input.mp4", "wb") as f:
         f.write(vid.read())
 
-    # Whisper/VAD + TTS တပြိုင်နက်
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     job = job_pool.submit(prepare_video_job, "input.mp4", None)
 
-    # ---- TTS ----
     t0 = time.time()
     pb = st.progress(0)
     txt = st.empty()
@@ -1323,7 +1439,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
         st.stop()
     step_times["🎙️ TTS"] = time.time() - t0
 
-    # ---- Cut ----
     t0 = time.time()
     try:
         info = job.result()
@@ -1341,7 +1456,6 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     eff = adur / tempo
     step_times["✂️ Cut"] = time.time() - t0
 
-    # ---- Render ----
     t0 = time.time()
     with st.spinner("🎬 Finalizing..."):
         try:
