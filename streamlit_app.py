@@ -1,11 +1,40 @@
 # ============================================================
-# 🎬 Myanmar TTS Recap — All-in-One Streamlit App
-# Video → Whisper → Gemini Script → TTS → Recap
-# UI Key Storage · One-Time Setup
+# 🎬 Myanmar TTS Recap — One-Click Version
+# Video Upload → 🚀 Recap → Auto Script + TTS + Render + Download
 # ============================================================
 
+import subprocess, sys, importlib
+
+# ============================================================
+# ============ Auto-install missing packages =================
+# ============================================================
+def _ensure_pkg(import_name, pip_name):
+    try:
+        importlib.import_module(import_name)
+    except ImportError:
+        print(f"📦 Installing {pip_name}...")
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "-q", pip_name]
+            )
+            print(f"✅ {pip_name} installed")
+        except Exception as e:
+            print(f"❌ {pip_name} install failed: {e}")
+
+_ensure_pkg("google.generativeai", "google-generativeai")
+_ensure_pkg("edge_tts", "edge-tts")
+_ensure_pkg("faster_whisper", "faster-whisper")
+_ensure_pkg("gradio_client", "gradio_client")
+_ensure_pkg("cv2", "opencv-python-headless")
+_ensure_pkg("PIL", "Pillow")
+_ensure_pkg("ffmpeg", "ffmpeg-python")
+_ensure_pkg("numpy", "numpy")
+
+# ============================================================
+# ============ Main Imports ==================================
+# ============================================================
 import streamlit as st
-import os, re, hashlib, ffmpeg, shutil, subprocess, asyncio, time
+import os, re, hashlib, ffmpeg, shutil, asyncio, time
 import tempfile, threading, queue, math, json
 import concurrent.futures
 import numpy as np
@@ -51,22 +80,14 @@ def save_config(data):
 
 _SAVED = load_saved_config()
 
-
 # ============================================================
 # ==================== Config ================================
 # ============================================================
 os.environ["HF_HOME"] = os.path.join(tempfile.gettempdir(), "hf_cache")
 
-# Priority: .env > saved config
 GEMINI_API_KEY = (
     os.environ.get("GEMINI_API_KEY", "").strip()
     or _SAVED.get("gemini_api_key", "").strip()
-)
-
-PASSWORD = (
-    os.environ.get("APP_PASSWORD", "")
-    or _SAVED.get("app_password", "")
-    or "voxcpm2026"
 )
 
 SPACES = [
@@ -112,7 +133,6 @@ st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="cen
 # ============================================================
 def _init_state():
     defaults = {
-        "auth": False,
         "script": "",
         "last_paste": "",
         "paste_big": "",
@@ -120,8 +140,9 @@ def _init_state():
         "ref": None,
         "video_up_key": 0,
         "english_transcript": "",
-        "gemini_busy": False,
         "gemini_key": GEMINI_API_KEY,
+        "final_video": None,   # rendered output path
+        "last_run": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -138,8 +159,10 @@ def _on_download_clear():
     st.session_state.pkey = None
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
     st.session_state.english_transcript = ""
+    st.session_state.final_video = None
     for f in ("preview.mp4", "prev.png", "prev_out.png",
-              "english_transcript.txt", "gemini_script.txt"):
+              "english_transcript.txt", "gemini_script.txt",
+              "final.mp4", "video_only.mp4", "voice.mp3"):
         if os.path.exists(f):
             try:
                 os.remove(f)
@@ -182,26 +205,14 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
  border-radius:10px;padding:10px 16px;margin:8px 0;color:#a8ffef;font-size:.9rem}
 .key-bad{background:rgba(255,107,157,.15);border-left:4px solid #ff6b9d;
  border-radius:10px;padding:10px 16px;margin:8px 0;color:#ffc4d8;font-size:.9rem}
+.big-recap-btn .stButton>button{
+ background:linear-gradient(135deg,#ff6b9d,#c66bff,#6ba8ff)!important;
+ font-size:1.3rem!important;padding:22px!important;font-weight:900!important;
+ letter-spacing:1px!important;
+ box-shadow:0 8px 30px rgba(198,107,255,.6)!important;
+}
 </style>
 """, unsafe_allow_html=True)
-
-
-# ============================================================
-# ==================== Auth Gate =============================
-# ============================================================
-if not st.session_state.auth:
-    st.markdown("<div class='main-title'>🔐 Private App</div>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1, 2, 1])
-    with c2:
-        pwd = st.text_input("Password", type="password",
-                            label_visibility="collapsed", placeholder="Password")
-        if st.button("Login", use_container_width=True):
-            if pwd == PASSWORD:
-                st.session_state.auth = True
-                st.rerun()
-            else:
-                st.error("Password မှား")
-    st.stop()
 
 
 # ============================================================
@@ -1003,7 +1014,6 @@ def edge_tts_run(chunks, out_path, cb=None, workers=TTS_WORKERS):
 
 def tts_free(chunks, out, cb=None):
     out, pieces = edge_tts_run(chunks, out, cb=cb)
-    st.success("✅ Edge TTS — 👨 သီဟ (Thiha)")
     return out, pieces
 
 
@@ -1016,20 +1026,16 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
     files = None
     for s in SPACES:
         try:
-            st.info(f"🎙️ VoxCPM2 — {s['space']} — စမ်းနေသည်...")
             if s["type"] == "demo":
                 files = tts_demo(chunks, ref, s["space"], cb)
             else:
                 files = tts_burmese(chunks, ref, s["space"], cb)
-            st.success("✅ VoxCPM2 — အောင်မြင်")
             break
-        except Exception as e:
-            st.warning(f"⚠️ VoxCPM2 — Fail: {str(e)[:80]}")
+        except Exception:
             files = None
             continue
 
     if files is None:
-        st.warning("⚠️ VoxCPM2 — Busy/Fail — Edge TTS သီဟ Auto")
         return tts_free(chunks, out, cb=cb)
 
     pieces = [(chunks[i], audio_dur(f)) for i, f in enumerate(files)]
@@ -1101,11 +1107,11 @@ def whisper_fast(video_path, model=None):
 
 
 # ============================================================
-# ==================== UI ====================================
+# ==================== UI — One-Click Recap ==================
 # ============================================================
 
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-sub'>Video → Whisper → Gemini Script → TTS → Recap</div>",
+st.markdown("<div class='main-sub'>Video တင်လိုက် → 🚀 Recap နှိပ်လိုက် → ပြီး</div>",
             unsafe_allow_html=True)
 
 # ==================== 🔑 API Key Settings ====================
@@ -1122,7 +1128,7 @@ with st.expander("🔑 API Key Settings", expanded=(not st.session_state.gemini_
 
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
-        st.caption("🔗 [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — အခမဲ့ ရနိုင်")
+        st.caption("🔗 [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — အခမဲ့")
     with c2:
         if st.button("💾 Save Key", use_container_width=True):
             if key_input.strip():
@@ -1130,7 +1136,7 @@ with st.expander("🔑 API Key Settings", expanded=(not st.session_state.gemini_
                 cfg = load_saved_config()
                 cfg["gemini_api_key"] = key_input.strip()
                 if save_config(cfg):
-                    st.success("✅ Key သိမ်းပြီး — နောက်ဖွင့်ရင် auto ပါမယ်")
+                    st.success("✅ Key သိမ်းပြီး")
                     time.sleep(0.8)
                     st.rerun()
             else:
@@ -1149,19 +1155,19 @@ with st.expander("🔑 API Key Settings", expanded=(not st.session_state.gemini_
         k = st.session_state.gemini_key
         masked = k[:6] + "..." + k[-4:] if len(k) > 12 else "***"
         st.markdown(
-            f"<div class='key-ok'>✅ Key ထည့်ပြီး: <code>{masked}</code></div>",
+            f"<div class='key-ok'>✅ Key: <code>{masked}</code></div>",
             unsafe_allow_html=True
         )
     else:
         st.markdown(
-            "<div class='key-bad'>⚠️ Key မထည့်ရသေးပါ — AI script feature သုံးလို့ မရဘူး</div>",
+            "<div class='key-bad'>⚠️ Key မထည့်ရသေးပါ</div>",
             unsafe_allow_html=True
         )
 
 st.divider()
 
-# ==================== Step 1 — Video ====================
-st.subheader("📁 Step 1 — Video")
+# ==================== 📁 Video Upload ====================
+st.subheader("📁 Video")
 vid = st.file_uploader(
     "📹",
     type=["mp4", "mov", "avi", "mkv"],
@@ -1170,276 +1176,171 @@ vid = st.file_uploader(
 )
 if vid:
     st.success(f"✅ {vid.name} — {vid.size/(1024*1024):.1f} MB")
-st.divider()
 
-# ==================== Step 2 — Script ====================
-st.subheader("📝 Step 2 — Script")
+# ==================== ⚙️ Options (collapsed by default) ====================
+with st.expander("⚙️ Options (default အတိုင်း ထားလို့ရ)", expanded=False):
+    use_voxcpm = st.toggle("VoxCPM2 သုံးမလား? (Fail ရင် Edge TTS Auto)", value=False)
 
-tab_ai, tab_manual = st.tabs(["🤖 AI Auto-Write", "✍️ Manual / Paste"])
-
-with tab_ai:
-    if not st.session_state.get("gemini_key", "").strip():
-        st.error("⚠️ **🔑 API Key Settings** (အပေါ်မှာ) မှာ Gemini key ထည့်ပါ")
-        st.info("💡 Key ကို တစ်ခါထည့်ရင် စက်ထဲ save ဖြစ်သွားလို့ နောက်ပိုင်း auto ပါမယ်")
-    elif vid is None:
-        st.info("📹 Step 1 မှာ Video upload လုပ်ပါ")
-    else:
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            st.caption("1️⃣ Whisper → English transcript · 2️⃣ Gemini → မြန်မာ script")
-        with c2:
-            gen_btn = st.button("🚀 Generate Script", type="primary",
-                                use_container_width=True)
-
-        if gen_btn:
-            vid.seek(0)
-            with open("input.mp4", "wb") as f:
-                f.write(vid.read())
-
-            with st.spinner("🎧 Whisper နဲ့ English transcript ထုတ်နေသည်..."):
-                try:
-                    eng = transcribe_english("input.mp4")
-                except Exception as e:
-                    st.error(f"Whisper fail: {e}")
-                    st.stop()
-
-            if not eng.strip():
-                st.error("English transcript မရပါ — English ဗီဒီယို ဖြစ်ရပါမယ်")
-                st.stop()
-
-            st.session_state.english_transcript = eng
-            with open("english_transcript.txt", "w", encoding="utf-8") as f:
-                f.write(eng)
-
-            with st.expander("📄 English Transcript (raw)", expanded=False):
-                st.text_area("eng", eng, height=200, label_visibility="collapsed")
-
-            n_chunks = len(split_transcript(eng, 4000))
-            pb = st.progress(0)
-            txt = st.empty()
-
-            def gp(i, n, msg):
-                pb.progress(min(1.0, (i + 1) / max(1, n)))
-                txt.caption(f"🤖 {msg}")
-
-            with st.spinner("🤖 Gemini က မြန်မာ script ရေးနေသည်..."):
-                try:
-                    mm_script = gemini_write_script(eng, progress_cb=gp)
-                except Exception as e:
-                    st.error(f"Gemini fail: {e}")
-                    st.stop()
-
-            if not mm_script.strip():
-                st.error("Gemini က script မထုတ်ပေးပါ")
-                st.stop()
-
-            st.session_state.script = mm_script
-            with open("gemini_script.txt", "w", encoding="utf-8") as f:
-                f.write(mm_script)
-            st.success(f"✅ မြန်မာ script ရပြီ — {len(mm_script):,} လုံး")
-            st.rerun()
-
-        if st.session_state.english_transcript:
-            with st.expander("📄 English Transcript (saved)", expanded=False):
-                st.text_area("eng2", st.session_state.english_transcript,
-                             height=200, label_visibility="collapsed")
-
-with tab_manual:
-    st.markdown("""
-    <div style="text-align:center;margin:8px 0 4px">
-      <span style="font-size:1.05rem;font-weight:700;
-        background:linear-gradient(90deg,#FF6B9D,#C66BFF,#6BA8FF);
-        -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-        background-clip:text">📋 Paste Box</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    pasted_now = st.text_area(
-        "paste",
-        value="",
-        height=80,
-        key="paste_big",
-        label_visibility="collapsed",
-        placeholder="📋 Long-press → Paste  (သို့)  Ctrl+V",
-    )
-
-    st.markdown("""
-    <style>
-    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea {
-      background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
-      border:2px dashed rgba(198,107,255,.55)!important;
-      border-radius:18px!important;
-      color:#fff!important;font-size:1.05rem!important;
-      padding:22px!important;text-align:center!important;
-    }
-    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea:focus {
-      border-color:#C66BFF!important;border-style:solid!important;
-      box-shadow:0 0 24px rgba(198,107,255,.5)!important;
-    }
-    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeholder {
-      color:#b48cff!important;font-weight:600!important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    if pasted_now and pasted_now.strip():
-        clean = pasted_now.strip()
-        if clean != st.session_state.get("last_paste", ""):
-            st.session_state.last_paste = clean
-            lines = [l.strip().strip('"\u201c\u201d').strip()
-                     for l in clean.splitlines()]
-            result = "\n\n".join(l for l in lines if l)
-            st.session_state.script = result
-            st.session_state.paste_big = ""
-            st.success(f"✅ Script ထဲ Auto ရောက်သွားပြီ — {len(result)} လုံး")
-            st.rerun()
-
-# ---- Script Editor (shared) ----
-st.markdown("##### 📝 Script Editor")
-script = st.text_area("Script", value=st.session_state.script, height=200,
-                      label_visibility="collapsed",
-                      placeholder="မြန်မာ Script...")
-st.session_state.script = script
-
-c1, c2, c3 = st.columns([2, 1, 1])
-with c1:
-    st.caption(f"📝 {len(script):,} လုံး")
-with c2:
-    if st.button("🗑️ Clear", use_container_width=True):
-        st.session_state.script = ""
-        st.session_state.last_paste = ""
-        st.rerun()
-with c3:
-    if st.button("💾 Save", use_container_width=True):
-        if script.strip():
-            with open("gemini_script.txt", "w", encoding="utf-8") as f:
-                f.write(script)
-            st.success("✅ Save ပြီး")
-st.divider()
-
-# ==================== Step 3 — Voice ====================
-st.subheader("🎙️ Step 3 — Voice")
-use_voxcpm = st.toggle("VoxCPM2 သုံးမလား? (Fail ရင် Edge TTS Auto)", value=False)
-
-if use_voxcpm:
-    ref = st.file_uploader("🎤 Ref Audio (VoxCPM2)", type=["wav", "mp3", "m4a"],
-                           key="ref_up")
-    if ref:
-        with open("ref.wav", "wb") as f:
-            f.write(ref.read())
-        st.session_state.ref = "ref.wav"
-        st.success("✅ Ref Audio")
-    else:
-        if os.path.exists("ref.wav"):
+    ref_file = None
+    if use_voxcpm:
+        ref_file = st.file_uploader("🎤 Ref Audio (VoxCPM2)",
+                                    type=["wav", "mp3", "m4a"], key="ref_up")
+        if ref_file:
+            with open("ref.wav", "wb") as f:
+                f.write(ref_file.read())
             st.session_state.ref = "ref.wav"
-            st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိနေတယ်)")
+            st.success("✅ Ref Audio")
+        elif os.path.exists("ref.wav"):
+            st.session_state.ref = "ref.wav"
+            st.caption("📎 Ref Audio (အရင် ထည့်ထားတာ ဆက်ရှိ)")
         else:
             st.session_state.ref = None
-else:
-    st.info("⚡ Edge TTS သီဟ (Thiha) — Default")
-    st.session_state.ref = None
-st.divider()
+    else:
+        st.session_state.ref = None
 
-# ==================== Step 4 — Subtitle ====================
-st.subheader("📝 Step 4 — Subtitle")
-use_sub = st.toggle("Burn-in", value=True)
-pos_y = 100
-if use_sub:
-    pos_y = st.slider("📍 Position", 0, 100, 100, 1)
-st.divider()
+    use_sub = st.toggle("Subtitle Burn-in", value=True)
+    pos_y = st.slider("📍 Subtitle Position", 0, 100, 100, 1) if use_sub else 100
 
-use_neon = True
-neon_animated = True
-neon_thickness = 15
-neon_speed = 0.4
-
-# ==================== Step 5 — Preview ====================
+# ==================== 🖼️ Preview (optional) ====================
 if vid:
-    st.subheader("🖼️ Step 5 — Preview")
-    with st.spinner("Preview..."):
-        pkey = (vid.name, vid.size)
-        if st.session_state.get("pkey") != pkey or not os.path.exists("preview.mp4"):
-            vid.seek(0)
-            with open("preview.mp4", "wb") as f:
-                f.write(vid.read())
-            st.session_state.pkey = pkey
-        W, H, _ = vid_info("preview.mp4")
+    with st.expander("🖼️ Preview", expanded=False):
+        try:
+            pkey = (vid.name, vid.size)
+            if st.session_state.get("pkey") != pkey or not os.path.exists("preview.mp4"):
+                vid.seek(0)
+                with open("preview.mp4", "wb") as f:
+                    f.write(vid.read())
+                st.session_state.pkey = pkey
 
-        sample_text = "စာတန်းထိုး Preview"
-        if st.session_state.script.strip():
-            first = split_for_sub(st.session_state.script, 40)
-            if first:
-                sample_text = first[0]
+            W, H, _ = vid_info("preview.mp4")
+            sample_text = "စာတန်းထိုး Preview"
+            if st.session_state.script.strip():
+                first = split_for_sub(st.session_state.script, 40)
+                if first:
+                    sample_text = first[0]
 
-        render_png(sample_text, "prev.png", FONT_FILE, W, H,
-                   FS, pos_y, BH, BA, box_width_ratio=BOX_WIDTH_RATIO)
+            render_png(sample_text, "prev.png", FONT_FILE, W, H,
+                       FS, pos_y, BH, BA, box_width_ratio=BOX_WIDTH_RATIO)
 
-        cap = cv2.VideoCapture("preview.mp4")
-        ok, fr = cap.read()
-        cap.release()
+            cap = cv2.VideoCapture("preview.mp4")
+            ok, fr = cap.read()
+            cap.release()
+            if ok:
+                bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+                fg = Image.open("prev.png").convert("RGBA")
+                comp = Image.alpha_composite(bg, fg)
+                comp = draw_tiktok_border_preview(comp, thickness=15, animated_phase=0.5)
+                pw = 720
+                comp.resize((pw, int(H * (pw / W))), Image.LANCZOS
+                            ).convert("RGB").save("prev_out.png")
+                st.image("prev_out.png", use_container_width=True)
+        except Exception as e:
+            st.warning(f"Preview error: {e}")
 
-        if ok:
-            bg = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-            fg = Image.open("prev.png").convert("RGBA")
-            comp = Image.alpha_composite(bg, fg)
-
-            if use_neon:
-                phase = 0.5 if neon_animated else 0.0
-                comp = draw_tiktok_border_preview(comp, thickness=neon_thickness,
-                                                  animated_phase=phase)
-
-            pw = 720
-            comp.resize((pw, int(H * (pw / W))), Image.LANCZOS
-                        ).convert("RGB").save("prev_out.png")
-            st.image("prev_out.png", use_container_width=True)
 st.divider()
 
-# ==================== Step 6 — Generate ====================
-st.subheader("🚀 Step 6 — Generate Recap")
+# ==================== 🚀 ONE-CLICK RECAP BUTTON ====================
+st.markdown('<div class="big-recap-btn">', unsafe_allow_html=True)
+recap_clicked = st.button("🚀 RECAP — Auto Script + Render", 
+                          type="primary", use_container_width=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
-if st.button("✨ Generate Recap Video", type="primary", use_container_width=True):
-    if not script.strip():
-        st.error("Script မရှိပါ — Step 2 မှာ ရေးပါ")
+st.caption("💡 Video တင်ပြီး ဒီခလုတ်တစ်ခုပဲ နှိပ်ပါ — Script + TTS + Render အကုန် auto")
+
+# ==================== Main Process ====================
+if recap_clicked:
+    # ---- Checks ----
+    if not st.session_state.get("gemini_key", "").strip():
+        st.error("⚠️ 🔑 API Key Settings မှာ Gemini key ထည့်ပါ")
         st.stop()
     if vid is None:
-        st.error("Video Upload လုပ်ပါ")
+        st.error("📹 Video upload လုပ်ပါ")
         st.stop()
 
     total_start = time.time()
     step_times = {}
 
-    script_n = normalize_script(script)
-    if not script_n.strip():
-        st.error("Script မှာ စာမပါပါ")
-        st.stop()
-
     vid.seek(0)
     with open("input.mp4", "wb") as f:
         f.write(vid.read())
 
+    # ==================== STEP 1: Whisper English ====================
+    t0 = time.time()
+    with st.status("🎧 Step 1/4 — Whisper English transcript...", expanded=True) as s:
+        st.write("Whisper small.en နဲ့ စာသားထုတ်နေသည်...")
+        try:
+            eng = transcribe_english("input.mp4")
+        except Exception as e:
+            st.error(f"Whisper fail: {e}")
+            st.stop()
+        if not eng.strip():
+            st.error("English transcript မရပါ")
+            st.stop()
+        st.session_state.english_transcript = eng
+        st.write(f"✅ {len(eng)} chars")
+        s.update(label=f"✅ Step 1/4 — Transcript ({len(eng)} chars)",
+                 state="complete")
+    step_times["🎧 Whisper"] = time.time() - t0
+
+    # ==================== STEP 2: Gemini Script ====================
+    t0 = time.time()
+    with st.status("🤖 Step 2/4 — Gemini မြန်မာ script...", expanded=True) as s:
+        pb = st.progress(0)
+        txt = st.empty()
+
+        def gp(i, n, msg):
+            pb.progress(min(1.0, (i + 1) / max(1, n)))
+            txt.caption(f"🤖 {msg}")
+
+        try:
+            mm_script = gemini_write_script(eng, progress_cb=gp)
+        except Exception as e:
+            st.error(f"Gemini fail: {e}")
+            st.stop()
+
+        if not mm_script.strip():
+            st.error("Gemini script မထုတ်ပေးပါ")
+            st.stop()
+
+        st.session_state.script = mm_script
+        with open("gemini_script.txt", "w", encoding="utf-8") as f:
+            f.write(mm_script)
+        st.write(f"✅ {len(mm_script)} chars")
+        s.update(label=f"✅ Step 2/4 — Script ({len(mm_script)} chars)",
+                 state="complete")
+    step_times["🤖 Gemini"] = time.time() - t0
+
+    script_n = normalize_script(mm_script)
+    if not script_n.strip():
+        st.error("Script မှာ စာမပါပါ")
+        st.stop()
+
+    # ==================== STEP 3: TTS + Cut (parallel) ====================
+    t0 = time.time()
     job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     job = job_pool.submit(prepare_video_job, "input.mp4", None)
 
-    t0 = time.time()
-    pb = st.progress(0)
-    txt = st.empty()
+    with st.status("🎙️ Step 3/4 — Voice ထုတ်နေသည်...", expanded=True) as s:
+        pb2 = st.progress(0)
+        txt2 = st.empty()
 
-    def cb(i, tot, c):
-        pb.progress(min(1.0, (i + 1) / max(1, tot)))
-        txt.caption(f"[{i+1}/{tot}] {c[:50]}")
+        def cb(i, tot, c):
+            pb2.progress(min(1.0, (i + 1) / max(1, tot)))
+            txt2.caption(f"[{i+1}/{tot}] {c[:50]}")
 
-    try:
-        _, pieces = tts_all(
-            script_n, "voice.mp3",
-            ref=st.session_state.get("ref"),
-            cb=cb, use_voxcpm=use_voxcpm
-        )
-    except Exception as e:
-        st.error(f"TTS: {e}")
-        st.stop()
-    step_times["🎙️ TTS"] = time.time() - t0
+        try:
+            _, pieces = tts_all(
+                script_n, "voice.mp3",
+                ref=st.session_state.get("ref"),
+                cb=cb, use_voxcpm=use_voxcpm
+            )
+        except Exception as e:
+            st.error(f"TTS: {e}")
+            st.stop()
 
-    t0 = time.time()
+        st.write("✅ Voice ready")
+        s.update(label="✅ Step 3/4 — Voice", state="complete")
+
     try:
         info = job.result()
     except Exception as e:
@@ -1454,28 +1355,33 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
     adur = audio_dur("voice.mp3")
     tempo = max(0.5, min(2.0, adur / vdur))
     eff = adur / tempo
-    step_times["✂️ Cut"] = time.time() - t0
+    step_times["🎙️ TTS"] = time.time() - t0
 
+    # ==================== STEP 4: Render ====================
     t0 = time.time()
-    with st.spinner("🎬 Finalizing..."):
+    with st.status("🎬 Step 4/4 — Final render...", expanded=True) as s:
+        st.write("Video render လုပ်နေသည်...")
         try:
             sp = scr_to_srt_timed(pieces, eff, "sub.srt") if use_sub else None
             final_render(
                 "input.mp4", None, "video_only.mp4", 1.0,
                 srt_path=sp, fp=FONT_FILE, fs=FS, pos_y=pos_y,
-                bh=BH, ba=BA, use_neon=use_neon,
-                thickness=neon_thickness, speed=neon_speed,
+                bh=BH, ba=BA, use_neon=True,
+                thickness=15, speed=0.4,
                 segments=segments
             )
             mux_audio("video_only.mp4", "voice.mp3", "final.mp4", tempo)
         except Exception as e:
-            st.warning(f"⚠️ Fail: {e}")
+            st.warning(f"⚠️ Fallback: {e}")
             simple_merge("input.mp4", "voice.mp3", "final.mp4",
                          tempo, segments)
+        st.write("✅ Render ပြီး")
+        s.update(label="✅ Step 4/4 — Render ပြီး", state="complete")
     step_times["🎬 Render"] = time.time() - t0
 
     total_elapsed = time.time() - total_start
 
+    # ==================== OUTPUT ====================
     st.markdown(f"""
     <div class="timer-box">
         <div class="timer-title">⏱️ TOTAL TIME</div>
@@ -1489,12 +1395,20 @@ if st.button("✨ Generate Recap Video", type="primary", use_container_width=Tru
             unsafe_allow_html=True
         )
 
-    st.success(f"✅ Done — ⏱️ {total_elapsed:.1f}s")
+    st.success(f"✅ Recap ပြီးပါပြီ — ⏱️ {total_elapsed:.1f}s")
     st.video("final.mp4")
+
+    # Script preview
+    with st.expander("📝 ထွက်လာတဲ့ Script ကြည့် / ပြင်", expanded=False):
+        edited = st.text_area("script_edit", st.session_state.script,
+                              height=200, label_visibility="collapsed")
+        if edited != st.session_state.script:
+            st.session_state.script = edited
+            st.caption("💡 ပြင်ပြီးရင် 🚀 Recap ပြန်နှိပ်ပါ")
 
     with open("final.mp4", "rb") as f:
         st.download_button(
-            "📥 Download",
+            "📥 Download Recap Video",
             f,
             file_name="recap.mp4",
             on_click=_on_download_clear,
