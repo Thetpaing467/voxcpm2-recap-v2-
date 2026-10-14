@@ -29,7 +29,7 @@ SPACES = [
 ]
 
 PASSWORD = os.environ.get("APP_PASSWORD", "voxcpm2026")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_API_KEY = os.environ.get("AIzaSyDeR0cU2EkKCVIlA_Ee5JKEOOvVVfmHNL0", "").strip()
 
 FONT_FILE = "MyanmarPadaung.ttf"
 
