@@ -1,9 +1,7 @@
-streamlit
-ffmpeg-python
-opencv-python-headless
-numpy
-Pillow
-edge-tts
-deep-translator
-gradio_client
-faster-whisper
+streamlit>=1.30
+ffmpeg-python>=0.2.0
+numpy>=1.24,<2.0
+opencv-python-headless>=4.8
+Pillow>=10.0
+edge-tts>=7.0.0
+gradio_client>=1.0.0
