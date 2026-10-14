@@ -1,38 +1,27 @@
 # ============================================================
-# 🎬 Myanmar TTS Recap
-# Whisper (English) → Google Translate (မြန်မာ) → Edge TTS
+# 🎬 Myanmar TTS Recap — Manual Only
+# Script Paste → VoxCPM2 / Edge TTS သီဟ → Recap
 # ============================================================
 
 import warnings
 warnings.filterwarnings("ignore")
 
 import streamlit as st
-
-# set_page_config must be the first Streamlit call
-st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
-
-import os, re, hashlib, shutil, subprocess, asyncio, time
+import os, re, hashlib, ffmpeg, shutil, subprocess, asyncio, time
 import concurrent.futures
-
-try:
-    import ffmpeg
-    import cv2
-    import edge_tts
-    import numpy as np
-    from PIL import Image, ImageDraw, ImageFont
-    from gradio_client import Client, handle_file
-except ImportError as e:
-    st.error(f"⚠️ Module မရှိပါ: {e}\n\nrequirements.txt ကို စစ်ပါ")
-    st.stop()
+import numpy as np
+import edge_tts
+from PIL import Image, ImageDraw, ImageFont
+import cv2
+from gradio_client import Client, handle_file
 
 # ============================================================
-# Memory Optimization
+# Memory / Env
 # ============================================================
 os.environ["HF_HOME"] = "/tmp/hf_cache"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # ============================================================
 # Config
@@ -47,7 +36,6 @@ FONT_FILE = "MyanmarPadaung.ttf"
 # Font fallback
 if not os.path.exists(FONT_FILE):
     for fb in [
-        "/usr/share/fonts/truetype/noto/NotoSansMyanmar-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
@@ -57,11 +45,8 @@ if not os.path.exists(FONT_FILE):
             break
 
 FS, BH, BA = 30, 100, 200
-ENC_PRESET = "fast"
-ENC_CRF = 18
 FINAL_PRESET = "ultrafast"
 FINAL_CRF = 22
-USE_FAST_VAD = True
 AUDIO_BITRATE = "96k"
 TTS_CHUNK = 200
 EDGE_CHUNK = 200
@@ -69,18 +54,6 @@ TTS_WORKERS = 2
 PNG_WORKERS = 2
 
 CANVAS_URL = "https://gemini.google.com/share/a96d9ba3e76e"
-
-# ============================================================
-# Whisper — tiny for Streamlit Cloud (RAM 1GB)
-# ============================================================
-WHISPER_MODEL = "tiny"
-WHISPER_LANG = None  # tiny model က Burmese မလုပ်နိုင်
-
-# Task options
-WHISPER_TASKS = {
-    "🇨🇳 → 🇬🇧  Chinese → English (Translate)": "translate",
-    "🇬🇧 → 🇬🇧  English → English (Transcribe)": "transcribe",
-}
 
 BOX_WIDTH_RATIO = 1.0
 PADDING_Y = 15
@@ -92,16 +65,17 @@ EDGE_VOICES = {
 }
 EDGE_VOICE_FIXED = "male"
 
+st.set_page_config(page_title="Myanmar TTS Recap", page_icon="🎬", layout="centered")
 
+
+# ============================================================
+# Clear helper
+# ============================================================
 def _on_download_clear():
     st.session_state.script = ""
     st.session_state.last_paste = ""
     st.session_state.pkey = None
     st.session_state.video_up_key = st.session_state.get("video_up_key", 0) + 1
-    st.session_state.auto_script = ""
-    st.session_state.english_script = ""
-    st.session_state.detected_lang = None
-    st.session_state.auto_ver = st.session_state.get("auto_ver", 0) + 1
     for f in ["input.mp4", "preview.mp4", "voice.mp3",
               "video_only.mp4", "final.mp4", "sub.srt"]:
         try:
@@ -109,16 +83,6 @@ def _on_download_clear():
                 os.remove(f)
         except Exception:
             pass
-
-
-def _on_paste():
-    clean = st.session_state.get("paste_big", "").strip()
-    if clean:
-        lines = [l.strip().strip('"\u201c\u201d').strip()
-                 for l in clean.splitlines()]
-        st.session_state.script = "\n\n".join(l for l in lines if l)
-        st.session_state.last_paste = clean
-        st.session_state.paste_big = ""
 
 
 # ============================================================
@@ -154,19 +118,28 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 .step-timer b{color:#6ba8ff;font-size:1.05rem}
 .mode-badge{display:inline-block;padding:6px 14px;border-radius:20px;
  font-size:.85rem;font-weight:700;margin-right:6px}
-.mode-auto{background:linear-gradient(135deg,#00c9a7,#00b4d8);color:#fff}
 .mode-manual{background:linear-gradient(135deg,#ff6b9d,#c66bff);color:#fff}
-.mode-info{background:rgba(255,255,255,.05);border-radius:10px;
- padding:12px 18px;margin:8px 0;font-size:.9rem;color:#c8c8e0}
-.task-info{background:rgba(0,180,216,.12);border-left:4px solid #00b4d8;
- border-radius:10px;padding:10px 16px;margin:8px 0;color:#a8e8ff;font-size:.85rem}
-.translate-info{background:rgba(255,193,7,.12);border-left:4px solid #ffc107;
- border-radius:10px;padding:10px 16px;margin:8px 0;color:#ffe9a8;font-size:.9rem}
+.canvas-box{background:linear-gradient(135deg,rgba(102,126,234,.15),rgba(118,75,162,.15));
+ border:2px solid rgba(198,107,255,.4);border-radius:14px;padding:18px;margin:12px 0}
 .big-recap-btn .stButton>button{
  background:linear-gradient(135deg,#ff6b9d,#c66bff,#6ba8ff)!important;
  font-size:1.25rem!important;padding:20px!important;font-weight:900!important;
  letter-spacing:1px!important;
  box-shadow:0 8px 30px rgba(198,107,255,.6)!important;
+}
+div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea {
+  background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
+  border:2px dashed rgba(198,107,255,.55)!important;
+  border-radius:18px!important;
+  color:#fff!important;font-size:1.05rem!important;
+  padding:22px!important;text-align:center!important;
+}
+div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea:focus {
+  border-color:#C66BFF!important;border-style:solid!important;
+  box-shadow:0 0 24px rgba(198,107,255,.5)!important;
+}
+div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeholder {
+  color:#b48cff!important;font-weight:600!important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -177,16 +150,10 @@ hr{border-color:rgba(255,255,255,.08);margin:24px 0}
 # ============================================================
 for k, v in {
     "script": "",
-    "english_script": "",
     "video_up_key": 0,
     "last_paste": "",
     "pkey": None,
     "ref": None,
-    "mode": "auto",
-    "auto_script": "",
-    "auto_ver": 0,
-    "detected_lang": None,
-    "translate_done": False,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -221,7 +188,7 @@ def s2t(ts):
     m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$', ts)
     if m:
         h, mi, se, ms = m.groups()
-        return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3, '0'))/1000
+        return int(h)*3600 + int(mi)*60 + int(se) + int(ms.ljust(3,'0'))/1000
     return None
 
 
@@ -414,7 +381,7 @@ def simple_merge(video_in, audio_in, output_video, tempo, segments=None):
            "-c:v", "libx264", "-crf", "23", "-preset", "ultrafast",
            "-pix_fmt", "yuv420p", "-threads", "1",
            "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-shortest",
-           "-threads", "1", output_video]
+           output_video]
     r = subprocess.run(cmd, capture_output=True, text=True,
                        encoding="utf-8", errors="ignore")
     if r.returncode != 0:
@@ -435,10 +402,8 @@ def final_render(video_in, audio_in, output_video, tempo,
     if crop_ratio != 1.0:
         cw = int(W0 * crop_ratio)
         ch = int(H0 * crop_ratio)
-        if cw % 2:
-            cw -= 1
-        if ch % 2:
-            ch -= 1
+        if cw % 2: cw -= 1
+        if ch % 2: ch -= 1
         cx = (W0 - cw) // 2
         cy = (H0 - ch) // 2
     else:
@@ -654,16 +619,6 @@ def mux_audio(video_in, audio_in, output_video, tempo):
     return output_video
 
 
-def prepare_video_job(video_in, fw_model):
-    segments = whisper_fast(video_in, fw_model)
-    if not segments:
-        raise Exception("Speech မတွေ့")
-    kept, vfps = keep_count(video_in, segments)
-    if kept == 0:
-        raise Exception("Speech မတွေ့")
-    return {"segments": segments, "vdur": kept / vfps}
-
-
 # ============================================================
 # Preview
 # ============================================================
@@ -690,48 +645,6 @@ def draw_tiktok_border_preview(img, thickness=30, animated_phase=0.0):
     d.rectangle([offset, offset, W - 1 - offset, H - 1 - offset],
                 outline=(254, 44, 85, 255), width=inner_c)
     return img
-
-
-# ============================================================
-# 🌐 Google Translate (free, no API key)
-# ============================================================
-def translate_to_burmese(text):
-    """English → မြန်မာ (Google Translate free, deep-translator)"""
-    if not text.strip():
-        return ""
-
-    try:
-        from deep_translator import GoogleTranslator
-    except ImportError:
-        st.error("⚠️ pip install deep-translator")
-        return text
-
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    sentences = [s.strip() for s in sentences if s.strip()]
-
-    chunks = []
-    cur = ""
-    for s in sentences:
-        if len(cur) + len(s) + 1 <= 4500:
-            cur = (cur + " " + s).strip()
-        else:
-            if cur:
-                chunks.append(cur)
-            cur = s
-    if cur:
-        chunks.append(cur)
-
-    translator = GoogleTranslator(source="en", target="my")
-    out = []
-    for i, c in enumerate(chunks):
-        try:
-            res = translator.translate(c)
-            out.append(res if res else c)
-        except Exception as e:
-            st.warning(f"⚠️ Translate chunk {i+1} fail: {e}")
-            out.append(c)
-
-    return " ".join(out)
 
 
 # ============================================================
@@ -909,311 +822,88 @@ def tts_all(text, out, ref=None, cb=None, use_voxcpm=True):
 
 
 # ============================================================
-# Whisper
-# ============================================================
-@st.cache_resource(show_spinner=False)
-def get_fw_model():
-    from faster_whisper import WhisperModel
-    return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
-                        cpu_threads=1)
-
-
-def whisper_fast(video_path, model=None):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", "whisper_audio.wav"
-    ], capture_output=True, check=True)
-
-    if USE_FAST_VAD:
-        try:
-            from faster_whisper.audio import decode_audio
-            from faster_whisper.vad import get_speech_timestamps, VadOptions
-            audio = decode_audio("whisper_audio.wav", sampling_rate=16000)
-            ts = get_speech_timestamps(
-                audio,
-                VadOptions(min_silence_duration_ms=700, speech_pad_ms=200))
-            segs_vad = [(t["start"] / 16000.0, t["end"] / 16000.0) for t in ts]
-            if segs_vad:
-                return segs_vad
-        except Exception:
-            pass
-
-    speech_segments = []
-    try:
-        model = model or get_fw_model()
-        segments, _ = model.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
-            vad_filter=False, beam_size=1,
-            condition_on_previous_text=False, temperature=0
-        )
-        for seg in segments:
-            speech_segments.append((seg.start, seg.end))
-    except Exception:
-        import whisper
-        model = whisper.load_model(WHISPER_MODEL)
-        result = model.transcribe(
-            "whisper_audio.wav", language=WHISPER_LANG,
-            condition_on_previous_text=False, beam_size=1, temperature=0
-        )
-        for seg in result["segments"]:
-            speech_segments.append((seg["start"], seg["end"]))
-    return speech_segments
-
-
-def whisper_transcribe_english(video_path, task="translate", lang=None):
-    """
-    Whisper → English text
-    - task="translate"  → အသံ အားလုံး → English
-    - task="transcribe" → မူရင်းဘာသာ (English → English)
-    """
-    wav = "whisper_script.wav"
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-ar", "16000", "-ac", "1",
-        "-c:a", "pcm_s16le", wav
-    ], capture_output=True, check=True)
-
-    detected_lang = "?"
-    text = ""
-
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(WHISPER_MODEL, device="cpu",
-                             compute_type="int8", cpu_threads=1)
-        kwargs = {
-            "vad_filter": True,
-            "beam_size": 1,
-            "condition_on_previous_text": False,
-            "temperature": 0,
-            "task": task,
-        }
-        if lang:
-            kwargs["language"] = lang
-
-        segments, info = model.transcribe(wav, **kwargs)
-        detected_lang = info.language
-        lines = [seg.text.strip() for seg in segments if seg.text.strip()]
-        text = " ".join(lines)
-    except Exception:
-        import whisper
-        m = whisper.load_model(WHISPER_MODEL)
-        kwargs = {
-            "condition_on_previous_text": False,
-            "beam_size": 1,
-            "temperature": 0,
-            "task": task,
-        }
-        if lang:
-            kwargs["language"] = lang
-        result = m.transcribe(wav, **kwargs)
-        detected_lang = result.get("language", "?")
-        lines = [s["text"].strip() for s in result["segments"] if s["text"].strip()]
-        text = " ".join(lines)
-
-    st.session_state.detected_lang = detected_lang
-    return text.strip(), detected_lang
-
-
-# ============================================================
 # UI
 # ============================================================
 st.markdown("<div class='main-title'>🎬 Myanmar TTS Recap</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-sub'>Script Paste → VoxCPM2 / Edge TTS သီဟ → Recap</div>",
+            unsafe_allow_html=True)
+
 st.markdown(
-    "<div class='main-sub'>Whisper (English) → Google Translate (မြန်မာ) → Edge TTS</div>",
+    "<span class='mode-badge mode-manual'>✍️ MANUAL MODE</span>"
+    "<span style='color:#8888aa;font-size:.85rem'>"
+    "Script ကိုယ်တိုင် paste</span>",
     unsafe_allow_html=True
 )
 st.divider()
 
 # ============================================================
-# Mode Selector
+# Canvas Link
 # ============================================================
-st.markdown("### 🎯 Mode ရွေးပါ")
+with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
+    st.markdown(f"""
+    <div class='canvas-box'>
+        <div style='font-weight:700;font-size:1.05rem;margin-bottom:8px'>
+            🌐 Google Gemini Canvas
+        </div>
+        <div style='color:#c8c8e0;font-size:.9rem;line-height:1.5'>
+            Canvas ဖွင့် → Transcript Copy → အောက်က Box ထဲ Paste လုပ်ပါ
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL,
+                   use_container_width=True)
 
-c1, c2 = st.columns(2)
+
+# ============================================================
+# Paste Box
+# ============================================================
+st.markdown("#### 📋 Script Paste")
+
+pasted_now = st.text_area(
+    "paste",
+    value="",
+    height=100,
+    key="paste_big",
+    label_visibility="collapsed",
+    placeholder="📋  မြန်မာ Script ကို ဒီနေရာ Long-press → Paste  (သို့)  Ctrl+V",
+)
+
+if pasted_now and pasted_now.strip():
+    clean = pasted_now.strip()
+    if clean != st.session_state.get("last_paste", ""):
+        st.session_state.last_paste = clean
+        lines = [l.strip().strip('"\u201c\u201d').strip()
+                 for l in clean.splitlines()]
+        result = "\n\n".join(l for l in lines if l)
+        st.session_state.script = result
+        st.session_state.paste_big = ""
+        st.success(f"✅ Script ရောက်သွားပြီ — {len(result)} လုံး")
+        st.rerun()
+
+# ============================================================
+# Script Editor
+# ============================================================
+st.markdown("#### 📝 Script Editor")
+script_manual = st.text_area("Script", value=st.session_state.script,
+                             height=180, label_visibility="collapsed",
+                             placeholder="မြန်မာ Script paste...",
+                             key="script_editor_main")
+st.session_state.script = script_manual
+
+c1, c2 = st.columns([3, 1])
 with c1:
-    if st.button("🤖 Auto (Whisper + Translate)",
-                 use_container_width=True,
-                 type="primary" if st.session_state.mode == "auto" else "secondary"):
-        st.session_state.mode = "auto"
-        st.rerun()
+    st.caption(f"📝 {len(script_manual):,} လုံး")
 with c2:
-    if st.button("✍️ Manual (Paste)",
-                 use_container_width=True,
-                 type="primary" if st.session_state.mode == "manual" else "secondary"):
-        st.session_state.mode = "manual"
+    if st.button("🗑️ Clear", use_container_width=True):
+        st.session_state.script = ""
+        st.session_state.last_paste = ""
         st.rerun()
-
-if st.session_state.mode == "auto":
-    st.markdown(
-        "<span class='mode-badge mode-auto'>🤖 AUTO MODE</span>"
-        "<span style='color:#8888aa;font-size:.85rem'>"
-        "Whisper → English → Google Translate → မြန်မာ</span>",
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        "<div class='mode-info'>💡 <b>Whisper</b> က English ထုတ် → "
-        "<b>Google Translate</b> က မြန်မာ ပြန် — <b>API key မလိုဘူး</b></div>",
-        unsafe_allow_html=True
-    )
-else:
-    st.markdown(
-        "<span class='mode-badge mode-manual'>✍️ MANUAL MODE</span>"
-        "<span style='color:#8888aa;font-size:.85rem'>"
-        "Script ကိုယ်တိုင် paste</span>",
-        unsafe_allow_html=True
-    )
 
 st.divider()
 
 
 # ============================================================
-# AUTO MODE — Whisper Options
-# ============================================================
-whisper_task = "translate"
-whisper_lang = None
-
-if st.session_state.mode == "auto":
-    st.markdown("### 🎙️ Whisper Options")
-
-    task_label = st.radio(
-        "Task ရွေးပါ",
-        list(WHISPER_TASKS.keys()),
-        index=0,
-        key="whisper_task_radio",
-    )
-    whisper_task = WHISPER_TASKS[task_label]
-
-    if whisper_task == "translate":
-        st.markdown(
-            "<div class='task-info'>🌐 <b>Translate mode</b> — "
-            "Whisper က ဘာသာစကား အားလုံးကို <b>English</b> ကို ပြန်ပေးမယ်<br>"
-            "(Chinese / Japanese / Korean → English)<br>"
-            "ပြီးရင် <b>Google Translate</b> က English → မြန်မာ</div>",
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown(
-            "<div class='task-info'>📝 <b>Transcribe mode</b> — "
-            "Whisper က English အတိုင်း ထုတ်ပေးမယ်<br>"
-            "ပြီးရင် <b>Google Translate</b> က English → မြန်မာ</div>",
-            unsafe_allow_html=True
-        )
-
-    if whisper_task == "transcribe":
-        lang_label = st.selectbox(
-            "Source Language (optional)",
-            ["🌐 Auto Detect", "🇬🇧 English"],
-            index=0,
-            key="whisper_lang_select",
-        )
-        LANG_MAP = {
-            "🌐 Auto Detect": None,
-            "🇬🇧 English": "en",
-        }
-        whisper_lang = LANG_MAP.get(lang_label, None)
-
-    st.markdown(
-        "<div class='translate-info'>🌐 Translation: "
-        "<b>Google Translate (free, no key)</b> — English → မြန်မာ</div>",
-        unsafe_allow_html=True
-    )
-
-    st.caption(f"🤖 Whisper Model: `{WHISPER_MODEL}` — RAM optimized")
-    st.divider()
-
-
-# ============================================================
-# MANUAL MODE — Paste Box
-# ============================================================
-if st.session_state.mode == "manual":
-    with st.expander("📄 Transcript ထုတ်ယူမယ် (Gemini Canvas)", expanded=False):
-        st.link_button("↗️ Canvas ကို Tab အသစ်မှာ ဖွင့်", CANVAS_URL,
-                       use_container_width=True)
-        st.caption("Canvas ဖွင့် → Transcript Copy → အောက်က box ထဲ Paste လုပ်ပါ")
-
-    st.markdown("""
-    <div style="text-align:center;margin:8px 0 4px">
-      <span style="font-size:1.1rem;font-weight:700;
-        background:linear-gradient(90deg,#FF6B9D,#C66BFF,#6BA8FF);
-        -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-        background-clip:text">
-        📋  Paste Box
-      </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.text_area(
-        "paste",
-        value="",
-        height=80,
-        key="paste_big",
-        on_change=_on_paste,
-        label_visibility="collapsed",
-        placeholder="📋  မြန်မာ Script ကို ဒီနေရာ Long-press → Paste",
-    )
-
-    st.markdown("""
-    <style>
-    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea {
-      background:linear-gradient(135deg,rgba(255,107,157,.12),rgba(198,107,255,.12))!important;
-      border:2px dashed rgba(198,107,255,.55)!important;
-      border-radius:18px!important;
-      color:#fff!important;font-size:1.05rem!important;
-      padding:22px!important;text-align:center!important;
-    }
-    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea:focus {
-      border-color:#C66BFF!important;border-style:solid!important;
-      box-shadow:0 0 24px rgba(198,107,255,.5)!important;
-    }
-    div[data-testid="stTextArea"]:has(textarea[aria-label="paste"]) textarea::placeholder {
-      color:#b48cff!important;font-weight:600!important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    script_manual = st.text_area("Script", value=st.session_state.script,
-                                 height=180, label_visibility="collapsed",
-                                 placeholder="မြန်မာ Script paste...")
-    st.session_state.script = script_manual
-
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        st.caption(f"📝 {len(script_manual):,}")
-    with c2:
-        if st.button("🗑️ Clear", use_container_width=True):
-            st.session_state.script = ""
-            st.session_state.last_paste = ""
-            st.rerun()
-
-    st.divider()
-
-
-# AUTO MODE — Show English + Burmese script
-if st.session_state.mode == "auto":
-    if st.session_state.english_script:
-        with st.expander("🇬🇧 English Script (Whisper output)",
-                         expanded=False):
-            st.text_area("eng_view", st.session_state.english_script,
-                         height=180, label_visibility="collapsed",
-                         key=f"eng_viewer_{st.session_state.auto_ver}")
-
-    if st.session_state.auto_script:
-        st.success(f"✅ မြန်မာ Script: {len(st.session_state.auto_script):,} လုံး")
-        with st.expander("📝 မြန်မာ Script (edit လို့ရ)", expanded=False):
-            edited = st.text_area("auto_script_edit",
-                                  st.session_state.auto_script,
-                                  height=200,
-                                  label_visibility="collapsed",
-                                  key=f"auto_script_editor_{st.session_state.auto_ver}")
-            if edited != st.session_state.auto_script:
-                st.session_state.auto_script = edited
-                st.session_state.script = edited
-        st.session_state.script = st.session_state.auto_script
-
-
-# ============================================================
-# Video
+# Video Upload
 # ============================================================
 st.subheader("📁 Video")
 vid = st.file_uploader(
@@ -1259,7 +949,14 @@ if vid:
 
             W, H, _ = vid_info("preview.mp4")
 
-            render_png("စာတန်းထိုး Preview", "prev.png", FONT_FILE,
+            # Preview text
+            preview_text = "စာတန်းထိုး Preview"
+            if st.session_state.script.strip():
+                parts = split_for_sub(st.session_state.script, 40)
+                if parts:
+                    preview_text = parts[0]
+
+            render_png(preview_text, "prev.png", FONT_FILE,
                        W, H, FS, pos_y, BH, BA,
                        box_width_ratio=BOX_WIDTH_RATIO)
 
@@ -1288,7 +985,7 @@ st.divider()
 
 
 # ============================================================
-# Voice
+# Voice Settings
 # ============================================================
 st.subheader("🎙️ Voice")
 use_voxcpm = st.toggle("🎙️ VoxCPM2 သုံးမလား? (မလိုရင် Edge TTS)",
@@ -1316,7 +1013,7 @@ st.divider()
 
 
 # ============================================================
-# Generate
+# Generate Button
 # ============================================================
 st.markdown('<div class="big-recap-btn">', unsafe_allow_html=True)
 generate_clicked = st.button("🚀 GENERATE RECAP",
@@ -1334,10 +1031,9 @@ if generate_clicked:
         st.error("📹 Video upload လုပ်ပါ")
         st.stop()
 
-    if st.session_state.mode == "manual":
-        if not st.session_state.script.strip():
-            st.error("✍️ Script paste လုပ်ပါ")
-            st.stop()
+    if not st.session_state.script.strip():
+        st.error("✍️ Script paste လုပ်ပါ")
+        st.stop()
 
     total_start = time.time()
     step_times = {}
@@ -1346,79 +1042,31 @@ if generate_clicked:
     with open("input.mp4", "wb") as f:
         f.write(vid.read())
 
-    # ==================== AUTO MODE ====================
-    if st.session_state.mode == "auto":
-        # ---- Step 1: Whisper → English ----
-        t0 = time.time()
-        task_name = "Translate" if whisper_task == "translate" else "Transcribe"
-        with st.status(f"🎧 Step 1/4 — Whisper {task_name} → English...",
-                       expanded=True) as s:
-            st.write(f"Model: `{WHISPER_MODEL}` · Task: `{whisper_task}`")
-            try:
-                english_text, detected = whisper_transcribe_english(
-                    "input.mp4",
-                    task=whisper_task,
-                    lang=whisper_lang
-                )
-            except Exception as e:
-                st.error(f"Whisper fail: {e}")
-                st.stop()
-
-            if not english_text.strip():
-                st.error("Whisper transcript မရပါ")
-                st.stop()
-
-            st.session_state.english_script = english_text
-            st.session_state.detected_lang = detected
-
-            st.write(f"✅ {len(english_text):,} chars — detected: `{detected}`")
-            s.update(label=f"✅ Step 1/4 — English ({len(english_text):,} chars) [{detected}]",
-                     state="complete")
-        step_times["🎧 Whisper"] = time.time() - t0
-
-        # ---- Step 2: Google Translate → မြန်မာ ----
-        t0 = time.time()
-        with st.status("🌐 Step 2/4 — Google Translate (English → မြန်မာ)...",
-                       expanded=True) as s:
-            st.write("Google Translate (free, no API key) နဲ့ ဘာသာပြန်နေသည်...")
-            try:
-                burmese_text = translate_to_burmese(english_text)
-            except Exception as e:
-                st.error(f"Translate fail: {e}")
-                st.stop()
-
-            if not burmese_text.strip():
-                st.error("Translate မရပါ")
-                st.stop()
-
-            st.session_state.auto_script = burmese_text
-            st.session_state.script = burmese_text
-            st.session_state.auto_ver += 1
-
-            st.write(f"✅ {len(burmese_text):,} chars — မြန်မာ")
-            s.update(label=f"✅ Step 2/4 — မြန်မာ ({len(burmese_text):,} chars)",
-                     state="complete")
-        step_times["🌐 Translate"] = time.time() - t0
-
-    else:
-        with st.status("✍️ Manual — Script ready",
-                       expanded=False) as s:
-            st.write(f"✅ Script: {len(st.session_state.script):,} chars")
-            s.update(label="✅ Script ready", state="complete")
-
     # Normalize
     script_n = normalize_script(st.session_state.script)
     if not script_n.strip():
         st.error("Script မှာ စာမပါပါ")
         st.stop()
 
-    # ==================== STEP 3: TTS + Cut ====================
+    # ============ STEP 1: Video Cut (Whisper VAD မလိုတော့ → skip) ============
+    # Full video ကို သုံး — segments မလိုဘူး
     t0 = time.time()
-    job_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    job = job_pool.submit(prepare_video_job, "input.mp4", None)
+    with st.status("🎬 Step 1/3 — Video analysis...", expanded=True) as s:
+        st.write("Video duration စစ်နေသည်...")
+        try:
+            _, _, vdur = vid_info("input.mp4")
+            segments = None  # full video
+            st.write(f"✅ Video: {vdur:.1f}s — full video သုံးမယ်")
+            s.update(label=f"✅ Step 1/3 — Video ({vdur:.1f}s)",
+                     state="complete")
+        except Exception as e:
+            st.error(f"Video fail: {e}")
+            st.stop()
+    step_times["🎬 Video"] = time.time() - t0
 
-    step_n = "3/4" if st.session_state.mode == "auto" else "2/3"
-    with st.status(f"🎙️ Step {step_n} — Voice ထုတ်နေသည်...",
+    # ============ STEP 2: TTS ============
+    t0 = time.time()
+    with st.status("🎙️ Step 2/3 — Voice ထုတ်နေသည်...",
                    expanded=True) as s:
         pb = st.progress(0)
         txt = st.empty()
@@ -1436,29 +1084,16 @@ if generate_clicked:
             st.stop()
 
         st.write("✅ Voice ready")
-        s.update(label=f"✅ Step {step_n} — Voice", state="complete")
-
-    try:
-        info = job.result()
-    except Exception as e:
-        st.error(f"❌ Cut: {e}")
-        st.stop()
-    finally:
-        job_pool.shutdown(wait=False)
-
-    segments = info["segments"]
-    vdur = info["vdur"]
+        s.update(label="✅ Step 2/3 — Voice", state="complete")
 
     adur = audio_dur("voice.mp3")
     tempo = max(0.5, min(2.0, adur / vdur))
     eff = adur / tempo
     step_times["🎙️ TTS"] = time.time() - t0
 
-    # ==================== STEP 4: Render ====================
+    # ============ STEP 3: Render ============
     t0 = time.time()
-    step_n = "4/4" if st.session_state.mode == "auto" else "3/3"
-    with st.status(f"🎬 Step {step_n} — Final render...",
-                   expanded=True) as s:
+    with st.status("🎬 Step 3/3 — Final render...", expanded=True) as s:
         st.write("Video render လုပ်နေသည်...")
         try:
             sp = scr_to_srt_timed(pieces, eff, "sub.srt") if use_sub else None
@@ -1473,7 +1108,7 @@ if generate_clicked:
             simple_merge("input.mp4", "voice.mp3", "final.mp4",
                          tempo, segments)
         st.write("✅ Render ပြီး")
-        s.update(label=f"✅ Step {step_n} — Render ပြီး", state="complete")
+        s.update(label="✅ Step 3/3 — Render ပြီး", state="complete")
     step_times["🎬 Render"] = time.time() - t0
 
     total_elapsed = time.time() - total_start
